@@ -1,0 +1,7 @@
+services:
+  relay:
+    # Keep Buzz off the LAN and expose it only through the WireGuard link to
+    # the public VPS. Docker Compose 2.24.4+ is required for !override.
+    ports: !override
+      - "10.77.77.2:3000:3000"
+      - "10.77.77.2:8080:8080"

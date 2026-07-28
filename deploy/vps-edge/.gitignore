@@ -1,0 +1,8 @@
+# Runtime configuration and private key material
+.env
+*.key
+*.pem
+*.crt
+*.p12
+secrets/
+letsencrypt/

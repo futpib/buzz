@@ -1,0 +1,5 @@
+# Generated or copied WireGuard material
+*.key
+*.pem
+*.local
+secrets/

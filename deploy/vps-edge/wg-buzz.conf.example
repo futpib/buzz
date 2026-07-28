@@ -1,0 +1,9 @@
+[Interface]
+Address = 10.77.77.1/24
+ListenPort = 51820
+PrivateKey = CHANGE_ME_VPS_WIREGUARD_PRIVATE_KEY
+
+[Peer]
+# Public key generated on the private Buzz host.
+PublicKey = CHANGE_ME_PRIVATE_HOST_WIREGUARD_PUBLIC_KEY
+AllowedIPs = 10.77.77.2/32
