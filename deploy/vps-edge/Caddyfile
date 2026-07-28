@@ -1,20 +1,10 @@
-{
-	auto_https off
-}
-
-http://{$VPS_PUBLIC_IP}:80 {
-	handle /.well-known/acme-challenge/* {
-		root * /var/www/certbot
-		file_server
+{$VPS_PUBLIC_IP} {
+	tls {
+		issuer acme {
+			profile shortlived
+			disable_tlsalpn_challenge
+		}
 	}
-
-	handle {
-		redir https://{host}{uri} permanent
-	}
-}
-
-https://{$VPS_PUBLIC_IP}:443 {
-	tls /etc/letsencrypt/live/{$VPS_PUBLIC_IP}/fullchain.pem /etc/letsencrypt/live/{$VPS_PUBLIC_IP}/privkey.pem
 	encode zstd gzip
 	reverse_proxy 10.77.77.2:3000
 }

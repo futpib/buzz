@@ -9,8 +9,6 @@ services:
       VPS_PUBLIC_IP: ${VPS_PUBLIC_IP:?set VPS_PUBLIC_IP in .env}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - letsencrypt:/etc/letsencrypt:ro
-      - certbot-www:/var/www/certbot:ro
       - caddy-data:/data
       - caddy-config:/config
     healthcheck:
@@ -23,35 +21,6 @@ services:
       timeout: 5s
       retries: 4
 
-  certbot:
-    image: certbot/certbot:v5.7.0
-    network_mode: host
-    restart: unless-stopped
-    depends_on:
-      caddy:
-        condition: service_started
-    # Sharing Caddy's PID namespace lets the deploy hook perform a graceful,
-    # zero-downtime certificate reload with SIGUSR1.
-    pid: service:caddy
-    entrypoint: ["/bin/sh", "-c"]
-    command:
-      - |
-        trap 'exit 0' TERM INT
-        while :; do
-          certbot renew --quiet --deploy-hook 'kill -USR1 1'
-          sleep 12h &
-          wait $!
-        done
-    volumes:
-      - letsencrypt:/etc/letsencrypt
-      - certbot-www:/var/www/certbot
-
 volumes:
-  letsencrypt:
-    external: true
-    name: buzz-edge-letsencrypt
-  certbot-www:
-    external: true
-    name: buzz-edge-certbot-www
   caddy-data:
   caddy-config:
