@@ -26,7 +26,7 @@ After configuring WireGuard on the VPS, finish all three steps with:
 
 ```bash
 ./deploy/private-host/finish-local-setup.sh \
-  <VPS_PUBLIC_IPV4> <VPS_WIREGUARD_PUBLIC_KEY>
+  <VPS_PUBLIC_IPV4> <VPS_WIREGUARD_PUBLIC_KEY> <VPS_WIREGUARD_PORT>
 ```
 
 Start and inspect Buzz with:

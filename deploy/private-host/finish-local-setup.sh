@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ $# -ne 2 ]]; then
-  echo "Usage: $0 <VPS_PUBLIC_IPV4> <VPS_WIREGUARD_PUBLIC_KEY>" >&2
+if [[ $# -ne 3 ]]; then
+  echo "Usage: $0 <VPS_PUBLIC_IPV4> <VPS_WIREGUARD_PUBLIC_KEY> <VPS_WIREGUARD_PORT>" >&2
   exit 2
 fi
 
 vps_ip=$1
 vps_public_key=$2
+vps_wireguard_port=$3
 
 IFS=. read -r octet1 octet2 octet3 octet4 extra <<<"${vps_ip}"
 if [[ -n ${extra:-} ]]; then
@@ -23,6 +24,11 @@ done
 
 if [[ $(printf '%s' "${vps_public_key}" | base64 -d 2>/dev/null | wc -c) -ne 32 ]]; then
   echo "Invalid WireGuard public key." >&2
+  exit 2
+fi
+
+if [[ ! ${vps_wireguard_port} =~ ^[1-9][0-9]{0,4}$ ]] || ((10#${vps_wireguard_port} > 65535)); then
+  echo "Invalid WireGuard UDP port: ${vps_wireguard_port}" >&2
   exit 2
 fi
 
@@ -48,18 +54,20 @@ sed -i \
   "${env_file}"
 chmod 600 "${env_file}"
 
-sed \
-  -e "s/CHANGE_ME_LOCAL_WIREGUARD_PRIVATE_KEY/${local_private_key}/" \
-  -e "s/CHANGE_ME_VPS_WIREGUARD_PUBLIC_KEY/${vps_public_key}/" \
-  -e "s/CHANGE_ME_VPS_PUBLIC_IP/${vps_ip}/" \
-  "${wg_template}" >"${staged_config}"
+wg_config="$(<"${wg_template}")"
+wg_config="${wg_config//CHANGE_ME_LOCAL_WIREGUARD_PRIVATE_KEY/${local_private_key}}"
+wg_config="${wg_config//CHANGE_ME_VPS_WIREGUARD_PUBLIC_KEY/${vps_public_key}}"
+wg_config="${wg_config//CHANGE_ME_VPS_PUBLIC_IP/${vps_ip}}"
+wg_config="${wg_config//CHANGE_ME_VPS_WIREGUARD_PORT/${vps_wireguard_port}}"
+printf '%s\n' "${wg_config}" >"${staged_config}"
+unset local_private_key wg_config
 
 sudo install -Dm600 "${staged_config}" /etc/wireguard/wg-buzz.conf
 sudo systemctl enable --now wg-quick@wg-buzz.service
 
 if ! ping -c 3 -W 2 10.77.77.1 >/dev/null; then
   echo "WireGuard started, but the VPS tunnel address did not answer ping." >&2
-  echo "Check UDP/51820 and 'sudo wg show wg-buzz' on both hosts." >&2
+  echo "Check UDP/${vps_wireguard_port} and 'sudo wg show wg-buzz' on both hosts." >&2
   exit 1
 fi
 
