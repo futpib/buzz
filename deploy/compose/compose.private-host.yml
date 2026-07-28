@@ -5,3 +5,9 @@ services:
     ports: !override
       - "10.77.77.2:3000:3000"
       - "10.77.77.2:8080:8080"
+
+  pairing-relay:
+    # Pairing is reachable only from the VPS across WireGuard. The VPS Caddy
+    # instance exposes this upstream publicly at the single /pair path.
+    ports:
+      - "10.77.77.2:5000:5000"

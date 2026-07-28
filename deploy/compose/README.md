@@ -27,6 +27,9 @@ keypair.
 
 - Requires Docker Compose v2.24.4 or newer; the TLS override uses Compose's
   `!reset` tag to remove the direct relay port when Caddy terminates HTTPS.
+- The included stateless pairing relay is exposed only at `/pair` by Caddy.
+  Set `BUZZ_PAIRING_RELAY_URL=wss://<public-host>/pair` so desktop and mobile
+  clients can pair when relay membership is required.
 - Default `BUZZ_IMAGE` tracks `ghcr.io/block/buzz:main` for early testing. Pin it to `ghcr.io/block/buzz:sha-<7>` or a semver release tag for production once available.
 - Keep `BUZZ_RELAY_PRIVATE_KEY`, `BUZZ_GIT_HOOK_HMAC_SECRET`, database/Redis,
   and S3 secrets stable across restarts.

@@ -1,7 +1,8 @@
 # Buzz VPS edge
 
 This Compose project terminates public IP-address TLS on the VPS and proxies
-Buzz over WireGuard to `10.77.77.2:3000`.
+Buzz over WireGuard to `10.77.77.2:3000`. Device-pairing WebSockets at
+`/pair` are routed to the stateless sidecar on `10.77.77.2:5000`.
 
 Prerequisites:
 

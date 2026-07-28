@@ -6,5 +6,12 @@
 		}
 	}
 	encode zstd gzip
-	reverse_proxy 10.77.77.2:3000
+
+	handle /pair {
+		reverse_proxy 10.77.77.2:5000
+	}
+
+	handle {
+		reverse_proxy 10.77.77.2:3000
+	}
 }

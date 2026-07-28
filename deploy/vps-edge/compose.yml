@@ -15,7 +15,7 @@ services:
       test:
         [
           "CMD-SHELL",
-          "wget -q -O /dev/null http://10.77.77.2:8080/_liveness",
+          "wget -q -O /dev/null http://10.77.77.2:8080/_liveness && nc -z -w 3 10.77.77.2 5000",
         ]
       interval: 15s
       timeout: 5s
