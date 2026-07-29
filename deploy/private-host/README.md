@@ -44,6 +44,11 @@ The ignored `deploy/compose/.env` sets
 override automatically without changing the behavior of a clean upstream
 checkout, so no extra `-f` arguments or wrapper scripts are needed.
 
+`BUZZ_DATA_DIR` in that file is an absolute, host-managed path for PostgreSQL,
+Redis, MinIO, and hosted Git data. This keeps the backend state visible and
+easy to include in host backups instead of hiding it under Docker's volume
+directory. The production host currently uses `~/buzz-data`.
+
 `compose.env.example` is the committed, secret-free template for that file.
 The live `.env`, WireGuard private key, bootstrap owner secret, certificates,
 and generated configs are all excluded from Git or stored outside the

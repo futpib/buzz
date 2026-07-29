@@ -5,9 +5,23 @@ services:
     ports: !override
       - "10.77.77.2:3000:3000"
       - "10.77.77.2:8080:8080"
+    volumes:
+      - "${BUZZ_DATA_DIR:?set BUZZ_DATA_DIR}/git:/data/git"
 
   pairing-relay:
     # Pairing is reachable only from the VPS across WireGuard. The VPS Caddy
     # instance exposes this upstream publicly at the single /pair path.
     ports:
       - "10.77.77.2:5000:5000"
+
+  postgres:
+    volumes:
+      - "${BUZZ_DATA_DIR:?set BUZZ_DATA_DIR}/postgres:/var/lib/postgresql/data"
+
+  redis:
+    volumes:
+      - "${BUZZ_DATA_DIR:?set BUZZ_DATA_DIR}/redis:/data"
+
+  minio:
+    volumes:
+      - "${BUZZ_DATA_DIR:?set BUZZ_DATA_DIR}/minio:/data"
