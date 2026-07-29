@@ -20,6 +20,13 @@ use crate::usage::{TurnUsage, UsageTracker};
 /// Lines exceeding this limit are rejected to prevent OOM from rogue agents.
 const MAX_LINE_SIZE: usize = 10_000_000; // 10 MB
 
+/// Give a cooperative ACP server time to observe stdin EOF, release external
+/// resources, and exit before Buzz falls back to terminating its process group.
+const GRACEFUL_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Bound process reaping even after forced termination so shutdown cannot hang.
+const FORCED_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// Env var that tells a goose ACP child not to start its cron scheduler.
 /// Injected unconditionally by [`AcpClient::spawn`]; see the call site for why.
 pub(crate) const GOOSE_SCHEDULER_DISABLED_ENV: &str = "GOOSE_ACP_SCHEDULER_DISABLED";
@@ -143,8 +150,9 @@ fn build_initialize_params() -> serde_json::Value {
 pub struct AcpClient {
     /// The agent child process (kept alive to prevent zombie).
     child: Child,
-    /// Write end of the agent's stdin pipe.
-    stdin: ChildStdin,
+    /// Write end of the agent's stdin pipe. Taken and dropped to deliver EOF
+    /// before a deliberate shutdown waits for the child.
+    stdin: Option<ChildStdin>,
     /// Framed reader over the agent's stdout pipe (line-oriented, bounded).
     /// Uses `LinesCodec::new_with_max_length` to enforce MAX_LINE_SIZE at the
     /// read level — prevents OOM from rogue agents writing infinite non-newline bytes.
@@ -372,33 +380,67 @@ fn build_client_capabilities() -> serde_json::Value {
 }
 
 impl AcpClient {
-    /// Kill the agent subprocess and wait for it to exit (no zombies).
+    /// Gracefully close the agent's stdin and wait for it to exit.
     ///
-    /// `Drop` only calls `start_kill()` (sends SIGKILL but doesn't reap).
-    /// Call this when you need guaranteed cleanup — e.g., in `run_models`
-    /// before process exit.
+    /// ACP servers use stdin EOF as their lifecycle boundary. Giving them a
+    /// bounded grace period lets adapters release external resources (such as
+    /// slopd-managed panes) before Buzz terminates the process group. A wedged
+    /// server is still forcibly killed and reaped after the grace period.
+    ///
+    /// `Drop` cannot await this handshake and remains a forced-kill fallback.
+    /// Call this method whenever an owned client is deliberately retired.
     pub async fn shutdown(&mut self) {
-        // Kill the entire process group when possible. The child was spawned
-        // with process_group(0), so its PID == its PGID. Killing the group
-        // ensures subprocesses (MCP servers, tool processes) are cleaned up
-        // rather than orphaned to init.
-        //
-        // Falls back to start_kill() (direct child only) on non-Unix or if
-        // the child has been polled to completion (id() returns None).
+        self.shutdown_with_timeouts(GRACEFUL_SHUTDOWN_TIMEOUT, FORCED_SHUTDOWN_TIMEOUT)
+            .await;
+    }
+
+    async fn shutdown_with_timeouts(
+        &mut self,
+        graceful_timeout: std::time::Duration,
+        forced_timeout: std::time::Duration,
+    ) -> bool {
+        if let Some(mut stdin) = self.stdin.take() {
+            if let Err(error) = stdin.shutdown().await {
+                tracing::debug!("could not flush agent stdin during graceful shutdown: {error}");
+            }
+            drop(stdin);
+        }
+
+        match tokio::time::timeout(graceful_timeout, self.child.wait()).await {
+            Ok(Ok(status)) => {
+                tracing::debug!(%status, "agent exited after stdin EOF");
+                return true;
+            }
+            Ok(Err(error)) => {
+                tracing::warn!("failed waiting for graceful agent exit: {error}");
+            }
+            Err(_) => {
+                tracing::warn!(
+                    timeout = ?graceful_timeout,
+                    "agent ignored stdin EOF; forcing process-group shutdown"
+                );
+            }
+        }
+
+        // The child was spawned with process_group(0), so its PID == its PGID.
+        // Killing the entire group also removes MCP servers and tool processes.
+        // Fall back to the direct child on platforms without process groups.
         match self.child.id() {
             Some(pid) if kill_process_group(pid) => {}
             _ => {
                 let _ = self.child.start_kill();
             }
         }
-        // Bounded wait: if the child doesn't exit within 5s after SIGKILL,
-        // give up and let Drop/OS handle it. An unbounded wait here would
-        // wedge the harness during respawn or shutdown if a child is stuck.
-        match tokio::time::timeout(std::time::Duration::from_secs(5), self.child.wait()).await {
+
+        match tokio::time::timeout(forced_timeout, self.child.wait()).await {
             Ok(Ok(_)) => {}
             Ok(Err(e)) => tracing::debug!("child wait error after kill: {e}"),
-            Err(_) => tracing::warn!("child did not exit within 5s after SIGKILL — abandoning"),
+            Err(_) => tracing::warn!(
+                timeout = ?forced_timeout,
+                "child did not exit after forced shutdown — abandoning"
+            ),
         }
+        false
     }
 
     /// Spawn the agent binary as a subprocess and connect to its stdio pipes.
@@ -497,7 +539,7 @@ impl AcpClient {
 
         Ok(Self {
             child,
-            stdin,
+            stdin: Some(stdin),
             reader: FramedRead::new(stdout, LinesCodec::new_with_max_length(MAX_LINE_SIZE)),
             next_id: 0,
             pending_permission_id: None,
@@ -973,10 +1015,14 @@ impl AcpClient {
     async fn write_ndjson(&mut self, value: &serde_json::Value) -> Result<(), AcpError> {
         const WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
         let line = serde_json::to_string(value)?;
+        let stdin = self
+            .stdin
+            .as_mut()
+            .ok_or_else(|| AcpError::Protocol("agent stdin is closed".into()))?;
         tokio::time::timeout(WRITE_TIMEOUT, async {
-            self.stdin.write_all(line.as_bytes()).await?;
-            self.stdin.write_all(b"\n").await?;
-            self.stdin.flush().await?;
+            stdin.write_all(line.as_bytes()).await?;
+            stdin.write_all(b"\n").await?;
+            stdin.flush().await?;
             Ok::<(), std::io::Error>(())
         })
         .await
@@ -1985,6 +2031,7 @@ impl Drop for AcpClient {
         // Best-effort SIGKILL + reap. We cannot `await` in Drop (sync context).
         // Kill the process group when possible so subprocesses don't leak.
         // Callers SHOULD still call `shutdown().await` for guaranteed reaping.
+        drop(self.stdin.take());
         match self.child.id() {
             Some(pid) if kill_process_group(pid) => {}
             _ => {
@@ -2693,6 +2740,58 @@ mod tests {
             );
         }
         observed
+    }
+
+    #[tokio::test]
+    async fn shutdown_delivers_stdin_eof_before_forcing_exit() {
+        let mut client =
+            spawn_script("while IFS= read -r _line; do :; done; printf 'GRACEFUL_EOF_SEEN\\n'")
+                .await;
+
+        let graceful = client
+            .shutdown_with_timeouts(
+                std::time::Duration::from_secs(1),
+                std::time::Duration::from_secs(1),
+            )
+            .await;
+        assert!(graceful, "cooperative child should exit during EOF grace");
+
+        let output = tokio::time::timeout(std::time::Duration::from_secs(1), client.reader.next())
+            .await
+            .expect("timed out reading graceful child output")
+            .expect("graceful child produced no output")
+            .expect("graceful child output was not readable");
+        assert_eq!(output, "GRACEFUL_EOF_SEEN");
+    }
+
+    #[tokio::test]
+    async fn shutdown_forces_a_child_that_ignores_stdin_eof() {
+        let mut client = spawn_script("while :; do :; done").await;
+        let started = std::time::Instant::now();
+
+        let graceful = client
+            .shutdown_with_timeouts(
+                std::time::Duration::from_millis(50),
+                std::time::Duration::from_secs(1),
+            )
+            .await;
+
+        assert!(
+            !graceful,
+            "non-cooperative child unexpectedly exited on EOF"
+        );
+        assert!(
+            client
+                .child
+                .try_wait()
+                .expect("query forced child")
+                .is_some(),
+            "forced child is still running"
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "forced shutdown exceeded its bounded fallback"
+        );
     }
 
     /// Every spawned agent must be told not to run the operator's cron
