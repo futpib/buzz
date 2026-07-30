@@ -19,6 +19,38 @@ cd deploy/compose
 BUZZ_COMPOSE_TLS=true ./run.sh start
 ```
 
+### Run directly from a local checkout
+
+`compose.source.dev.yml` mounts the repository at `/workspace` read-only and
+runs the relay and pairing relay from incremental Cargo debug builds. Cargo's
+target, registry, and Git checkout are persistent named volumes, so the first
+build seeds the cache and later starts rebuild only changed crates:
+
+```bash
+cd deploy/compose
+BUZZ_COMPOSE_SOURCE_DEV=true ./run.sh start
+BUZZ_COMPOSE_SOURCE_DEV=true ./run.sh stop
+```
+
+To make plain Compose commands select the same files, put this in the ignored
+`deploy/compose/.env`:
+
+```dotenv
+COMPOSE_FILE=compose.yml:compose.private-host.yml:compose.source.dev.yml
+```
+
+Then the normal lifecycle is simply:
+
+```bash
+docker compose up -d --wait
+docker compose down
+```
+
+The source override builds `buzz-acp` into the shared debug target as well, but
+does not start an agent because agent identities and backend commands are
+deployment-specific. It runs the Rust services only; it does not build or serve
+the web/admin frontend bundles.
+
 The bootstrap script should eventually replace manual `.env` editing for normal
 users. It is responsible for generating stable secrets and, optionally, an owner
 keypair.

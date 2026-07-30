@@ -11,6 +11,9 @@ fi
 if [[ "${BUZZ_COMPOSE_DEV:-false}" == "true" ]]; then
   COMPOSE_FILES+=(-f compose.dev.yml)
 fi
+if [[ "${BUZZ_COMPOSE_SOURCE_DEV:-false}" == "true" ]]; then
+  COMPOSE_FILES+=(-f compose.source.dev.yml)
+fi
 
 compose() {
   docker compose --env-file .env "${COMPOSE_FILES[@]}" "$@"
@@ -123,6 +126,8 @@ Commands:
 Environment switches:
   BUZZ_COMPOSE_TLS=true   Include compose.caddy.yml for automatic HTTPS
   BUZZ_COMPOSE_DEV=true   Include compose.dev.yml for local admin ports/tools
+  BUZZ_COMPOSE_SOURCE_DEV=true
+                          Build and run relay binaries from the mounted checkout
 MSG
     ;;
   *)

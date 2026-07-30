@@ -81,6 +81,10 @@ ps:
 logs *ARGS:
     docker compose logs -f {{ARGS}}
 
+# Validate the source-mounted Compose development override
+compose-source-dev-check:
+    ./scripts/test-compose-source-dev.sh
+
 # ─── Build & Check ───────────────────────────────────────────────────────────
 
 # Build the Rust workspace

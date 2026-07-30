@@ -71,6 +71,28 @@ RUN cargo build --release --locked -p buzz-relay --bin buzz-relay \
                                    -p buzz-admin --bin buzz-admin \
                                    -p buzz-pair-relay --bin buzz-pair-relay
 
+# ─── Local source-mounted development toolchain ─────────────────────────────
+# compose.source.dev.yml mounts the checkout read-only and stores Cargo's
+# writable state in named volumes. Keeping the toolchain in its own source-free
+# image means `docker compose up` only recompiles files that changed locally.
+FROM chef AS dev-toolchain
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        build-essential \
+        pkg-config \
+        libssl-dev \
+        ca-certificates \
+        git \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --system --gid 1000 buzz \
+    && useradd --system --uid 1000 --gid 1000 --home-dir /home/buzz \
+                --create-home --shell /bin/bash buzz \
+    && mkdir -p /workspace/target /usr/local/cargo/registry /usr/local/cargo/git \
+    && chown -R buzz:buzz \
+        /workspace /usr/local/cargo/registry /usr/local/cargo/git
+USER buzz:buzz
+WORKDIR /workspace
+
 # Derive the normal release binaries from the same optimized ELF files as the
 # debug image so the two variants cannot drift at code-generation time.
 FROM builder AS stripped-binaries
