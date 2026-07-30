@@ -3,3 +3,4 @@
 *.pem
 *.local
 secrets/
+slopd-agents.env
