@@ -22,7 +22,7 @@ use crate::validation::{
 /// Both paths are identical except for two steps, which are injected:
 /// - `validate`: a CPU-bound check (run inside `spawn_blocking`) that returns
 ///   the `(mime, ext)` pair for the body. Images derive `ext` from the MIME;
-///   generic files get both from the deny-list validator.
+///   generic files get both from the download-only attachment validator.
 /// - `prepare_metadata`: builds metadata and stores any derived artifacts such
 ///   as a thumbnail, but deliberately does not write the sidecar. The sidecar
 ///   is the media serve gate and is published only after the moderation record
@@ -231,13 +231,13 @@ pub async fn process_upload(
     .await
 }
 
-/// Process a generic non-media file upload end-to-end.
+/// Process a generic download-only file upload end-to-end.
 ///
-/// This is the catch-all attachment path for documents, archives, text, and
-/// data. Recognized image, video, and audio formats fail closed instead of
-/// entering exact-byte storage without their format-specific location policy.
+/// This is the catch-all attachment path for every format other than Buzz's
+/// canonical inline images and MP4 video. Canonical preview formats fail closed
+/// instead of entering exact-byte storage without their format-specific policy.
 /// The body is fully buffered in RAM (bounded by `config.max_file_bytes` at the
-/// transport layer), validated against the deny-list + size cap, stored, and
+/// transport layer), validated against the size cap, stored, and
 /// recorded in a minimal sidecar. No thumbnail, dimensions, or duration.
 ///
 /// The resulting blob is served with `Content-Disposition: attachment`, so the

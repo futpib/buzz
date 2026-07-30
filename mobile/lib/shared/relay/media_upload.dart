@@ -161,8 +161,8 @@ class BlobDescriptor {
   ];
 
   String toMarkdownImage() {
-    if (type.startsWith('video/')) return '![video]($url)';
-    if (type.startsWith('image/')) return '![image]($url)';
+    if (_allowedVideoMimeTypes.contains(type)) return '![video]($url)';
+    if (_allowedImageMimeTypes.contains(type)) return '![image]($url)';
     final label = (filename ?? 'file').replaceAllMapped(
       RegExp(r'[\\\[\]]'),
       (match) => '\\${match[0]}',

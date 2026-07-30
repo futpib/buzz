@@ -442,16 +442,15 @@ async fn test_legacy_media_route_still_accepts_canonical_media() {
 
 #[tokio::test]
 #[ignore]
-async fn test_standard_upload_rejects_recognized_audio() {
+async fn test_standard_upload_accepts_recognized_audio_as_download() {
     let client = http_client();
     let keys = Keys::generate();
     let mp3 = b"ID3\x04\x00\x00\x00\x00\x00\x00";
     let resp = upload(&client, &keys, mp3).await;
-    assert_eq!(
-        resp.status(),
-        reqwest::StatusCode::UNSUPPORTED_MEDIA_TYPE,
-        "recognized audio must not bypass the location policy as an attachment"
-    );
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let desc: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(desc["type"], "audio/mpeg");
+    assert!(desc["url"].as_str().unwrap().ends_with(".mp3"));
 }
 
 #[tokio::test]

@@ -48,7 +48,6 @@ enum UploadRouteMode {
 
 fn should_stream_as_video(sniff: &[u8]) -> bool {
     infer::get(sniff).is_some_and(|kind| kind.mime_type() == "video/mp4")
-        || buzz_media::looks_like_iso_bmff(sniff)
 }
 
 fn upload_route_mode(path: &str) -> Result<UploadRouteMode, MediaError> {
@@ -354,9 +353,8 @@ pub async fn upload_blob(
     } else {
         // Non-video path: buffer the body (bounded by the larger of the image
         // and generic-file caps), then decide image-vs-generic by sniffed MIME.
-        // Images go through the thumbnailing pipeline; non-media attachments
-        // (docs, archives, text, data) take the generic file path and are
-        // served as downloads. Recognized audio/video cannot fall through it.
+        // Canonical images go through the thumbnailing pipeline. Every other
+        // format takes the generic file path and is served as a download.
         let max = state
             .config
             .media
@@ -939,10 +937,18 @@ mod tests {
     }
 
     #[test]
-    fn proprietary_iso_bmff_brand_still_uses_video_pipeline() {
+    fn proprietary_iso_bmff_brand_uses_generic_file_pipeline() {
         let bytes = b"\x00\x00\x00\x18ftypPRIV\x00\x00\x00\x00isommp42";
         assert!(infer::get(bytes).is_none());
-        assert!(should_stream_as_video(bytes));
+        assert!(!should_stream_as_video(bytes));
+    }
+
+    #[test]
+    fn only_canonical_mp4_uses_video_pipeline() {
+        let mp4 = b"\x00\x00\x00\x18ftypisom\x00\x00\x00\x00isommp42";
+        let m4a = b"\x00\x00\x00\x18ftypM4A \x00\x00\x00\x00M4A ";
+        assert!(should_stream_as_video(mp4));
+        assert!(!should_stream_as_video(m4a));
     }
 
     async fn test_state() -> Arc<AppState> {
@@ -1193,9 +1199,8 @@ mod tests {
 
     #[test]
     fn test_validate_media_path_accepts_generic_exts() {
-        // Path validation now accepts any safe ext token — the deny-list for
-        // dangerous *content* lives in the upload validator, not here. The
-        // sidecar ext comparison is the authoritative check at serve time.
+        // Path validation accepts any safe ext token. The sidecar ext
+        // comparison is the authoritative check at serve time.
         assert!(validate_media_path(&format!("{VALID_HASH}.pdf")).is_ok());
         assert!(validate_media_path(&format!("{VALID_HASH}.docx")).is_ok());
         assert!(validate_media_path(&format!("{VALID_HASH}.zip")).is_ok());

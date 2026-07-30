@@ -34,6 +34,9 @@ pub struct BlobDescriptor {
     /// Duration in seconds for video/audio (optional).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub duration: Option<f64>,
+    /// Original display filename (client-side metadata; relays may omit it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filename: Option<String>,
 }
 
 /// Build an `imeta` tag array from a BlobDescriptor (NIP-92 media metadata).
@@ -57,23 +60,41 @@ pub fn build_imeta_tag(d: &BlobDescriptor) -> Vec<String> {
     if let Some(dur) = d.duration {
         tag.push(format!("duration {dur}"));
     }
+    if let Some(ref filename) = d.filename {
+        tag.push(format!("filename {filename}"));
+    }
     tag
 }
-
-/// MIME types accepted for upload.
-const ALLOWED_MIMES: &[&str] = &[
-    "image/jpeg",
-    "image/png",
-    "image/gif",
-    "image/webp",
-    "video/mp4",
-];
 
 /// Maximum file size for image uploads (50 MB).
 const MAX_IMAGE_BYTES: u64 = 50 * 1024 * 1024;
 
 /// Maximum file size for video uploads (500 MB).
 const MAX_VIDEO_BYTES: u64 = 500 * 1024 * 1024;
+
+/// Maximum file size for generic attachments (100 MB).
+const MAX_FILE_BYTES: u64 = 100 * 1024 * 1024;
+
+fn is_canonical_image_mime(mime: &str) -> bool {
+    matches!(
+        mime,
+        "image/jpeg" | "image/png" | "image/gif" | "image/webp"
+    )
+}
+
+fn sanitize_attachment_filename(file_path: &str) -> String {
+    let base = file_path
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(file_path)
+        .trim();
+    let cleaned: String = base.chars().filter(|c| !c.is_control()).take(255).collect();
+    if cleaned.is_empty() {
+        "file".to_string()
+    } else {
+        cleaned
+    }
+}
 
 /// Sign a NIP-98 HTTP auth event (kind:27235) and return the Authorization header value.
 ///
@@ -1113,15 +1134,13 @@ impl BuzzClient {
             .map(|t| t.mime_type().to_string())
             .unwrap_or_else(|| "application/octet-stream".to_string());
 
-        if !ALLOWED_MIMES.contains(&mime.as_str()) {
-            return Err(CliError::Usage(format!("unsupported file type: {mime}")));
-        }
-
         // 3. Size check
-        let max = if mime.starts_with("video/") {
+        let max = if mime == "video/mp4" {
             MAX_VIDEO_BYTES
-        } else {
+        } else if is_canonical_image_mime(&mime) {
             MAX_IMAGE_BYTES
+        } else {
+            MAX_FILE_BYTES
         };
         if bytes.len() as u64 > max {
             return Err(CliError::Usage(format!(
@@ -1136,11 +1155,12 @@ impl BuzzClient {
 
         // 5. PUT request to the BUD-02 /upload endpoint with a generous timeout.
         // Auth is signed per attempt — matches the per-attempt signing pattern in download_media.
-        let upload_timeout = if mime.starts_with("video/") {
+        let upload_timeout = if mime == "video/mp4" {
             Duration::from_secs(600)
         } else {
             Duration::from_secs(120)
         };
+        let filename = sanitize_attachment_filename(file_path);
         let url = format!("{}/upload", self.relay_url);
         let upload_body = bytes::Bytes::from(bytes);
 
@@ -1182,47 +1202,49 @@ impl BuzzClient {
         // If the primary /upload endpoint definitively doesn't exist on this relay version
         // (404 or 405), fall back to the legacy /media/upload endpoint.  The 404/405 switch
         // itself is not retried; only transient failures on the selected legacy endpoint are.
-        match result {
-            Ok(desc) => return Ok(desc),
+        let mut desc = match result {
+            Ok(desc) => desc,
             Err(CliError::Relay { status: s, body: _ })
                 if should_retry_legacy_upload(
                     reqwest::StatusCode::from_u16(s).unwrap_or(reqwest::StatusCode::NOT_FOUND),
                 ) =>
             {
-                // Fall through to legacy endpoint below.
+                let legacy_url = format!("{}/media/upload", self.relay_url);
+                self.with_retry_body(|| {
+                    let upload_body = upload_body.clone();
+                    let legacy_url = legacy_url.clone();
+                    let mime = mime.clone();
+                    let sha256 = sha256.clone();
+                    async move {
+                        let auth_header =
+                            sign_blossom_upload(&self.keys, &sha256, &mime, &self.relay_url)?;
+                        let resp = self
+                            .with_auth_tag(
+                                self.http
+                                    .put(&legacy_url)
+                                    .timeout(upload_timeout)
+                                    .header("Authorization", auth_header)
+                                    .header("Content-Type", &mime)
+                                    .header("X-SHA-256", &sha256)
+                                    .body(upload_body),
+                            )
+                            .send()
+                            .await?;
+                        if !resp.status().is_success() {
+                            let status = resp.status().as_u16();
+                            let body = resp.text().await.unwrap_or_default();
+                            return Err(CliError::Relay { status, body });
+                        }
+                        resp.json::<BlobDescriptor>().await.map_err(CliError::from)
+                    }
+                })
+                .await?
             }
             Err(e) => return Err(e),
-        }
+        };
 
-        let legacy_url = format!("{}/media/upload", self.relay_url);
-        self.with_retry_body(|| {
-            let upload_body = upload_body.clone();
-            let legacy_url = legacy_url.clone();
-            let mime = mime.clone();
-            let sha256 = sha256.clone();
-            async move {
-                let auth_header = sign_blossom_upload(&self.keys, &sha256, &mime, &self.relay_url)?;
-                let resp = self
-                    .with_auth_tag(
-                        self.http
-                            .put(&legacy_url)
-                            .timeout(upload_timeout)
-                            .header("Authorization", auth_header)
-                            .header("Content-Type", &mime)
-                            .header("X-SHA-256", &sha256)
-                            .body(upload_body),
-                    )
-                    .send()
-                    .await?;
-                if !resp.status().is_success() {
-                    let status = resp.status().as_u16();
-                    let body = resp.text().await.unwrap_or_default();
-                    return Err(CliError::Relay { status, body });
-                }
-                resp.json::<BlobDescriptor>().await.map_err(CliError::from)
-            }
-        })
-        .await
+        desc.filename = Some(filename);
+        Ok(desc)
     }
 
     /// Download a Blossom media blob using BUD-01 `t=get` auth.
@@ -2196,6 +2218,55 @@ mod retry_policy_tests {
         assert!(
             auths.iter().all(|a| a.contains("Nostr ")),
             "each attempt must carry Nostr auth"
+        );
+        assert_eq!(
+            result.unwrap().filename.as_deref(),
+            tmp.path().file_name().and_then(|name| name.to_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn upload_file_accepts_mp3_and_preserves_filename() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let file_path = temp_dir.path().join("demo song.mp3");
+        std::fs::write(&file_path, b"ID3\x04\x00\x00\x00\x00\x00\x00").unwrap();
+
+        let request_headers = Arc::new(std::sync::Mutex::new(String::new()));
+        let captured_headers = request_headers.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buffer = vec![0u8; 8192];
+            let read = stream.read(&mut buffer).await.unwrap();
+            *captured_headers.lock().unwrap() =
+                String::from_utf8_lossy(&buffer[..read]).to_string();
+
+            let body = r#"{"url":"https://relay.test/media/aabbcc.mp3","sha256":"aabbcc","size":10,"type":"audio/mpeg","uploaded":0}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let client = test_client(&format!("http://{addr}"));
+        let desc = client
+            .upload_file(file_path.to_str().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(desc.mime_type, "audio/mpeg");
+        assert_eq!(desc.filename.as_deref(), Some("demo song.mp3"));
+        assert!(
+            request_headers
+                .lock()
+                .unwrap()
+                .to_ascii_lowercase()
+                .contains("content-type: audio/mpeg"),
+            "MP3 upload must reach the relay with its detected MIME"
         );
     }
 

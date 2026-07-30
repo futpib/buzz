@@ -199,6 +199,33 @@ test("formatImetaMediaLine: generic mime → [filename](url) link", () => {
   );
 });
 
+test("formatImetaMediaLine: non-preview media types use download links", () => {
+  assert.equal(
+    formatImetaMediaLine({
+      url: "https://b/audio",
+      type: "audio/mpeg",
+      filename: "song.mp3",
+    }),
+    "\n[song.mp3](https://b/audio)",
+  );
+  assert.equal(
+    formatImetaMediaLine({
+      url: "https://b/vector",
+      type: "image/svg+xml",
+      filename: "drawing.svg",
+    }),
+    "\n[drawing.svg](https://b/vector)",
+  );
+  assert.equal(
+    formatImetaMediaLine({
+      url: "https://b/video",
+      type: "video/webm",
+      filename: "clip.webm",
+    }),
+    "\n[clip.webm](https://b/video)",
+  );
+});
+
 test("formatImetaMediaLine: spoiler option does not wrap generic files", () => {
   assert.equal(
     formatImetaMediaLine(

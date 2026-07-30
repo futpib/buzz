@@ -20,7 +20,7 @@ class ImetaEntry {
     this.alt,
   });
 
-  bool get isVideo => mimeType?.startsWith('video/') == true;
+  bool get isVideo => mimeType == 'video/mp4';
 
   String? get posterUrl => image ?? thumb;
 
@@ -86,8 +86,10 @@ MessageMediaKind? classifyMediaUrl(String url, {ImetaEntry? imeta}) {
   final mimeType = imeta?.mimeType;
   if (mimeType != null) {
     if (mimeType == 'video/mp4') return MessageMediaKind.video;
-    if (mimeType.startsWith('image/')) return MessageMediaKind.image;
-    if (mimeType.startsWith('video/')) return null;
+    if (_inlineImageMimeTypes.contains(mimeType)) {
+      return MessageMediaKind.image;
+    }
+    return null;
   }
 
   final path = (Uri.tryParse(url)?.path ?? url).toLowerCase();
@@ -109,6 +111,13 @@ const _imageExtensions = {
   '.heic',
   '.heif',
   '.avif',
+};
+
+const _inlineImageMimeTypes = {
+  'image/jpeg',
+  'image/png',
+  'image/gif',
+  'image/webp',
 };
 
 const _mp4Extension = '.mp4';

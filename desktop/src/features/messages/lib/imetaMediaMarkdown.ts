@@ -26,6 +26,7 @@
  */
 
 import type { BlobDescriptor } from "@/shared/api/tauri";
+import { isInlineImageMime, isInlineVideoMime } from "@/shared/lib/mediaMime";
 import { parseImetaTags } from "@/shared/ui/markdown/parseImeta";
 
 export type ImetaMedia = BlobDescriptor & {
@@ -286,11 +287,11 @@ export function formatImetaMediaLine(
   const lower = filename?.toLowerCase();
   const isSnapshotPng =
     lower?.endsWith(".agent.png") || lower?.endsWith(".team.png");
-  if (type.startsWith("video/")) {
+  if (isInlineVideoMime(type)) {
     const line = `![video](${url})`;
     return options.spoiler ? `\n||${line}||` : `\n${line}`;
   }
-  if (type.startsWith("image/") && !isSnapshotPng) {
+  if (isInlineImageMime(type) && !isSnapshotPng) {
     const line = `![image](${url})`;
     return options.spoiler ? `\n||${line}||` : `\n${line}`;
   }

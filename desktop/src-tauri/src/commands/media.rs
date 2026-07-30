@@ -113,28 +113,6 @@ fn fd_real_path(_file: &std::fs::File) -> Result<std::path::PathBuf, String> {
     Err("fd_real_path not supported on this platform".to_string())
 }
 
-/// MIME types blocked from upload — mirrors the server's generic-file deny-list.
-///
-/// Active-content XSS carriers and native executables. Everything else (images,
-/// video, documents, archives, audio, text, data) is accepted; un-sniffable
-/// files fall back to `application/octet-stream` and are served as downloads.
-const BLOCKED_MIME: &[&str] = &[
-    "text/html",
-    "application/xhtml+xml",
-    "image/svg+xml",
-    "application/javascript",
-    "text/javascript",
-    "application/x-msdownload",
-    "application/x-executable",
-    "application/vnd.microsoft.portable-executable",
-    "application/x-mach-binary",
-    "application/x-sharedlib",
-    "application/x-elf",
-    "application/x-msi",
-    "application/vnd.android.package-archive",
-    "application/x-apple-diskimage",
-];
-
 /// Sanitize a filename for use as a display label in the imeta `filename` field.
 ///
 /// Strips any directory components (keeps only the final path segment), removes
@@ -300,13 +278,9 @@ pub(crate) fn sanitize_image_for_upload(body: Vec<u8>, mime: &str) -> Result<Vec
 }
 
 pub(crate) fn detect_and_validate_mime(body: &[u8]) -> Result<String, String> {
-    let mime = infer::get(body)
+    Ok(infer::get(body)
         .map(|t| t.mime_type().to_string())
-        .unwrap_or_else(|| "application/octet-stream".to_string());
-    if BLOCKED_MIME.contains(&mime.as_str()) {
-        return Err(format!("unsupported file type: {mime}"));
-    }
-    Ok(mime)
+        .unwrap_or_else(|| "application/octet-stream".to_string()))
 }
 
 /// Lifetime of a Blossom `t=get` read token. Ten minutes keeps a token alive
@@ -680,8 +654,8 @@ pub async fn pick_and_upload_media(
     use tauri_plugin_dialog::DialogExt;
 
     let (tx, rx) = tokio::sync::oneshot::channel();
-    // No filter — accept any file. The deny-list (active content + executables)
-    // and size caps are enforced by `detect_and_validate_mime` and the relay.
+    // No filter — accept any file. Size caps and download-only handling for
+    // non-preview formats are enforced by the relay.
     app.dialog().file().pick_files(move |paths| {
         let _ = tx.send(paths);
     });
@@ -913,9 +887,9 @@ mod tests {
     }
 
     #[test]
-    fn test_detect_and_validate_mime_rejects_html() {
+    fn test_detect_and_validate_mime_accepts_html() {
         let html = b"<!DOCTYPE html><html><body><script>alert(1)</script></body></html>";
-        assert!(detect_and_validate_mime(html).is_err());
+        assert_eq!(detect_and_validate_mime(html).unwrap(), "text/html");
     }
 
     #[test]

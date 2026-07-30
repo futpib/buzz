@@ -8,14 +8,14 @@ const relayUrl = (name) => `${RELAY}/media/${name}`;
 
 // ── isVideoMedia: MIME-first classification ──────────────────────────────
 
-test("isVideoMedia: video/* MIME classifies as video regardless of extension", () => {
+test("isVideoMedia: only canonical MP4 MIME classifies as video", () => {
   assert.equal(isVideoMedia(relayUrl("abc"), "video/mp4"), true);
-  assert.equal(isVideoMedia(relayUrl("abc.jpg"), "video/webm"), true);
+  assert.equal(isVideoMedia(relayUrl("abc.jpg"), "video/webm"), false);
 });
 
-test("isVideoMedia: MIME wins for an extensionless relay URL", () => {
+test("isVideoMedia: non-preview MIME wins for an extensionless relay URL", () => {
   // The relay path is a content hash with no extension; MIME is the only signal.
-  assert.equal(isVideoMedia(relayUrl("deadbeef"), "video/quicktime"), true);
+  assert.equal(isVideoMedia(relayUrl("deadbeef"), "video/quicktime"), false);
 });
 
 test("isVideoMedia: uppercase MIME still matches", () => {

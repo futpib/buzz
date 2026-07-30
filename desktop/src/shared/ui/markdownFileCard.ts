@@ -1,4 +1,5 @@
 import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
+import { isInlineImageMime, isInlineVideoMime } from "@/shared/lib/mediaMime";
 
 /** Minimal shape of an imeta entry as consumed by the markdown renderer. */
 export type FileCardImetaEntry = {
@@ -120,7 +121,8 @@ export function resolveSnapshotCard(
 /**
  * Decide whether a markdown link should render as a generic-file download
  * card. A link qualifies when its href matches an imeta entry whose MIME is
- * neither image nor video (media goes through the `img` renderer instead).
+ * not one of Buzz's canonical inline-preview types (those go through the
+ * `img` renderer instead).
  *
  * Pure — extracted from `markdown.tsx` so the FileCard decision (the riskiest
  * part of the generic-file rendering path) is unit-testable without mounting
@@ -135,8 +137,8 @@ export function resolveFileCard(
   if (
     !href ||
     !entry?.m ||
-    entry.m.startsWith("image/") ||
-    entry.m.startsWith("video/")
+    isInlineImageMime(entry.m) ||
+    isInlineVideoMime(entry.m)
   ) {
     return null;
   }

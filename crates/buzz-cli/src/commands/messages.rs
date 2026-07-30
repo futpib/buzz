@@ -2,7 +2,7 @@ use buzz_sdk::{DeleteMessageOptions, DiffMeta, ThreadRef, VoteDirection};
 use nostr::PublicKey;
 use uuid::Uuid;
 
-use crate::client::{normalize_events, normalize_write_response, BuzzClient};
+use crate::client::{normalize_events, normalize_write_response, BlobDescriptor, BuzzClient};
 use crate::error::CliError;
 use crate::validate::{
     infer_language, parse_event_id, parse_uuid, read_or_stdin, truncate_diff,
@@ -44,6 +44,33 @@ fn find_root_from_tags(tags: &serde_json::Value) -> Option<String> {
         }
     }
     root.or(reply)
+}
+
+fn format_attachment_markdown(desc: &BlobDescriptor) -> String {
+    if desc.mime_type == "video/mp4" {
+        return format!("\n![video]({})", desc.url);
+    }
+    if matches!(
+        desc.mime_type.as_str(),
+        "image/jpeg" | "image/png" | "image/gif" | "image/webp"
+    ) {
+        return format!("\n![image]({})", desc.url);
+    }
+
+    let raw_label = desc
+        .filename
+        .as_deref()
+        .filter(|name| !name.trim().is_empty())
+        .or_else(|| desc.url.rsplit('/').next())
+        .unwrap_or("file");
+    let mut label = String::with_capacity(raw_label.len());
+    for character in raw_label.chars() {
+        if matches!(character, '\\' | '[' | ']') {
+            label.push('\\');
+        }
+        label.push(character);
+    }
+    format!("\n[{label}]({})", desc.url)
 }
 
 /// Build a `ThreadRef` for a reply, given the immediate parent's event ID.
@@ -619,13 +646,7 @@ pub async fn cmd_send_message(
             .await
             .map_err(|e| CliError::Other(format!("upload failed for {file_path}: {e}")))?;
         media_tags.push(crate::client::build_imeta_tag(&desc));
-        if desc.mime_type.starts_with("video/") {
-            media_content.push_str("\n![video](");
-        } else {
-            media_content.push_str("\n![image](");
-        }
-        media_content.push_str(&desc.url);
-        media_content.push(')');
+        media_content.push_str(&format_attachment_markdown(&desc));
     }
     let final_content = if media_content.is_empty() {
         p.content.clone()
@@ -993,10 +1014,11 @@ pub async fn dispatch(
 #[cfg(test)]
 mod tests {
     use super::{
-        event_mention_pubkeys, find_root_from_tags, match_profiles_by_name, merge_message_mentions,
-        missing_members, normalize_explicit_mentions, parse_member_pubkeys,
-        resolve_names_to_pubkeys,
+        event_mention_pubkeys, find_root_from_tags, format_attachment_markdown,
+        match_profiles_by_name, merge_message_mentions, missing_members,
+        normalize_explicit_mentions, parse_member_pubkeys, resolve_names_to_pubkeys,
     };
+    use crate::client::BlobDescriptor;
     use buzz_sdk::mentions::{
         extract_at_mentions_with_known, extract_at_names, match_names_to_profiles, MentionProfile,
     };
@@ -1011,6 +1033,49 @@ mod tests {
     const PK_VALID_A: &str = "35c18ae273fccfaf80d629e20e7f8721b90499379addff533054acc2504c12b4";
     const PK_VALID_B: &str = "c6237ef84fa537c78dcee78efd2d4e59f728859c7f194da42ac51ededfa0be05";
     const PK_VALID_C: &str = "f4a42a97e594b77bdbd8ee35191c8b28a94a4cb871d96f32921558275421fb68";
+
+    fn attachment(mime_type: &str, filename: &str) -> BlobDescriptor {
+        BlobDescriptor {
+            url: "https://relay.example/media/blob".to_string(),
+            sha256: "a".repeat(64),
+            size: 10,
+            mime_type: mime_type.to_string(),
+            uploaded: 0,
+            dim: None,
+            blurhash: None,
+            thumb: None,
+            duration: None,
+            filename: Some(filename.to_string()),
+        }
+    }
+
+    #[test]
+    fn generic_attachment_uses_download_link_and_escapes_filename() {
+        assert_eq!(
+            format_attachment_markdown(&attachment("audio/mpeg", r"song[demo].mp3")),
+            "\n[song\\[demo\\].mp3](https://relay.example/media/blob)"
+        );
+    }
+
+    #[test]
+    fn only_canonical_preview_types_use_inline_markdown() {
+        assert!(
+            format_attachment_markdown(&attachment("image/png", "photo.png"))
+                .starts_with("\n![image]")
+        );
+        assert!(
+            format_attachment_markdown(&attachment("video/mp4", "video.mp4"))
+                .starts_with("\n![video]")
+        );
+        assert!(
+            format_attachment_markdown(&attachment("image/svg+xml", "drawing.svg"))
+                .starts_with("\n[drawing.svg]")
+        );
+        assert!(
+            format_attachment_markdown(&attachment("video/webm", "video.webm"))
+                .starts_with("\n[video.webm]")
+        );
+    }
 
     #[test]
     fn root_marker_wins_over_reply_marker() {

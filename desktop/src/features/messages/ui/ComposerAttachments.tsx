@@ -15,6 +15,7 @@ import {
 import type { BlobDescriptor } from "@/shared/api/tauri";
 import type { ImetaMedia } from "@/features/messages/lib/imetaMediaMarkdown";
 import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
+import { isInlineImageMime, isInlineVideoMime } from "@/shared/lib/mediaMime";
 import {
   shortHash,
   type UploadingAttachmentPreview,
@@ -234,7 +235,7 @@ const MediaAttachmentItem = React.forwardRef<
   const [mode, setMode] = React.useState<"view" | "edit">("view");
 
   const hash = shortHash(attachment.sha256);
-  const isVideo = attachment.type.startsWith("video/");
+  const isVideo = isInlineVideoMime(attachment.type);
   const thumbUrl = attachment.thumb
     ? rewriteRelayUrl(attachment.thumb)
     : rewriteRelayUrl(attachment.url);
@@ -537,8 +538,8 @@ export const ComposerAttachments = React.memo(function ComposerAttachments({
         <AnimatePresence mode="popLayout">
           {attachments.map((attachment) => {
             const hash = shortHash(attachment.sha256);
-            const isVideo = attachment.type.startsWith("video/");
-            const isImage = attachment.type.startsWith("image/");
+            const isVideo = isInlineVideoMime(attachment.type);
+            const isImage = isInlineImageMime(attachment.type);
             const isFile = !isVideo && !isImage;
 
             const snapshotKind = getSnapshotKind(attachment);

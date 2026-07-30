@@ -41,6 +41,42 @@ final _jpegBytes = Uint8List.fromList([
   0x01,
 ]);
 
+void mainAttachmentMarkdownTests() {
+  test('non-preview media formats use generic download links', () {
+    for (final descriptor in [
+      const BlobDescriptor(
+        url: 'https://relay.example/media/song.mp3',
+        sha256: 'aa',
+        size: 10,
+        type: 'audio/mpeg',
+        uploaded: 0,
+        filename: 'song.mp3',
+      ),
+      const BlobDescriptor(
+        url: 'https://relay.example/media/drawing.svg',
+        sha256: 'bb',
+        size: 10,
+        type: 'image/svg+xml',
+        uploaded: 0,
+        filename: 'drawing.svg',
+      ),
+      const BlobDescriptor(
+        url: 'https://relay.example/media/clip.webm',
+        sha256: 'cc',
+        size: 10,
+        type: 'video/webm',
+        uploaded: 0,
+        filename: 'clip.webm',
+      ),
+    ]) {
+      expect(
+        descriptor.toMarkdownImage(),
+        startsWith('[${descriptor.filename}]'),
+      );
+    }
+  });
+}
+
 final _heicBytes = Uint8List.fromList([
   0x00,
   0x00,
@@ -246,6 +282,8 @@ void _setMockMediaUploadPlatformHandler(
 }
 
 void main() {
+  mainAttachmentMarkdownTests();
+
   TestWidgetsFlutterBinding.ensureInitialized();
 
   setUpAll(() {

@@ -72,9 +72,9 @@ pub fn validate_imeta_tags(tags: &[Vec<String>], media_base_url: &str) -> Result
                 "m" => {
                     // Accept any well-formed `type/subtype` MIME token. The
                     // authoritative gate is `verify_imeta_blobs`, which requires
-                    // `m` to equal the stored sidecar MIME — and a sidecar only
-                    // exists for content that passed the upload validator's
-                    // deny-list. So a blocked type can never reach a valid imeta.
+                    // `m` to equal the stored sidecar MIME. Non-preview formats
+                    // are safe here because the media endpoint forces them to
+                    // download rather than rendering them inline.
                     if !is_well_formed_mime(value) {
                         return Err("imeta m must be a valid MIME type".into());
                     }
@@ -334,9 +334,9 @@ pub async fn verify_imeta_blobs(
 /// Whether a string is a well-formed `type/subtype` MIME token.
 ///
 /// Structural check only — does not enforce a known type. The authoritative
-/// content gate is the upload validator's deny-list plus the sidecar MIME
-/// cross-check in `verify_imeta_blobs`. Rejects empties, missing slash,
-/// whitespace, and control characters.
+/// content gate is the upload validator plus the sidecar MIME cross-check in
+/// `verify_imeta_blobs`. Rejects empties, missing slash, whitespace, and
+/// control characters.
 fn is_well_formed_mime(mime: &str) -> bool {
     let Some((ty, sub)) = mime.split_once('/') else {
         return false;

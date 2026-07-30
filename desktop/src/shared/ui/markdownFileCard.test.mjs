@@ -33,6 +33,21 @@ test("resolveFileCard: returns null for video MIME (handled by img renderer)", (
   );
 });
 
+test("resolveFileCard: non-preview media types render as file cards", () => {
+  for (const [mime, filename] of [
+    ["audio/mpeg", "song.mp3"],
+    ["image/svg+xml", "drawing.svg"],
+    ["video/webm", "clip.webm"],
+  ]) {
+    const card = resolveFileCard(
+      { m: mime, filename },
+      `https://relay.example/media/${"c".repeat(64)}.bin`,
+      "",
+    );
+    assert.equal(card?.filename, filename);
+  }
+});
+
 test("resolveFileCard: returns null when imeta entry has no MIME", () => {
   assert.equal(resolveFileCard({ size: 10 }, PDF_URL, ""), null);
 });

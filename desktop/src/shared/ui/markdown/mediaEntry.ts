@@ -13,6 +13,8 @@
  * Kept DOM-free so the branch logic is unit-testable without a webview.
  */
 
+import { isInlineVideoMime } from "@/shared/lib/mediaMime";
+
 /** Legacy video extensions, used only when an imeta MIME type is absent. */
 const VIDEO_EXTENSIONS = ["mp4", "webm", "mov"] as const;
 
@@ -34,13 +36,12 @@ function urlPathExtension(src: string): string | undefined {
  * Whether `src` should render as a video.
  *
  * The imeta MIME type is authoritative when present (uploads tag every
- * attachment with `m`): a `video/*` MIME renders as video, and any other MIME
- * renders as an image regardless of the URL extension. Only when the MIME is
- * absent (legacy events that predate the tag) do we fall back to a path
- * extension check.
+ * attachment with `m`): only canonical MP4 renders as video. Other formats are
+ * generic download attachments. Only when MIME is absent (legacy events that
+ * predate the tag) do we fall back to a path extension check.
  */
 export function isVideoMedia(src: string, imetaMime?: string): boolean {
-  if (imetaMime) return imetaMime.toLowerCase().startsWith("video/");
+  if (imetaMime) return isInlineVideoMime(imetaMime);
   const ext = urlPathExtension(src);
   return (
     ext !== undefined && (VIDEO_EXTENSIONS as readonly string[]).includes(ext)

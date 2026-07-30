@@ -60,37 +60,6 @@ pub(crate) fn looks_like_mp4_iso_bmff(bytes: &[u8]) -> bool {
             .any(|brand| MP4_BRANDS.iter().any(|candidate| brand == candidate))
 }
 
-/// MIME types blocked from the generic file-upload path.
-///
-/// These are the formats a browser (or the desktop webview) will *execute* or
-/// *render as active content* if it ever reaches them with the wrong response
-/// headers. We serve generic files with `Content-Disposition: attachment` +
-/// `X-Content-Type-Options: nosniff` + `CSP: default-src 'none'`, which already
-/// neutralises them — this allowlist-of-denials is defence in depth, so a future
-/// header regression can't turn an uploaded blob into a stored-XSS vector.
-///
-/// HTML, JS, and SVG are the classic stored-XSS carriers. Native executables are
-/// blocked because there's no legitimate reason to host them inline in chat and
-/// they're a malware-distribution risk.
-const BLOCKED_FILE_MIME_TYPES: &[&str] = &[
-    // Active web content — stored-XSS vectors.
-    "text/html",
-    "application/xhtml+xml",
-    "image/svg+xml",
-    "application/javascript",
-    "text/javascript",
-    // Native executables / installers.
-    "application/x-msdownload", // .exe / .dll
-    "application/x-executable", // ELF
-    "application/vnd.microsoft.portable-executable",
-    "application/x-mach-binary", // Mach-O
-    "application/x-sharedlib",
-    "application/x-elf",
-    "application/x-msi",
-    "application/vnd.android.package-archive", // .apk
-    "application/x-apple-diskimage",           // .dmg
-];
-
 /// Map a sniffed MIME type to a file extension for the generic file path.
 ///
 /// Covers the common document, archive, audio, and data formats `infer`
@@ -141,19 +110,34 @@ fn file_mime_to_ext(mime: &str) -> Option<&'static str> {
     Some(ext)
 }
 
+fn normalize_generic_ext(ext: &str) -> String {
+    if !ext.is_empty()
+        && ext.len() <= 8
+        && ext
+            .chars()
+            .all(|character| character.is_ascii_lowercase() || character.is_ascii_digit())
+    {
+        ext.to_string()
+    } else {
+        "bin".to_string()
+    }
+}
+
 /// Validate uploaded bytes for the **generic file** upload path.
 ///
-/// This is the catch-all path for non-media attachments (documents, archives,
-/// text, data). It enforces three things:
+/// This is the catch-all path for attachments that are not one of Buzz's
+/// canonical inline-preview formats. It enforces two things:
 ///   1. A size cap (`config.max_file_bytes`).
-///   2. A *deny* list — known active-content and executable MIME types are
-///      rejected even though safe headers already neutralise them.
-///   3. Magic-byte sniffing where possible.
+///   2. Magic-byte sniffing where possible.
 ///
 /// Files with no detectable signature (plain text, CSV, source code, JSON —
 /// none of which have magic bytes) are accepted as `application/octet-stream`.
-/// They are always served as downloads, so an un-sniffable file can never
-/// execute in the app.
+/// Every file accepted by this path is served with `Content-Disposition:
+/// attachment`, `X-Content-Type-Options: nosniff`, and a restrictive CSP.
+///
+/// Canonical JPEG, PNG, GIF, WebP, and MP4 files must still use the corresponding
+/// media pipeline so this generic path cannot bypass metadata removal and
+/// structural validation.
 ///
 /// Returns `(mime, ext)`.
 pub fn validate_file_content(
@@ -168,38 +152,15 @@ pub fn validate_file_content(
         });
     }
 
-    // ISO-BMFF permits arbitrary major brands, so `infer` cannot enumerate all
-    // valid MP4 signatures. Never let an `ftyp` container fall through as an
-    // opaque attachment merely because its brand is unfamiliar.
-    if looks_like_iso_bmff(bytes) {
-        let mime = infer::get(bytes)
-            .map(|kind| kind.mime_type().to_string())
-            .unwrap_or_else(|| "application/iso-bmff".to_string());
-        return Err(MediaError::DisallowedContentType(mime));
-    }
-
     // 2. Sniff. `None` means no magic signature (text/csv/json/source) — that's
     //    fine for the generic path; treat as opaque binary served as a download.
     match infer::get(bytes) {
         Some(kind) => {
             let mime = kind.mime_type().to_string();
-            // Recognized media must never fall through exact-byte attachment
-            // storage. Images and video use their canonical media validators;
-            // audio is rejected until Buzz has an explicit sanitizer and
-            // location-metadata validator for its container.
-            if mime.starts_with("image/")
-                || mime.starts_with("video/")
-                || mime.starts_with("audio/")
-            {
+            if serve_inline(&mime) {
                 return Err(MediaError::DisallowedContentType(mime));
             }
-            // 3. Deny dangerous active-content / executable types.
-            if BLOCKED_FILE_MIME_TYPES.contains(&mime.as_str()) {
-                return Err(MediaError::DisallowedContentType(mime));
-            }
-            let ext = file_mime_to_ext(&mime)
-                .map(str::to_string)
-                .unwrap_or_else(|| kind.extension().to_string());
+            let ext = normalize_generic_ext(file_mime_to_ext(&mime).unwrap_or(kind.extension()));
             Ok((mime, ext))
         }
         None => Ok(("application/octet-stream".to_string(), "bin".to_string())),
@@ -214,7 +175,10 @@ pub fn validate_file_content(
 /// PDF is intentionally *not* inline yet — inline PDF preview is a planned
 /// fast-follow; until the renderer handles it, force download like any other file.
 pub fn serve_inline(mime: &str) -> bool {
-    mime.starts_with("image/") || mime.starts_with("video/")
+    matches!(
+        mime,
+        "image/jpeg" | "image/png" | "image/gif" | "image/webp" | "video/mp4"
+    )
 }
 
 /// Metadata extracted from a validated MP4 file.
@@ -1519,13 +1483,14 @@ mod tests {
         assert!(infer::get(proprietary_major).is_none());
         assert!(looks_like_iso_bmff(proprietary_major));
         assert!(looks_like_mp4_iso_bmff(proprietary_major));
-        assert!(
-            matches!(validate_file_content(proprietary_major, &config), Err(MediaError::DisallowedContentType(m)) if m == "application/iso-bmff")
+        assert_eq!(
+            validate_file_content(proprietary_major, &config).unwrap(),
+            ("application/octet-stream".to_string(), "bin".to_string())
         );
     }
 
     #[test]
-    fn test_generic_file_path_rejects_recognized_audio() {
+    fn test_generic_file_path_accepts_recognized_audio() {
         let config = test_config();
         let fixtures: &[(&str, &[u8])] = &[
             ("mp3", b"ID3\x04\x00\x00\x00\x00\x00\x00"),
@@ -1544,13 +1509,11 @@ mod tests {
                 "{name} fixture detected as {}",
                 detected.mime_type()
             );
-            assert!(
-                matches!(
-                    validate_file_content(bytes, &config),
-                    Err(MediaError::DisallowedContentType(mime)) if mime.starts_with("audio/")
-                ),
-                "generic path accepted {name}"
-            );
+            let (mime, ext) = validate_file_content(bytes, &config).unwrap_or_else(|err| {
+                panic!("generic path rejected {name}: {err}");
+            });
+            assert!(mime.starts_with("audio/"), "{name} returned {mime}");
+            assert_eq!(ext, *name, "{name} returned extension {ext}");
         }
     }
 
@@ -2561,15 +2524,13 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_file_html_rejected() {
-        // HTML is a stored-XSS carrier — blocked even though headers neutralise it.
+    fn test_validate_file_html_accepted_as_download() {
         let config = test_config();
         let html = b"<!DOCTYPE html><html><body><script>alert(1)</script></body></html>";
-        let result = validate_file_content(html, &config);
-        assert!(
-            matches!(result, Err(MediaError::DisallowedContentType(ref m)) if m == "text/html"),
-            "expected DisallowedContentType(text/html), got {result:?}"
-        );
+        let (mime, ext) = validate_file_content(html, &config).unwrap();
+        assert_eq!(mime, "text/html");
+        assert_eq!(ext, "html");
+        assert!(!serve_inline(&mime));
     }
 
     #[test]
@@ -2586,6 +2547,9 @@ mod tests {
         assert!(serve_inline("image/png"));
         assert!(serve_inline("video/mp4"));
         // Generic files force download.
+        assert!(!serve_inline("image/svg+xml"));
+        assert!(!serve_inline("image/bmp"));
+        assert!(!serve_inline("video/webm"));
         assert!(!serve_inline("application/pdf"));
         assert!(!serve_inline("application/zip"));
         assert!(!serve_inline("application/octet-stream"));
