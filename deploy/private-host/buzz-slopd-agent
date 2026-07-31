@@ -84,6 +84,7 @@ export BUZZ_PRIVATE_KEY="${private_key}"
 exec "${BUZZ_ACP_BIN}" \
   --relay-url "${BUZZ_RELAY_WS_URL}" \
   --agent-owner "${BUZZ_AGENT_OWNER}" \
+  --relay-observer \
   --agent-command "${SLOPD_ACP_BIN}" \
   "--agent-args=--socket,${slopd_socket},--account,${BUZZ_AGENT_ACCOUNT},--backend,${BUZZ_AGENT_BACKEND},--forward-buzz-env" \
   --respond-to owner-only \

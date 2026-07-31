@@ -47,6 +47,7 @@ fi
 
 for expected in \
   '--relay-url wss://relay.example.test' \
+  '--relay-observer' \
   '--agent-command /opt/slopd-acp' \
   "--agent-args=--socket,${tmp_dir}/slopd-buzz-agent/slopd.sock,--account,codex,--backend,codex,--forward-buzz-env" \
   '--respond-to owner-only' \
