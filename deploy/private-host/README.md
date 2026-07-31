@@ -82,5 +82,7 @@ The bridges intentionally use the normal Buzz base prompt and NIP-AE memory.
 Do not add `--no-base-prompt` or `--no-memory`; those switches are for isolated
 diagnostics, not the permanent agents.
 
-The agents' 512px profile images are kept in `agent-avatars/`. Their published
-kind-0 profiles point at authenticated Blossom copies on this Buzz relay.
+The agents' 512px profile images are kept in `agent-avatars/`. They are the
+unmodified official Codex and Claude Code Marketplace icons and OpenCode's
+production desktop icon, resized to a common canvas. Their published kind-0
+profiles point at authenticated Blossom copies on this Buzz relay.
