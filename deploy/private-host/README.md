@@ -82,6 +82,18 @@ The bridges intentionally use the normal Buzz base prompt and NIP-AE memory.
 Do not add `--no-base-prompt` or `--no-memory`; those switches are for isolated
 diagnostics, not the permanent agents.
 
+To authorize the three remote agents with the human Buzz owner key, run:
+
+```bash
+~/.local/libexec/sign-slopd-agents --restart
+```
+
+The command prompts for the owner `nsec` without echoing it, passes it to the
+NIP-OA signer over stdin, verifies that the derived owner matches
+`BUZZ_AGENT_OWNER`, and writes only the resulting auth tags to mode-0600 files
+under `~/.config/buzz-slopd-agent/`. The `nsec` is never written to disk, put in
+an environment variable, or passed in a process argument.
+
 The agents' 512px profile images are kept in `agent-avatars/`. They are the
 unmodified official Codex and Claude Code Marketplace icons and OpenCode's
 production desktop icon, resized to a common canvas. Their published kind-0

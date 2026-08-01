@@ -2,6 +2,7 @@
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd "${script_dir}/../.." && pwd)"
 config_dir="${HOME}/.config/buzz-slopd-agent"
 unit_dir="${HOME}/.config/systemd/user"
 libexec_dir="${HOME}/.local/libexec"
@@ -19,6 +20,12 @@ if rg -q 'CHANGE_ME' "${config_file}"; then
 fi
 
 install -Dm700 "${script_dir}/buzz-slopd-agent" "${libexec_dir}/buzz-slopd-agent"
+cargo build --quiet --manifest-path "${repo_root}/Cargo.toml" \
+  -p buzz-sdk --example compute_auth_tag
+install -Dm700 \
+  "${repo_root}/target/debug/examples/compute_auth_tag" \
+  "${libexec_dir}/buzz-compute-auth-tag"
+install -Dm700 "${script_dir}/sign-slopd-agents.sh" "${libexec_dir}/sign-slopd-agents"
 for unit in \
   buzz-slopd-agent.service \
   buzz-slopd-opencode-agent.service \
