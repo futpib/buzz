@@ -17,6 +17,19 @@ do
   fi
 done
 
+declare -A expected_auth_files=(
+  [buzz-slopd-agent.service]=auth-codex.env
+  [buzz-slopd-opencode-agent.service]=auth-opencode.env
+  [buzz-slopd-claude-agent.service]=auth-claude.env
+)
+for unit in "${!expected_auth_files[@]}"; do
+  if ! rg -q -F "EnvironmentFile=-%h/.config/buzz-slopd-agent/${expected_auth_files[${unit}]}" \
+    "${deployment_dir}/systemd/${unit}"; then
+    echo "${unit} does not load its per-agent NIP-OA auth tag" >&2
+    exit 1
+  fi
+done
+
 tmp_dir="$(mktemp -d)"
 trap 'rm -rf "${tmp_dir}"' EXIT
 
@@ -71,6 +84,61 @@ pem_public_key="$(
 )"
 if [[ ! "${pem_public_key}" =~ ^[0-9a-fA-F]{64}$ ]]; then
   echo "launcher did not derive a valid public key from a PEM identity" >&2
+  exit 1
+fi
+
+cargo build --quiet --manifest-path "${repo_root}/Cargo.toml" \
+  -p buzz-sdk --example compute_auth_tag
+signer="${repo_root}/target/debug/examples/compute_auth_tag"
+installed_libexec="${tmp_dir}/installed-libexec"
+install -Dm700 "${deployment_dir}/sign-slopd-agents.sh" \
+  "${installed_libexec}/sign-slopd-agents"
+install -Dm700 "${signer}" "${installed_libexec}/buzz-compute-auth-tag"
+auth_config_dir="${tmp_dir}/auth-config"
+bridge_config="${tmp_dir}/bridge.env"
+printf '%s\n' \
+  'BUZZ_AGENT_OWNER=79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798' \
+  >"${bridge_config}"
+test_agent_pubkey=c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5
+test_owner_nsec=nsec1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqsmhltgl
+printf '%s\n' "${test_owner_nsec}" |
+  env \
+    BUZZ_AGENT_BRIDGE_CONFIG="${bridge_config}" \
+    BUZZ_AGENT_AUTH_CONFIG_DIR="${auth_config_dir}" \
+    BUZZ_AGENT_CODEX_PUBKEY="${test_agent_pubkey}" \
+    BUZZ_AGENT_OPENCODE_PUBKEY="${test_agent_pubkey}" \
+    BUZZ_AGENT_CLAUDE_PUBKEY="${test_agent_pubkey}" \
+    "${installed_libexec}/sign-slopd-agents" --nsec-stdin
+
+for account in codex opencode claude; do
+  auth_file="${auth_config_dir}/auth-${account}.env"
+  if [[ "$(stat -c '%a' "${auth_file}")" != 600 ]]; then
+    echo "${auth_file} is not mode 0600" >&2
+    exit 1
+  fi
+  if ! rg -q -F \
+    "BUZZ_AUTH_TAG='[\"auth\",\"79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798\",\"\"," \
+    "${auth_file}"; then
+    echo "${auth_file} does not contain the expected owner attestation" >&2
+    exit 1
+  fi
+done
+
+wrong_auth_config_dir="${tmp_dir}/wrong-auth-config"
+if printf '%064d\n' 2 |
+  env \
+    BUZZ_AGENT_BRIDGE_CONFIG="${bridge_config}" \
+    BUZZ_AGENT_AUTH_CONFIG_DIR="${wrong_auth_config_dir}" \
+    BUZZ_AGENT_CODEX_PUBKEY="${test_agent_pubkey}" \
+    BUZZ_AGENT_OPENCODE_PUBKEY="${test_agent_pubkey}" \
+    BUZZ_AGENT_CLAUDE_PUBKEY="${test_agent_pubkey}" \
+    "${installed_libexec}/sign-slopd-agents" --nsec-stdin 2>/dev/null; then
+  echo "signing accepted an nsec that does not match BUZZ_AGENT_OWNER" >&2
+  exit 1
+fi
+if [[ -d "${wrong_auth_config_dir}" ]] &&
+  find "${wrong_auth_config_dir}" -type f -print -quit | rg -q .; then
+  echo "signing wrote auth files before rejecting the wrong nsec" >&2
   exit 1
 fi
 
