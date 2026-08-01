@@ -58,3 +58,31 @@ The bootstrap owner keypair is stored outside the repository at
 `~/.config/buzz/owner-keypair.txt` with mode `0600`. Back it up securely. Its
 secret key is the initial owner identity and must never be committed or pasted
 into logs.
+
+## Always-on slopd agents
+
+The three Buzz ACP bridges are installed from the tracked launcher and systemd
+units in this directory. Their shared host-specific settings live outside Git
+at `~/.config/buzz-slopd-agent/bridge.env`; agent identities remain in their
+respective `~/.config/buzz-slopd*-agent/` directories.
+
+On first use, generate the ignored config template:
+
+```bash
+./deploy/private-host/install-slopd-agents.sh
+```
+
+Replace its `CHANGE_ME` values, then install or refresh the launcher and units:
+
+```bash
+./deploy/private-host/install-slopd-agents.sh --restart
+```
+
+The bridges intentionally use the normal Buzz base prompt and NIP-AE memory.
+Do not add `--no-base-prompt` or `--no-memory`; those switches are for isolated
+diagnostics, not the permanent agents.
+
+The agents' 512px profile images are kept in `agent-avatars/`. They are the
+unmodified official Codex and Claude Code Marketplace icons and OpenCode's
+production desktop icon, resized to a common canvas. Their published kind-0
+profiles point at authenticated Blossom copies on this Buzz relay.

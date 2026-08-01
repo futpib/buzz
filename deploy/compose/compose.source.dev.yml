@@ -1,0 +1,87 @@
+---
+# Run the relay directly from this checkout using incremental debug builds.
+#
+# The source bind mount is read-only. Cargo's registry, git checkout, and
+# target directory live in named volumes, so `docker compose up` rebuilds only
+# changed crates and never writes root-owned files into the checkout.
+x-buzz-source-toolchain: &buzz-source-toolchain
+  image: buzz-local-dev-toolchain
+  pull_policy: build
+  build:
+    context: ../..
+    dockerfile: Dockerfile
+    target: dev-toolchain
+    network: host
+
+x-buzz-source-mounts: &buzz-source-mounts
+  - ../..:/workspace:ro
+  - buzz-dev-target:/workspace/target
+  - buzz-dev-cargo-registry:/usr/local/cargo/registry
+  - buzz-dev-cargo-git:/usr/local/cargo/git
+
+services:
+  buzz-dev-build:
+    <<: *buzz-source-toolchain
+    command:
+      - cargo
+      - build
+      - --locked
+      - -p
+      - buzz-relay
+      - --bin
+      - buzz-relay
+      - -p
+      - buzz-admin
+      - --bin
+      - buzz-admin
+      - -p
+      - buzz-pair-relay
+      - --bin
+      - buzz-pair-relay
+      - -p
+      - buzz-acp
+      - --bin
+      - buzz-acp
+    working_dir: /workspace
+    volumes: *buzz-source-mounts
+    network_mode: host
+    restart: "no"
+
+  relay:
+    <<: *buzz-source-toolchain
+    entrypoint: ["/workspace/target/debug/buzz-relay"]
+    working_dir: /workspace
+    volumes:
+      - ../..:/workspace:ro
+      - buzz-dev-target:/workspace/target
+    depends_on:
+      buzz-dev-build:
+        condition: service_completed_successfully
+    healthcheck:
+      interval: 2s
+      start_period: 1s
+
+  pairing-relay:
+    <<: *buzz-source-toolchain
+    entrypoint: ["/workspace/target/debug/buzz-pair-relay"]
+    working_dir: /workspace
+    volumes:
+      - ../..:/workspace:ro
+      - buzz-dev-target:/workspace/target
+    depends_on:
+      buzz-dev-build:
+        condition: service_completed_successfully
+    healthcheck:
+      interval: 2s
+      start_period: 1s
+
+volumes:
+  buzz-dev-target:
+    labels:
+      com.buzz.volume: dev-target
+  buzz-dev-cargo-registry:
+    labels:
+      com.buzz.volume: dev-cargo-registry
+  buzz-dev-cargo-git:
+    labels:
+      com.buzz.volume: dev-cargo-git
