@@ -16,6 +16,10 @@ do
     echo "${unit_path} disables the Buzz base prompt or memory" >&2
     exit 1
   fi
+  if ! rg -q -F 'KillMode=mixed' "${unit_path}"; then
+    echo "${unit_path} does not preserve graceful ACP shutdown" >&2
+    exit 1
+  fi
 done
 
 if ! rg -q -F 'Environment=BUZZ_AGENT_COMMAND=/usr/bin/opencode' \
