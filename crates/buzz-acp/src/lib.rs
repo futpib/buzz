@@ -834,7 +834,7 @@ async fn publish_relay_observer_event(
 /// Maximum age (seconds) for an observer control frame to be considered fresh.
 const OBSERVER_CONTROL_FRESHNESS_SECS: i64 = 300;
 
-fn handle_relay_observer_control_event(
+async fn handle_relay_observer_control_event(
     keys: &nostr::Keys,
     event: nostr::Event,
     pool: &mut AgentPool,
@@ -883,7 +883,7 @@ fn handle_relay_observer_control_event(
             handle_cancel_turn_control(&payload, pool, observer);
         }
         Some("switch_model") => {
-            handle_switch_model_control(&payload, pool, observer);
+            handle_switch_model_control(&payload, pool, observer).await;
         }
         _ => {
             tracing::debug!(payload = %payload, "ignoring unknown observer control frame");
@@ -955,7 +955,7 @@ fn handle_cancel_turn_control(
 /// Idle path: validate against the cached catalog *before* invalidating
 /// (pre-cancel guard), then set `desired_model` + invalidate. The override
 /// takes visible effect on the agent's next turn.
-fn handle_switch_model_control(
+async fn handle_switch_model_control(
     payload: &serde_json::Value,
     pool: &mut AgentPool,
     observer: Option<&observer::ObserverHandle>,
@@ -1000,7 +1000,7 @@ fn handle_switch_model_control(
         }
     } else {
         // Idle path: validate against the cached catalog before invalidating.
-        match pool.switch_idle_agent_model(channel_id, model_id) {
+        match pool.switch_idle_agent_model(channel_id, model_id).await {
             IdleSwitchResult::Switched => "switched",
             IdleSwitchResult::UnsupportedModel => "unsupported_model",
             IdleSwitchResult::NoIdleAgent => "no_active_turn",
@@ -1992,7 +1992,7 @@ async fn tokio_main() -> Result<()> {
                     match control_event {
                         Some(event) => {
                             if let Some(ref owner_hex) = owner_cache.pubkey {
-                                handle_relay_observer_control_event(&config.keys, event, &mut pool, observer.as_ref(), owner_hex);
+                                handle_relay_observer_control_event(&config.keys, event, &mut pool, observer.as_ref(), owner_hex).await;
                             } else {
                                 tracing::warn!("observer control frame received but no owner resolved — dropping");
                             }
@@ -2092,7 +2092,7 @@ async fn tokio_main() -> Result<()> {
                                     // the agent lost access).
                                     let drained_ids = queue.drain_channel(ch);
                                     let invalidated = if pool_ready {
-                                        pool.invalidate_channel_sessions(ch)
+                                        pool.invalidate_channel_sessions(ch).await
                                     } else {
                                         0
                                     };
@@ -2261,7 +2261,7 @@ async fn tokio_main() -> Result<()> {
                                                 "!rotate received — cancelling in-flight turn and rotating session"
                                             );
                                         } else {
-                                            let invalidated = pool.invalidate_channel_sessions(buzz_event.channel_id);
+                                            let invalidated = pool.invalidate_channel_sessions(buzz_event.channel_id).await;
                                             tracing::info!(
                                                 channel_id = %buzz_event.channel_id,
                                                 invalidated,
@@ -2521,7 +2521,7 @@ async fn tokio_main() -> Result<()> {
                 if let PromptSource::Channel(key) = &result.source {
                     typing_channels.remove(key);
                 }
-                if handle_prompt_result(
+                let action = handle_prompt_result(
                     &mut pool,
                     &mut queue,
                     &config,
@@ -2533,8 +2533,9 @@ async fn tokio_main() -> Result<()> {
                     &mut respawn_tasks,
                     observer.clone(),
                     Some(&ctx.rest_client),
-                ) == LoopAction::Exit
-                {
+                )
+                .await;
+                if action == LoopAction::Exit {
                     break;
                 }
                 if drain_ready_join_results(
@@ -2819,7 +2820,7 @@ async fn tokio_main() -> Result<()> {
                 maybe_result = rx_ref.recv() => {
                     if let Some(mut pr) = maybe_result {
                         let idx = pr.agent.index;
-                        pr.agent.acp.shutdown().await;
+                        pr.agent.shutdown().await;
                         tracing::debug!(agent = idx, "reaped checked-out agent on shutdown");
                     }
                     // If None, channel closed — tasks are done.
@@ -2836,15 +2837,14 @@ async fn tokio_main() -> Result<()> {
     // before tasks were aborted.
     while let Ok(mut pr) = pool.result_rx_try_recv() {
         let idx = pr.agent.index;
-        pr.agent.acp.shutdown().await;
+        pr.agent.shutdown().await;
         tracing::debug!(agent = idx, "reaped late-arriving agent on shutdown");
     }
     // Explicitly shut down idle agents still sitting in their slots.
     for slot in pool.agents_mut().iter_mut() {
-        if let Some(agent) = slot.take() {
+        if let Some(mut agent) = slot.take() {
             let idx = agent.index;
-            let mut acp = agent.acp;
-            acp.shutdown().await;
+            agent.shutdown().await;
             tracing::debug!(agent = idx, "reaped idle agent on shutdown");
         }
     }
@@ -3255,7 +3255,7 @@ fn spawn_failure_notice(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn handle_prompt_result(
+async fn handle_prompt_result(
     pool: &mut AgentPool,
     queue: &mut EventQueue,
     config: &Config,
@@ -3395,11 +3395,16 @@ fn handle_prompt_result(
         PromptSource::Heartbeat => *heartbeat_in_flight = false,
     }
 
-    // Strip sessions for channels the agent was removed from while this
-    // agent was checked out. This covers the gap where invalidate_channel_sessions
-    // only touches idle agents.
+    // Retire removed-channel sessions after their last in-flight turn.
     for ch in removed_channels {
-        result.agent.invalidate_channel(ch);
+        let channel_still_active = pool.task_map().values().any(|meta| {
+            meta.conversation
+                .as_ref()
+                .is_some_and(|key| key.channel_id == *ch)
+        });
+        if !channel_still_active {
+            result.agent.invalidate_channel(ch).await;
+        }
     }
 
     let outcome_label = match &result.outcome {
@@ -3900,7 +3905,7 @@ fn spawn_respawn_task(
     respawn_tasks.spawn(async move {
         // Shutdown old agent (reap child, prevent zombie).
         let mut agent = old_agent;
-        agent.acp.shutdown().await;
+        agent.shutdown().await;
         drop(agent);
 
         if !delay.is_zero() {
@@ -3928,7 +3933,7 @@ fn normalized_agent_name(init_result: &serde_json::Value) -> String {
 async fn shutdown_agent_slots(slots: &mut [Option<OwnedAgent>]) {
     for slot in slots {
         if let Some(mut agent) = slot.take() {
-            agent.acp.shutdown().await;
+            agent.shutdown().await;
         }
     }
 }
@@ -3936,11 +3941,11 @@ async fn shutdown_agent_slots(slots: &mut [Option<OwnedAgent>]) {
 async fn shutdown_agent_pool(pool: &mut AgentPool) {
     pool.join_set.shutdown().await;
     while let Ok(mut result) = pool.result_rx_try_recv() {
-        result.agent.acp.shutdown().await;
+        result.agent.shutdown().await;
     }
     for slot in pool.agents_mut() {
         if let Some(mut agent) = slot.take() {
-            agent.acp.shutdown().await;
+            agent.shutdown().await;
         }
     }
 }
@@ -4366,6 +4371,9 @@ async fn run_models(args: ModelsArgs) -> Result<()> {
         }
     }
 
+    if let Err(error) = client.session_close(&session_resp.session_id).await {
+        tracing::warn!("could not close model-discovery session: {error}");
+    }
     client.shutdown().await;
     Ok(())
 }
@@ -5562,7 +5570,8 @@ mod error_outcome_emission_tests {
             &mut respawn_tasks,
             Some(observer.clone()),
             None,
-        );
+        )
+        .await;
 
         let turn_errors: Vec<_> = observer
             .snapshot()
@@ -5727,7 +5736,8 @@ mod error_outcome_emission_tests {
                 &mut respawn_tasks,
                 Some(observer.clone()),
                 None,
-            );
+            )
+            .await;
             let events = observer.snapshot();
             let turn_error = events.iter().find(|e| e.kind == "turn_error").unwrap();
             assert_eq!(
@@ -5817,7 +5827,8 @@ mod error_outcome_emission_tests {
                 &mut respawn_tasks,
                 None,
                 None,
-            );
+            )
+            .await;
             (
                 queue.pending_conversations(),
                 queue.queued_event_count(&key(channel_id)),
@@ -5922,7 +5933,8 @@ mod error_outcome_emission_tests {
                 &mut respawn_tasks,
                 None,
                 None,
-            );
+            )
+            .await;
             (
                 queue.pending_conversations(),
                 queue.queued_event_count(&key(channel_id)),
@@ -6013,7 +6025,8 @@ mod error_outcome_emission_tests {
             &mut respawn_tasks,
             Some(observer.clone()),
             None,
-        );
+        )
+        .await;
 
         let events = observer.snapshot();
         let turn_error = events
@@ -6106,7 +6119,8 @@ mod error_outcome_emission_tests {
             &mut respawn_tasks,
             Some(observer.clone()),
             None,
-        );
+        )
+        .await;
 
         let events = observer.snapshot();
         let turn_error = events
@@ -6221,7 +6235,8 @@ mod error_outcome_emission_tests {
             &mut respawn_tasks,
             Some(observer.clone()),
             None,
-        );
+        )
+        .await;
 
         // Batch preserved as a cancelled merge, not dead-lettered — same
         // treatment as a normal `Cancelled` outcome. `handle_prompt_result`
@@ -6353,7 +6368,8 @@ mod error_outcome_emission_tests {
             &mut respawn_tasks,
             Some(observer.clone()),
             None,
-        );
+        )
+        .await;
 
         // No batch to merge — the queue has nothing pending for any channel.
         assert_eq!(
@@ -6535,7 +6551,8 @@ mod error_outcome_emission_tests {
             &mut respawn_tasks,
             None,
             None,
-        );
+        )
+        .await;
 
         // The batch must not be requeued: pending_channels returns 0.
         assert_eq!(
@@ -6620,7 +6637,8 @@ mod error_outcome_emission_tests {
             &mut respawn_tasks,
             None,
             None,
-        );
+        )
+        .await;
 
         // Non-auth application error: batch IS requeued (first attempt, retry budget > 0).
         assert_eq!(

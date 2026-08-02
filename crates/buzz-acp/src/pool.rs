@@ -114,14 +114,12 @@ pub struct SessionState {
 
 impl SessionState {
     /// Invalidate the session (and turn counter) for a specific prompt source.
-    pub fn invalidate(&mut self, source: &PromptSource) {
+    pub fn invalidate(&mut self, source: &PromptSource) -> Option<String> {
         match source {
-            PromptSource::Channel(key) => {
-                self.invalidate_conversation(key);
-            }
+            PromptSource::Channel(key) => self.invalidate_conversation(key),
             PromptSource::Heartbeat => {
-                self.heartbeat_session = None;
                 self.heartbeat_turn_count = 0;
+                self.heartbeat_session.take()
             }
         }
     }
@@ -129,33 +127,43 @@ impl SessionState {
     /// Invalidate a single conversation's session and turn counter. The
     /// channel's cached core/canvas sections are also cleared so the next
     /// session in that channel re-fetches them.
-    /// Returns `true` if the conversation had an active session.
-    pub fn invalidate_conversation(&mut self, conversation: &ConversationKey) -> bool {
+    /// Returns the retired session ID, if one existed.
+    pub fn invalidate_conversation(&mut self, conversation: &ConversationKey) -> Option<String> {
         self.turn_counts.remove(conversation);
         self.core_sections.remove(&conversation.channel_id);
         self.canvas_sections.remove(&conversation.channel_id);
-        self.sessions.remove(conversation).is_some()
+        self.sessions.remove(conversation)
     }
 
     /// Invalidate every conversation session (and turn counter) in a channel.
-    /// Returns `true` if the channel had at least one active session.
-    pub fn invalidate_channel(&mut self, channel_id: &Uuid) -> bool {
-        let before = self.sessions.len();
-        self.sessions.retain(|k, _| k.channel_id != *channel_id);
+    /// Returns the retired session IDs.
+    pub fn invalidate_channel(&mut self, channel_id: &Uuid) -> Vec<String> {
+        let mut retired = Vec::new();
+        self.sessions.retain(|key, session_id| {
+            if key.channel_id == *channel_id {
+                retired.push(session_id.clone());
+                false
+            } else {
+                true
+            }
+        });
         self.turn_counts.retain(|k, _| k.channel_id != *channel_id);
         self.core_sections.remove(channel_id);
         self.canvas_sections.remove(channel_id);
-        self.sessions.len() != before
+        retired
     }
 
     /// Invalidate all sessions and turn counters (e.g. after agent exit).
-    pub fn invalidate_all(&mut self) {
-        self.sessions.clear();
+    pub fn invalidate_all(&mut self) -> Vec<String> {
+        let mut retired: Vec<String> = self.sessions.drain().map(|(_, id)| id).collect();
+        if let Some(id) = self.heartbeat_session.take() {
+            retired.push(id);
+        }
         self.turn_counts.clear();
-        self.heartbeat_session = None;
         self.heartbeat_turn_count = 0;
         self.core_sections.clear();
         self.canvas_sections.clear();
+        retired
     }
 
     #[cfg(test)]
@@ -164,6 +172,25 @@ impl SessionState {
             || self.turn_counts.keys().any(|k| k.channel_id == *channel_id)
             || self.core_sections.contains_key(channel_id)
             || self.canvas_sections.contains_key(channel_id)
+    }
+}
+
+async fn close_sessions(acp: &AcpClient, session_ids: Vec<String>) {
+    let closes = session_ids.into_iter().map(|session_id| {
+        let mut acp = acp.clone();
+        async move {
+            let result = acp.session_close(&session_id).await;
+            (session_id, result)
+        }
+    });
+    for (session_id, result) in futures_util::future::join_all(closes).await {
+        match result {
+            Ok(true) => tracing::info!(target: "pool::session", "closed session {session_id}"),
+            Ok(false) => {}
+            Err(error) => {
+                tracing::warn!(target: "pool::session", "could not close session {session_id}: {error}");
+            }
+        }
     }
 }
 
@@ -249,8 +276,30 @@ impl OwnedAgent {
         self.runtime().desired_model.clone()
     }
 
-    pub(crate) fn invalidate_channel(&self, channel_id: &Uuid) {
-        self.runtime().sessions.invalidate_channel(channel_id);
+    async fn close_sessions(&mut self, session_ids: Vec<String>) {
+        close_sessions(&self.acp, session_ids).await;
+    }
+
+    async fn retire_source(&mut self, source: &PromptSource) {
+        let session_id = self.runtime().sessions.invalidate(source);
+        self.close_sessions(session_id.into_iter().collect()).await;
+    }
+
+    async fn retire_all(&mut self) {
+        let session_ids = self.runtime().sessions.invalidate_all();
+        self.close_sessions(session_ids).await;
+    }
+
+    pub(crate) async fn invalidate_channel(&mut self, channel_id: &Uuid) -> usize {
+        let session_ids = self.runtime().sessions.invalidate_channel(channel_id);
+        let count = session_ids.len();
+        self.close_sessions(session_ids).await;
+        count
+    }
+
+    pub(crate) async fn shutdown(&mut self) {
+        self.retire_all().await;
+        self.acp.shutdown().await;
     }
 
     pub(crate) fn has_system_prompt_support(&self) -> bool {
@@ -300,7 +349,7 @@ fn apply_completed_before_control_signal(
     state: &mut SessionState,
     source: &PromptSource,
     control_signal: &ControlSignal,
-) {
+) -> Option<String> {
     // Rotate and SwitchModel both invalidate so the next turn creates a fresh
     // session. For SwitchModel the caller has already set `desired_model`, so
     // the fresh session applies the new model on its next creation.
@@ -308,7 +357,9 @@ fn apply_completed_before_control_signal(
         control_signal,
         ControlSignal::Rotate | ControlSignal::SwitchModel(_)
     ) {
-        state.invalidate(source);
+        state.invalidate(source)
+    } else {
+        None
     }
 }
 
@@ -836,21 +887,31 @@ impl AgentPool {
         &mut self.agents
     }
 
-    /// Remove the session for `channel_id` from all idle agents.
+    /// Remove the session for `channel_id` from agents not running that channel.
     ///
     /// Called when the agent is removed from a channel — stale sessions
-    /// should not be reused. Checked-out agents (in-flight) are not
-    /// modified; their sessions will fail naturally on the next prompt
-    /// if the relay rejects the request.
+    /// should not be reused. Sessions with a turn still in flight are retired
+    /// when that channel's last task returns.
     ///
     /// Returns the number of sessions invalidated.
-    pub fn invalidate_channel_sessions(&mut self, channel_id: Uuid) -> usize {
+    pub async fn invalidate_channel_sessions(&mut self, channel_id: Uuid) -> usize {
+        let active_agents: HashSet<usize> = self
+            .task_map
+            .values()
+            .filter_map(|meta| {
+                meta.conversation
+                    .as_ref()
+                    .filter(|key| key.channel_id == channel_id)
+                    .map(|_| meta.agent_index)
+            })
+            .collect();
         let mut count = 0;
-        for slot in &mut self.agents {
+        for (index, slot) in self.agents.iter_mut().enumerate() {
+            if active_agents.contains(&index) {
+                continue;
+            }
             if let Some(agent) = slot.as_mut() {
-                if agent.runtime().sessions.invalidate_channel(&channel_id) {
-                    count += 1;
-                }
+                count += agent.invalidate_channel(&channel_id).await;
             }
         }
         count
@@ -869,7 +930,7 @@ impl AgentPool {
     /// runs a turn (no live session exists to re-emit `session_config_captured`
     /// from an idle agent). This lag is intentional: faking the emit would
     /// surface an override the session has not actually applied.
-    pub fn switch_idle_agent_model(
+    pub async fn switch_idle_agent_model(
         &mut self,
         channel_id: Uuid,
         model_id: &str,
@@ -908,6 +969,7 @@ impl AgentPool {
             }
         }
 
+        let mut retired = Vec::new();
         for agent in self.agents.iter_mut().flatten() {
             if !has_channel_session(agent) {
                 continue;
@@ -915,7 +977,13 @@ impl AgentPool {
             let mut runtime = agent.runtime();
             runtime.desired_model = Some(model_id.to_string());
             runtime.model_overridden = true;
-            runtime.sessions.invalidate_channel(&channel_id);
+            retired.push((
+                agent.acp.clone(),
+                runtime.sessions.invalidate_channel(&channel_id),
+            ));
+        }
+        for (acp, session_ids) in retired {
+            close_sessions(&acp, session_ids).await;
         }
         IdleSwitchResult::Switched
     }
@@ -1734,7 +1802,7 @@ pub async fn run_prompt_task(
                         (sid, true)
                     }
                     Err(AcpError::AgentExited) => {
-                        agent.runtime().sessions.invalidate_all();
+                        let _ = agent.runtime().sessions.invalidate_all();
                         send_prompt_result(
                             &result_tx,
                             &turn_id,
@@ -1777,7 +1845,7 @@ pub async fn run_prompt_task(
                         (sid, true)
                     }
                     Err(AcpError::AgentExited) => {
-                        agent.runtime().sessions.invalidate_all();
+                        let _ = agent.runtime().sessions.invalidate_all();
                         send_prompt_result(
                             &result_tx,
                             &turn_id,
@@ -1869,7 +1937,7 @@ pub async fn run_prompt_task(
                     );
                 }
                 Err(AcpError::AgentExited) => {
-                    agent.runtime().sessions.invalidate_all();
+                    let _ = agent.runtime().sessions.invalidate_all();
                     send_prompt_result(
                         &result_tx,
                         &turn_id,
@@ -1892,10 +1960,10 @@ pub async fn run_prompt_task(
                         .await
                     {
                         Ok(_) => {
-                            agent.runtime().sessions.invalidate(&source);
+                            agent.retire_source(&source).await;
                         }
                         Err(AcpError::AgentExited) => {
-                            agent.runtime().sessions.invalidate_all();
+                            let _ = agent.runtime().sessions.invalidate_all();
                             send_prompt_result(
                                 &result_tx,
                                 &turn_id,
@@ -1911,7 +1979,7 @@ pub async fn run_prompt_task(
                                 target: "pool::session",
                                 "cancel_with_cleanup failed during initial_message timeout: {e}"
                             );
-                            agent.runtime().sessions.invalidate(&source);
+                            agent.retire_source(&source).await;
                         }
                     }
                     send_prompt_result(
@@ -1931,7 +1999,7 @@ pub async fn run_prompt_task(
                         "hard timeout ({}s cap, silence {silence:?}, recently_active={recently_active}) during initial_message for channel {cid} — agent process is unrecoverable",
                         ctx.max_turn_duration.as_secs()
                     );
-                    agent.runtime().sessions.invalidate_all();
+                    agent.retire_all().await;
                     send_prompt_result(
                         &result_tx,
                         &turn_id,
@@ -1947,7 +2015,7 @@ pub async fn run_prompt_task(
                         target: "pool::session",
                         "initial_message failed for channel {cid}: {e} — invalidating session"
                     );
-                    agent.runtime().sessions.invalidate(&source);
+                    agent.retire_source(&source).await;
                     send_prompt_result(
                         &result_tx,
                         &turn_id,
@@ -2123,7 +2191,7 @@ pub async fn run_prompt_task(
                         {
                             Ok(stop_reason) => {
                                 log_stop_reason(&source, &stop_reason);
-                                agent.runtime().sessions.invalidate(&source);
+                                agent.retire_source(&source).await;
                                 let retry_batch =
                                     requeue_cancelled_batch(&ctx, control_signal, batch);
 
@@ -2158,9 +2226,9 @@ pub async fn run_prompt_task(
                                     batch,
                                 );
                                 if failure.invalidate_all {
-                                    agent.runtime().sessions.invalidate_all();
+                                    let _ = agent.runtime().sessions.invalidate_all();
                                 } else {
-                                    agent.runtime().sessions.invalidate(&source);
+                                    agent.retire_source(&source).await;
                                 }
 
                                 let usage = agent.acp.take_turn_usage();
@@ -2213,11 +2281,14 @@ pub async fn run_prompt_task(
                                 "control signal arrived but turn already completed — treating as success"
                             );
                         }
-                        apply_completed_before_control_signal(
-                            &mut agent.runtime().sessions,
-                            &source,
-                            &control_signal,
-                        );
+                        let retired = {
+                            apply_completed_before_control_signal(
+                                &mut agent.runtime().sessions,
+                                &source,
+                                &control_signal,
+                            )
+                        };
+                        agent.close_sessions(retired.into_iter().collect()).await;
                         let usage = agent.acp.take_turn_usage();
                         publish_agent_turn_metric(
                             &ctx,
@@ -2278,7 +2349,7 @@ pub async fn run_prompt_task(
                     target: "pool::session",
                     "rotating session for {source:?} after {stop_reason:?}",
                 );
-                agent.runtime().sessions.invalidate(&source);
+                agent.retire_source(&source).await;
             }
 
             let core_stop = acp_stop_to_core(&stop_reason);
@@ -2304,7 +2375,7 @@ pub async fn run_prompt_task(
         }
         Err(AcpError::AgentExited) => {
             tracing::error!(target: "pool::prompt", "agent {} exited during prompt", agent.index);
-            agent.runtime().sessions.invalidate_all();
+            let _ = agent.runtime().sessions.invalidate_all();
             let usage = agent.acp.take_turn_usage();
             publish_agent_turn_metric(
                 &ctx,
@@ -2364,7 +2435,7 @@ pub async fn run_prompt_task(
                         "agent {} exited during cancel_with_cleanup",
                         agent.index
                     );
-                    agent.runtime().sessions.invalidate_all();
+                    let _ = agent.runtime().sessions.invalidate_all();
                     let usage = agent.acp.take_turn_usage();
                     publish_agent_turn_metric(
                         &ctx,
@@ -2389,7 +2460,7 @@ pub async fn run_prompt_task(
                         target: "pool::prompt",
                         "cancel_with_cleanup error: {e} — invalidating session"
                     );
-                    agent.runtime().sessions.invalidate(&source);
+                    agent.retire_source(&source).await;
                     let usage = agent.acp.take_turn_usage();
                     publish_agent_turn_metric(
                         &ctx,
@@ -2418,7 +2489,7 @@ pub async fn run_prompt_task(
                 "hard timeout ({}s cap, silence {silence:?}, recently_active={recently_active}) — agent process is unrecoverable, invalidating all sessions",
                 ctx.max_turn_duration.as_secs()
             );
-            agent.runtime().sessions.invalidate_all();
+            agent.retire_all().await;
             let usage = agent.acp.take_turn_usage();
             publish_agent_turn_metric(
                 &ctx,
@@ -2444,7 +2515,7 @@ pub async fn run_prompt_task(
             // session state (e.g. bad LLM response). The session is healthy —
             // don't invalidate it. Other errors may have corrupted state.
             if !matches!(e, AcpError::AgentError { .. }) {
-                agent.runtime().sessions.invalidate(&source);
+                agent.retire_source(&source).await;
             }
             let usage = agent.acp.take_turn_usage();
             publish_agent_turn_metric(
@@ -4166,6 +4237,41 @@ mod tests {
             "released capacity is reusable"
         );
     }
+
+    #[tokio::test]
+    async fn channel_invalidation_waits_for_its_last_active_thread() {
+        let acp = AcpClient::spawn("cat", &[], &[], false)
+            .await
+            .expect("spawn inert ACP server");
+        let agent = OwnedAgent::new(0, acp, None, "test".into(), 2);
+        let channel_id = Uuid::new_v4();
+        let conversation = ConversationKey {
+            channel_id,
+            thread_root: Some("active".into()),
+        };
+        agent
+            .runtime()
+            .sessions
+            .sessions
+            .insert(conversation.clone(), "session-active".into());
+        let mut pool = AgentPool::from_slots(vec![Some(agent)]);
+        let task_id = pool.join_set.spawn(async {}).id();
+        pool.task_map.insert(
+            task_id,
+            TaskMeta {
+                agent_index: 0,
+                conversation: Some(conversation.clone()),
+                turn_id: "turn-active".into(),
+                recoverable_batch: None,
+                control_tx: None,
+                steer_tx: None,
+            },
+        );
+
+        assert_eq!(pool.invalidate_channel_sessions(channel_id).await, 0);
+        assert!(pool.has_session_for(&conversation));
+    }
+
     use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
     use serde_json::json;
 
@@ -5392,7 +5498,7 @@ mod tests {
     #[test]
     fn test_invalidate_channel_clears_session_and_turn_count() {
         let (mut s, ch_a, ch_b) = make_state();
-        s.invalidate(&PromptSource::Channel(ch_a.clone()));
+        let _ = s.invalidate(&PromptSource::Channel(ch_a.clone()));
 
         assert!(!s.sessions.contains_key(&ch_a));
         assert!(!s.turn_counts.contains_key(&ch_a));
@@ -5410,7 +5516,7 @@ mod tests {
     #[test]
     fn test_invalidate_heartbeat_clears_session_and_turn_count() {
         let (mut s, ch_a, ch_b) = make_state();
-        s.invalidate(&PromptSource::Heartbeat);
+        let _ = s.invalidate(&PromptSource::Heartbeat);
 
         assert!(s.heartbeat_session.is_none());
         assert_eq!(s.heartbeat_turn_count, 0);
@@ -5425,7 +5531,7 @@ mod tests {
     #[test]
     fn test_invalidate_all_clears_everything() {
         let (mut s, _ch_a, _ch_b) = make_state();
-        s.invalidate_all();
+        let _ = s.invalidate_all();
 
         assert!(s.sessions.is_empty());
         assert!(s.turn_counts.is_empty());
@@ -5438,7 +5544,7 @@ mod tests {
     fn test_invalidate_nonexistent_channel_is_noop() {
         let (mut s, ch_a, ch_b) = make_state();
         let ghost = conv(Uuid::new_v4());
-        s.invalidate(&PromptSource::Channel(ghost));
+        let _ = s.invalidate(&PromptSource::Channel(ghost));
 
         // Everything still intact.
         assert_eq!(s.sessions.len(), 2);
@@ -5452,16 +5558,16 @@ mod tests {
     #[test]
     fn test_invalidate_all_on_empty_state_is_noop() {
         let mut s = SessionState::default();
-        s.invalidate_all(); // should not panic
+        let _ = s.invalidate_all(); // should not panic
         assert!(s.sessions.is_empty());
         assert!(s.turn_counts.is_empty());
         assert!(s.core_sections.is_empty());
     }
 
     #[test]
-    fn test_invalidate_channel_returns_true_when_session_existed() {
+    fn test_invalidate_channel_returns_retired_session() {
         let (mut s, ch_a, ch_b) = make_state();
-        assert!(s.invalidate_channel(&ch_a.channel_id));
+        assert_eq!(s.invalidate_channel(&ch_a.channel_id), vec!["sess-a"]);
         assert!(!s.sessions.contains_key(&ch_a));
         assert!(!s.turn_counts.contains_key(&ch_a));
         assert!(!s.core_sections.contains_key(&ch_a.channel_id));
@@ -5476,10 +5582,10 @@ mod tests {
     }
 
     #[test]
-    fn test_invalidate_channel_returns_false_when_no_session() {
+    fn test_invalidate_channel_returns_empty_when_no_session() {
         let (mut s, _ch_a, _ch_b) = make_state();
         let ghost = Uuid::new_v4();
-        assert!(!s.invalidate_channel(&ghost));
+        assert!(s.invalidate_channel(&ghost).is_empty());
         // Nothing changed.
         assert_eq!(s.sessions.len(), 2);
         assert_eq!(s.turn_counts.len(), 2);
@@ -5492,7 +5598,7 @@ mod tests {
         let (mut s, ch_a, ch_b) = make_state();
         let removed = vec![ch_a.channel_id];
         for ch in &removed {
-            s.invalidate_channel(ch);
+            let _ = s.invalidate_channel(ch);
         }
         assert!(!s.sessions.contains_key(&ch_a));
         assert!(!s.turn_counts.contains_key(&ch_a));
@@ -6651,7 +6757,7 @@ mod tests {
         s.canvas_sections
             .insert(ch, "[Channel Canvas]\nrev abc".into());
 
-        s.invalidate_channel(&ch);
+        let _ = s.invalidate_channel(&ch);
 
         assert!(!s.canvas_sections.contains_key(&ch));
         assert!(!s.sessions.contains_key(&conv(ch)));
@@ -6666,7 +6772,7 @@ mod tests {
         s.canvas_sections.insert(ch_b, "canvas-b".into());
         s.sessions.insert(conv(ch_a), "sess-a".into());
 
-        s.invalidate_all();
+        let _ = s.invalidate_all();
 
         assert!(s.canvas_sections.is_empty());
         assert!(s.sessions.is_empty());
@@ -6682,7 +6788,7 @@ mod tests {
         s.canvas_sections.insert(ch_a, "canvas-a".into());
         s.canvas_sections.insert(ch_b, "canvas-b".into());
 
-        s.invalidate_channel(&ch_a);
+        let _ = s.invalidate_channel(&ch_a);
 
         assert!(!s.canvas_sections.contains_key(&ch_a));
         assert_eq!(s.canvas_sections.get(&ch_b).unwrap(), "canvas-b");
@@ -6716,7 +6822,10 @@ mod tests {
         s.sessions.insert(thread_b.clone(), "sess-b".into());
         s.turn_counts.insert(thread_a.clone(), 4);
 
-        assert!(s.invalidate_conversation(&thread_a));
+        assert_eq!(
+            s.invalidate_conversation(&thread_a).as_deref(),
+            Some("sess-a")
+        );
 
         assert!(!s.sessions.contains_key(&thread_a));
         assert!(!s.turn_counts.contains_key(&thread_a));
@@ -6737,7 +6846,11 @@ mod tests {
         s.sessions.insert(thread_conv(ch, "bbbb"), "sess-b".into());
         s.sessions.insert(conv(other), "sess-other".into());
 
-        assert!(s.invalidate_channel(&ch));
+        let retired = s.invalidate_channel(&ch);
+        assert_eq!(retired.len(), 3);
+        assert!(retired.iter().any(|id| id == "sess-top"));
+        assert!(retired.iter().any(|id| id == "sess-a"));
+        assert!(retired.iter().any(|id| id == "sess-b"));
 
         assert!(!s.has_channel_state(&ch));
         assert_eq!(

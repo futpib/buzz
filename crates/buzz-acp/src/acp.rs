@@ -226,6 +226,7 @@ struct AcpShared {
     next_id: AtomicU64,
     observer: Arc<Mutex<ObserverRouting>>,
     steering_supported: AtomicBool,
+    session_close_supported: AtomicBool,
     goose_usage: Mutex<UsageTracker>,
     shutting_down: AtomicBool,
 }
@@ -818,6 +819,7 @@ impl AcpClient {
             next_id: AtomicU64::new(0),
             observer,
             steering_supported: AtomicBool::new(false),
+            session_close_supported: AtomicBool::new(false),
             goose_usage: Mutex::new(UsageTracker::default()),
             shutting_down: AtomicBool::new(false),
         });
@@ -893,6 +895,12 @@ impl AcpClient {
                 .pointer("/_meta/steering/supported")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false),
+            Ordering::Release,
+        );
+        self.shared.session_close_supported.store(
+            result
+                .pointer("/agentCapabilities/sessionCapabilities/close")
+                .is_some_and(serde_json::Value::is_object),
             Ordering::Release,
         );
         tracing::debug!(target: "acp::init", "initialize response: {result}");
@@ -1115,6 +1123,22 @@ impl AcpClient {
         self.send_notification("session/cancel", params).await
     }
 
+    /// Close a session when the agent advertised ACP session-close support.
+    ///
+    /// Returns `true` when a request was sent and `false` when the capability
+    /// was absent.
+    pub async fn session_close(&mut self, session_id: &str) -> Result<bool, AcpError> {
+        if !self.session_close_supported() {
+            return Ok(false);
+        }
+        let params = serde_json::json!({
+            "sessionId": session_id,
+        });
+        self.send_request_with_timeout("session/close", params, Self::SESSION_CLOSE_TIMEOUT)
+            .await?;
+        Ok(true)
+    }
+
     /// Returns `true` if a `session/prompt` request is currently in flight.
     pub fn has_in_flight_prompt(&self) -> bool {
         self.last_prompt_id.is_some()
@@ -1141,6 +1165,11 @@ impl AcpClient {
     /// for the supervisor's post-initialize log line.
     pub fn steering_supported(&self) -> bool {
         self.shared.steering_supported.load(Ordering::Acquire)
+    }
+
+    /// Whether the agent advertised `agentCapabilities.sessionCapabilities.close`.
+    pub fn session_close_supported(&self) -> bool {
+        self.shared.session_close_supported.load(Ordering::Acquire)
     }
 
     /// Consume and return the per-turn usage record computed from the most
@@ -1319,6 +1348,9 @@ impl AcpClient {
     /// Default timeout for non-prompt RPCs (initialize, session/new, etc.).
     const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
+    /// Session retirement must not stall the harness main loop.
+    const SESSION_CLOSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
     /// Send a JSON-RPC request and wait for the matching response.
     ///
     /// Assigns the next available id, writes the NDJSON line to stdin,
@@ -1332,6 +1364,16 @@ impl AcpClient {
         &mut self,
         method: &str,
         params: serde_json::Value,
+    ) -> Result<serde_json::Value, AcpError> {
+        self.send_request_with_timeout(method, params, Self::REQUEST_TIMEOUT)
+            .await
+    }
+
+    async fn send_request_with_timeout(
+        &mut self,
+        method: &str,
+        params: serde_json::Value,
+        timeout: std::time::Duration,
     ) -> Result<serde_json::Value, AcpError> {
         let id = self.shared.next_id();
 
@@ -1347,7 +1389,6 @@ impl AcpClient {
         // Wrap write + read in a single timeout so a hung agent can't block forever.
         // We cannot use an async block that borrows `self` mutably across two awaits
         // inside timeout(), so we sequence them with early-return on timeout.
-        let timeout = Self::REQUEST_TIMEOUT;
         match tokio::time::timeout(timeout, self.write_ndjson(&msg)).await {
             Ok(result) => result?,
             Err(_) => return Err(AcpError::Timeout(timeout)),
@@ -2629,6 +2670,66 @@ mod tests {
         assert!(msg.get("id").is_none());
         // Must have sessionId in params
         assert_eq!(msg["params"]["sessionId"].as_str(), Some("sess_xyz789"));
+    }
+
+    #[tokio::test]
+    async fn session_close_is_capability_gated_and_uses_the_standard_method() {
+        let capture = capture_path("session_close");
+        let script = format!(
+            "read -r _init; \
+             printf '%s\\n' '{{\"jsonrpc\":\"2.0\",\"id\":0,\"result\":{{\"protocolVersion\":2,\"agentCapabilities\":{{\"sessionCapabilities\":{{\"close\":{{}}}}}}}}}}'; \
+             read -r close; printf '%s' \"$close\" > '{}'; \
+             printf '%s\\n' '{{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{{}}}}'; \
+             while read -r _line; do :; done",
+            capture.display(),
+        );
+        let mut client = spawn_script(&script).await;
+        client
+            .initialize()
+            .await
+            .expect("initialize should succeed");
+
+        assert!(client.session_close_supported());
+        assert!(client
+            .session_close("session-7")
+            .await
+            .expect("session/close should succeed"));
+        client.shutdown().await;
+
+        let request: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&capture).expect("read captured close request"),
+        )
+        .expect("close request should be JSON");
+        assert_eq!(request["method"], "session/close");
+        assert_eq!(request["params"]["sessionId"], "session-7");
+        std::fs::remove_file(capture).expect("remove close capture");
+    }
+
+    #[tokio::test]
+    async fn session_close_writes_nothing_when_not_advertised() {
+        let capture = capture_path("session_close_unsupported");
+        let script = format!(
+            "read -r _init; \
+             printf '%s\\n' '{{\"jsonrpc\":\"2.0\",\"id\":0,\"result\":{{\"protocolVersion\":2,\"agentCapabilities\":{{}}}}}}'; \
+             while read -r line; do printf '%s' \"$line\" > '{}'; done",
+            capture.display(),
+        );
+        let mut client = spawn_script(&script).await;
+        client
+            .initialize()
+            .await
+            .expect("initialize should succeed");
+
+        assert!(!client.session_close_supported());
+        assert!(!client
+            .session_close("session-7")
+            .await
+            .expect("unsupported close should be a no-op"));
+        client.shutdown().await;
+        assert!(
+            !capture.exists(),
+            "unsupported close must stay off the wire"
+        );
     }
 
     #[test]
