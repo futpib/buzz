@@ -740,6 +740,11 @@ impl EventQueue {
         self.in_flight.contains(conversation)
     }
 
+    /// Whether any conversation currently has a turn in flight.
+    pub fn has_in_flight(&self) -> bool {
+        !self.in_flight.is_empty()
+    }
+
     // ── Goose-native steer withhold (side table) ──────────────────────────
     //
     // While a goose-native `_goose/unstable/session/steer` write is in flight
