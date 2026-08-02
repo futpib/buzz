@@ -119,11 +119,12 @@ All configuration is via environment variables (or CLI flags — every env var h
 
 **Legacy env vars:** `BUZZ_ACP_PRIVATE_KEY`, `BUZZ_ACP_API_TOKEN`, and `BUZZ_ACP_TURN_TIMEOUT` (replaced by `BUZZ_ACP_IDLE_TIMEOUT`) are still accepted as fallbacks.
 
-### Parallel Agents & Heartbeat
+### Session Concurrency & Heartbeat
 
 | Flag | Env Var | Default | Description |
 |------|---------|---------|-------------|
-| `--agents` | `BUZZ_ACP_AGENTS` | `1` | Number of agent subprocesses (1–32). |
+| `--agents` | `BUZZ_ACP_AGENTS` | `1` | Legacy subprocess count. Thread sessions are multiplexed over one process. |
+| `--session-concurrency` | `BUZZ_ACP_SESSION_CONCURRENCY` | `4` | Concurrent ACP sessions on the shared connection (1–32). Set to `1` for compatibility serialization. |
 | `--lazy-pool` | `BUZZ_ACP_LAZY_POOL` | `false` | Connect, subscribe, and queue accepted work before starting ACP/LLM subprocesses. The first accepted event wakes one pool initialization task; failures retry with bounded exponential backoff while work remains. |
 | `--heartbeat-interval` | `BUZZ_ACP_HEARTBEAT_INTERVAL` | `0` | Seconds between heartbeat prompts. `0` = disabled. Must be `0` or ≥10 when enabled. |
 | `--heartbeat-prompt` | `BUZZ_ACP_HEARTBEAT_PROMPT` | (built-in) | Custom heartbeat prompt text. Conflicts with `--heartbeat-prompt-file`. |
@@ -185,25 +186,25 @@ buzz-acp --respond-to nobody --heartbeat-interval 300
 buzz-acp
 ```
 
-**Four agents, no heartbeat (high-throughput event processing):**
+**Eight concurrent threads on one ACP connection:**
 ```bash
-buzz-acp --agents 4
+buzz-acp --session-concurrency 8
 ```
 
-**Two agents with 5-minute heartbeat:**
+**Four concurrent threads with 5-minute heartbeat:**
 ```bash
-buzz-acp --agents 2 --heartbeat-interval 300
+buzz-acp --heartbeat-interval 300
 ```
 
 **Custom heartbeat prompt:**
 ```bash
-buzz-acp --agents 2 --heartbeat-interval 300 \
+buzz-acp --heartbeat-interval 300 \
   --heartbeat-prompt "Check get_feed_actions() for pending approvals, then get_feed_mentions() for unanswered mentions. If nothing actionable, end your turn immediately."
 ```
 
 ### Shared Identity
 
-All N agents authenticate as the **same Nostr bot identity** — users see one bot regardless of how many agents are running. The same channel is never processed by two agents simultaneously (the queue enforces this). Cross-channel message ordering is not guaranteed when N>1.
+All sessions authenticate as the **same Nostr bot identity** and share one ACP process. A stream thread remains serialized, while different threads can run concurrently. Cross-thread message ordering is not guaranteed.
 
 ### Heartbeat Semantics
 

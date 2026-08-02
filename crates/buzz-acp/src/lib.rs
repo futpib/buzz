@@ -38,7 +38,7 @@ use futures_util::FutureExt;
 use nostr::{PublicKey, ToBech32};
 use pool::{
     AgentPool, ControlSignal, IdleSwitchResult, OwnedAgent, PromptContext, PromptOutcome,
-    PromptResult, PromptSource, SessionState, TimeoutKind,
+    PromptResult, PromptSource, TimeoutKind,
 };
 use pool_lifecycle::PoolLifecycle;
 use queue::{CancelReason, ConversationKey, EventQueue, FlushBatch, QueuedEvent, ThreadTags};
@@ -1314,15 +1314,13 @@ async fn tokio_main() -> Result<()> {
         return setup_mode::run_setup_listener(config, payload).await;
     }
 
-    // Conversation sessions are intentionally sticky: every reply in a
-    // stream thread must return to the ACP process that owns that thread's
-    // session. Until the pool has explicit ownership scheduling, one worker is
-    // the only configuration that guarantees this invariant.
+    // One subprocess owns the multiplexed ACP connection. Parallelism lives at
+    // the session layer, where request IDs and session IDs provide exact routing.
     if config.agents != 1 {
         tracing::warn!(
             requested = config.agents,
             effective = 1,
-            "thread-scoped ACP sessions require one worker; limiting parallelism"
+            "ACP sessions share one multiplexed connection; limiting subprocesses"
         );
         config.agents = 1;
     }
@@ -1341,14 +1339,17 @@ async fn tokio_main() -> Result<()> {
                 "relayUrl": config.relay_url,
                 "agentCommand": config.agent_command,
                 "agentArgs": config.agent_args,
-                "parallelism": config.agents,
+                "parallelism": config.session_concurrency,
+                "agentProcesses": config.agents,
                 "relayObserver": config.relay_observer,
             }),
         );
     }
 
     let mut pool = if config.lazy_pool {
-        AgentPool::from_slots((0..config.agents).map(|_| None).collect())
+        let mut pool = AgentPool::from_slots((0..config.agents).map(|_| None).collect());
+        pool.set_session_concurrency(config.session_concurrency as usize);
+        pool
     } else {
         initialize_agent_pool(&PoolStartup::from_config(&config, observer.clone()), None).await?
     };
@@ -1820,18 +1821,14 @@ async fn tokio_main() -> Result<()> {
             crash_history[rr.index].respawn_in_flight = false;
             match rr.result {
                 Ok((acp, protocol_version, agent_name)) => {
-                    let agent = OwnedAgent {
-                        index: rr.index,
+                    let agent = OwnedAgent::new(
+                        rr.index,
                         acp,
-                        state: SessionState::default(),
-                        model_capabilities: None,
-                        desired_model: config.model.clone(),
-                        model_overridden: false,
+                        config.model.clone(),
                         agent_name,
-                        goose_system_prompt_supported: None,
                         protocol_version,
-                    };
-                    pool.return_agent(agent);
+                    );
+                    pool.replace_agent(agent);
                     tracing::info!(agent = rr.index, "respawn complete");
                     respawn_collected = true;
                 }
@@ -3171,9 +3168,8 @@ fn handle_prompt_result(
     rest_client: Option<&relay::RestClient>,
 ) -> LoopAction {
     let before = pool.task_map().len();
-    let agent_index = result.agent.index;
     pool.task_map_mut()
-        .retain(|_, meta| meta.agent_index != agent_index);
+        .retain(|_, meta| meta.turn_id != result.turn_id);
     debug_assert_eq!(before, pool.task_map().len() + 1);
 
     // The hard-timeout death_message (below) must describe the batch's
@@ -3302,7 +3298,7 @@ fn handle_prompt_result(
     // agent was checked out. This covers the gap where invalidate_channel_sessions
     // only touches idle agents.
     for ch in removed_channels {
-        result.agent.state.invalidate_channel(ch);
+        result.agent.invalidate_channel(ch);
     }
 
     let outcome_label = match &result.outcome {
@@ -3323,7 +3319,7 @@ fn handle_prompt_result(
     // still valuable for identifying a stale orphan running an old model.
     let harness_configured_model = result
         .agent
-        .desired_model
+        .desired_model()
         .as_deref()
         .unwrap_or("<none>")
         .to_string();
@@ -3363,7 +3359,7 @@ fn handle_prompt_result(
             pool.return_agent(result.agent);
         }
         // Fatal outcomes: the agent subprocess is dead or poisoned — respawn it.
-        PromptOutcome::AgentExited | PromptOutcome::Timeout(_) => {
+        PromptOutcome::AgentExited | PromptOutcome::Timeout(TimeoutKind::Hard { .. }) => {
             tracing::warn!(
                 agent = agent_index,
                 outcome = outcome_label,
@@ -3388,6 +3384,7 @@ fn handle_prompt_result(
             emit_turn_error(&death_message, None);
 
             let index = result.agent.index;
+            pool.retire_agent(&result.agent);
             let slot_history = &mut crash_history[index];
             if !spawn_respawn_task(
                 result.agent,
@@ -3403,6 +3400,12 @@ fn handle_prompt_result(
                     return LoopAction::Exit;
                 }
             }
+        }
+        // A clean idle-timeout cancellation poisons only that ACP session, not
+        // the multiplexed connection. Keep unrelated threads running.
+        PromptOutcome::Timeout(TimeoutKind::Idle) => {
+            emit_turn_error("Agent turn timed out due to inactivity", None);
+            pool.return_agent(result.agent);
         }
         // Cancel-drain expiry: a control-signal cancel (steer fallback,
         // interrupt, or explicit stop) did not drain within its bounded
@@ -3428,6 +3431,7 @@ fn handle_prompt_result(
             emit_turn_error(&death_message, None);
 
             let index = result.agent.index;
+            pool.retire_agent(&result.agent);
             let slot_history = &mut crash_history[index];
             if !spawn_respawn_task(
                 result.agent,
@@ -3493,6 +3497,7 @@ fn handle_prompt_result(
                 emit_turn_error(&e.to_string(), error_code);
 
                 let index = result.agent.index;
+                pool.retire_agent(&result.agent);
                 let slot_history = &mut crash_history[index];
                 if !spawn_respawn_task(
                     result.agent,
@@ -3587,44 +3592,19 @@ fn recover_panicked_agent(
         );
     }
 
-    // Panics count as crashes for the circuit breaker.
-    // The panicked task already dropped the AcpClient, so we just need to
-    // check the circuit and spawn a fresh agent in the background.
-    let slot = &mut crash_history[i];
-
-    let delay = match slot.record_crash() {
-        CrashVerdict::CircuitOpen => {
-            tracing::error!(agent = i, "circuit open after panic — not respawning");
-            return;
-        }
-        CrashVerdict::HalfOpenProbe => {
-            tracing::info!(agent = i, "circuit half-open — probe respawn after panic");
-            Duration::ZERO
-        }
-        CrashVerdict::Respawn(d) => {
-            tracing::info!(
-                agent = i,
-                delay_ms = d.as_millis(),
-                "respawn backoff after panic"
-            );
-            d
-        }
-    };
-
-    // Spawn respawn work off the main loop.
-    slot.respawn_in_flight = true;
-    let cmd = config.agent_command.clone();
-    let args = config.agent_args.clone();
-    let env = config.persona_env_vars.clone();
-    let has_codex = config.has_generated_codex_config;
-    let guard = RespawnGuard::new(i, respawn_tx.clone());
-    respawn_tasks.spawn(async move {
-        if !delay.is_zero() {
-            tokio::time::sleep(delay).await;
-        }
-        let result = spawn_and_init(&cmd, &args, &env, has_codex, i, observer).await;
-        guard.send(result);
-    });
+    // A panic can leave its backend turn running without a subscriber to drain
+    // it. Retire the connection once; sibling leases will observe EOF and the
+    // shared respawn guard prevents duplicate replacement processes.
+    if let Some(agent) = pool.take_agent(i) {
+        let _ = spawn_respawn_task(
+            agent,
+            config,
+            &mut crash_history[i],
+            respawn_tx,
+            respawn_tasks,
+            observer,
+        );
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3787,6 +3767,10 @@ fn spawn_respawn_task(
     observer: Option<observer::ObserverHandle>,
 ) -> bool {
     let index = old_agent.index;
+    if slot.respawn_in_flight {
+        tracing::debug!(agent = index, "shared ACP process already respawning");
+        return true;
+    }
 
     // Circuit breaker: record crash, decide whether to respawn.
     let delay = match slot.record_crash() {
@@ -3862,6 +3846,7 @@ async fn shutdown_agent_pool(pool: &mut AgentPool) {
 
 struct PoolStartup {
     agents: u32,
+    session_concurrency: u32,
     command: String,
     args: Vec<String>,
     extra_env: Vec<(String, String)>,
@@ -3874,6 +3859,7 @@ impl PoolStartup {
     fn from_config(config: &Config, observer: Option<observer::ObserverHandle>) -> Self {
         Self {
             agents: config.agents,
+            session_concurrency: config.session_concurrency,
             command: config.agent_command.clone(),
             args: config.agent_args.clone(),
             extra_env: config.persona_env_vars.clone(),
@@ -3939,17 +3925,13 @@ async fn initialize_agent_pool(
                             }),
                         );
                         let agent_name = normalized_agent_name(&init_result);
-                        agent_slots.push(Some(OwnedAgent {
-                            index: i,
+                        agent_slots.push(Some(OwnedAgent::new(
+                            i,
                             acp,
-                            state: SessionState::default(),
-                            model_capabilities: None,
-                            desired_model: startup.model.clone(),
-                            model_overridden: false,
+                            startup.model.clone(),
                             agent_name,
-                            goose_system_prompt_supported: None,
                             protocol_version,
-                        }));
+                        )));
                     }
                     Ok(Err(e)) => {
                         tracing::error!(agent = i, "agent initialize failed: {e}");
@@ -3984,7 +3966,9 @@ async fn initialize_agent_pool(
         );
     }
     tracing::info!("agent_pool_ready agents={}", live_count);
-    Ok(AgentPool::from_slots(agent_slots))
+    let mut pool = AgentPool::from_slots(agent_slots);
+    pool.set_session_concurrency(startup.session_concurrency as usize);
+    Ok(pool)
 }
 
 // ── spawn_and_init ────────────────────────────────────────────────────────────
@@ -5120,6 +5104,7 @@ mod build_mcp_servers_tests {
             idle_timeout_secs: config::DEFAULT_IDLE_TIMEOUT_SECS,
             max_turn_duration_secs: config::DEFAULT_MAX_TURN_DURATION_SECS,
             agents: 1,
+            session_concurrency: config::DEFAULT_SESSION_CONCURRENCY,
             heartbeat_interval_secs: 0,
             turn_liveness_secs: 10,
             heartbeat_prompt: None,
@@ -5349,6 +5334,7 @@ mod error_outcome_emission_tests {
             idle_timeout_secs: config::DEFAULT_IDLE_TIMEOUT_SECS,
             max_turn_duration_secs: config::DEFAULT_MAX_TURN_DURATION_SECS,
             agents: 1,
+            session_concurrency: config::DEFAULT_SESSION_CONCURRENCY,
             heartbeat_interval_secs: 0,
             turn_liveness_secs: 10,
             heartbeat_prompt: None,
@@ -5404,21 +5390,17 @@ mod error_outcome_emission_tests {
     /// an `OwnedAgent` to move into respawn or return to the pool. The error
     /// branches never talk to the subprocess.
     async fn dummy_agent(index: usize) -> OwnedAgent {
-        OwnedAgent {
+        OwnedAgent::new(
             index,
-            acp: AcpClient::spawn("cat", &[], &[], false)
+            AcpClient::spawn("cat", &[], &[], false)
                 .await
                 .expect("spawn cat as inert agent"),
-            state: Default::default(),
-            model_capabilities: None,
-            desired_model: None,
-            model_overridden: false,
-            agent_name: "unknown".into(),
-            goose_system_prompt_supported: None,
+            None,
+            "unknown".into(),
             // Error branches under test never read this; 1 is the legacy
             // non-systemPrompt path, the simplest valid value.
-            protocol_version: 1,
-        }
+            1,
+        )
     }
 
     /// Drive one error outcome through `handle_prompt_result` and return how

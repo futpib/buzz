@@ -9,8 +9,14 @@
 //! 5. [`AcpClient::session_cancel`] / [`AcpClient::cancel_with_cleanup`] — cancel in-flight turn
 
 use futures_util::StreamExt;
+use std::collections::HashMap;
+use std::sync::{
+    atomic::{AtomicBool, AtomicU64, Ordering},
+    Arc, Mutex,
+};
 use tokio::io::AsyncWriteExt;
 use tokio::process::{Child, ChildStdin, ChildStdout};
+use tokio::sync::{broadcast, Mutex as AsyncMutex};
 use tokio_util::codec::{FramedRead, LinesCodec, LinesCodecError};
 
 use crate::observer::{ObserverContext, ObserverHandle};
@@ -144,28 +150,10 @@ fn build_initialize_params() -> serde_json::Value {
 /// One `AcpClient` per agent process. Multiple sessions can be created on the
 /// same client via repeated calls to [`session_new`](AcpClient::session_new).
 pub struct AcpClient {
-    /// The agent child process (kept alive to prevent zombie).
-    child: Child,
-    /// Write end of the agent's stdin pipe. Taken and dropped to deliver EOF
-    /// before a deliberate shutdown waits for the child.
-    stdin: Option<ChildStdin>,
-    /// Framed reader over the agent's stdout pipe (line-oriented, bounded).
-    /// Uses `LinesCodec::new_with_max_length` to enforce MAX_LINE_SIZE at the
-    /// read level — prevents OOM from rogue agents writing infinite non-newline bytes.
-    reader: FramedRead<ChildStdout, LinesCodec>,
-    /// Monotonically increasing JSON-RPC request id counter.
-    /// Harness-generated IDs are always numeric.
-    next_id: u64,
-    /// The id of a `session/request_permission` request that has been received
-    /// but not yet responded to. Stored as `serde_json::Value` because JSON-RPC 2.0
-    /// permits both numeric and string IDs from the agent.
-    /// Used by [`cancel_with_cleanup`](AcpClient::cancel_with_cleanup) to send
-    /// a `cancelled` outcome before the agent returns from `session/prompt`.
-    pending_permission_id: Option<serde_json::Value>,
-    /// Whether we have already sent a response to the pending permission request.
-    /// Guards against double-response if a timeout fires after the allow_once
-    /// response was written but before `pending_permission_id` was cleared.
-    permission_responded: bool,
+    /// Process-wide transport shared by every logical session lease.
+    shared: Arc<AcpShared>,
+    /// Independent subscription into the single stdout reader pump.
+    inbound: broadcast::Receiver<Inbound>,
     /// The JSON-RPC id of the most recently sent `session/prompt` request.
     /// Used by [`cancel_with_cleanup`] to drain the correct response.
     /// Set in [`session_prompt_with_idle_timeout`]; consumed in [`cancel_with_cleanup`].
@@ -175,9 +163,6 @@ pub struct AcpClient {
     /// rather than starting a fresh timer (prevents double-jeopardy).
     current_hard_deadline: Option<tokio::time::Instant>,
     /// Optional local observer feed used by the desktop app.
-    observer: Option<ObserverHandle>,
-    /// Pool slot index for this agent process.
-    observer_agent_index: Option<usize>,
     /// Best-effort context attached to raw ACP wire events.
     observer_context: ObserverContext,
     /// Most recently observed `_meta.goose.activeRunId` from a
@@ -205,7 +190,6 @@ pub struct AcpClient {
     /// probing: codex-acp answers unrecognized extension methods with `{}` —
     /// a JSON-RPC *success*, not `-32601` — which the main loop would read as
     /// a delivered steer and drop the user's message from the queue.
-    steering_supported: bool,
     /// Per-turn channel for receiving goose-native non-cancelling steer
     /// requests from the main loop. Installed by
     /// [`install_steer_rx`](Self::install_steer_rx) at dispatch and
@@ -218,7 +202,47 @@ pub struct AcpClient {
     /// `_goose/unstable/session/update` notifications and computes per-turn
     /// deltas. Both goose and buzz-agent emit this notification; goose gates
     /// on client capability advertisement, buzz-agent emits unconditionally.
-    goose_usage: UsageTracker,
+    usage_session: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+enum Inbound {
+    Message(serde_json::Value),
+    Exited,
+    Failed(String),
+}
+
+#[derive(Default)]
+struct ObserverRouting {
+    handle: Option<ObserverHandle>,
+    agent_index: Option<usize>,
+    sessions: HashMap<String, ObserverContext>,
+}
+
+struct AcpShared {
+    child: Mutex<Option<Child>>,
+    stdin: Arc<AsyncMutex<Option<ChildStdin>>>,
+    inbound: broadcast::Sender<Inbound>,
+    next_id: AtomicU64,
+    observer: Arc<Mutex<ObserverRouting>>,
+    steering_supported: AtomicBool,
+    goose_usage: Mutex<UsageTracker>,
+    shutting_down: AtomicBool,
+}
+
+impl Clone for AcpClient {
+    fn clone(&self) -> Self {
+        Self {
+            shared: Arc::clone(&self.shared),
+            inbound: self.shared.inbound.subscribe(),
+            last_prompt_id: None,
+            current_hard_deadline: None,
+            observer_context: self.observer_context.clone(),
+            active_run_id: None,
+            steer_rx: None,
+            usage_session: None,
+        }
+    }
 }
 
 /// Recursively merge `overlay` into `base`, with `overlay` winning on scalar/shape
@@ -418,6 +442,195 @@ fn build_client_capabilities() -> serde_json::Value {
     })
 }
 
+impl AcpShared {
+    fn next_id(&self) -> u64 {
+        self.next_id.fetch_add(1, Ordering::Relaxed)
+    }
+
+    fn observer_parts(&self) -> (Option<ObserverHandle>, Option<usize>) {
+        self.observer
+            .lock()
+            .map(|routing| (routing.handle.clone(), routing.agent_index))
+            .unwrap_or_default()
+    }
+
+    fn context_for_message(&self, value: &serde_json::Value) -> ObserverContext {
+        let session_id = value
+            .pointer("/params/sessionId")
+            .and_then(|value| value.as_str());
+        match (self.observer.lock(), session_id) {
+            (Ok(routing), Some(session_id)) => routing
+                .sessions
+                .get(session_id)
+                .cloned()
+                .unwrap_or_else(|| ObserverContext {
+                    session_id: Some(session_id.to_owned()),
+                    ..ObserverContext::default()
+                }),
+            _ => ObserverContext::default(),
+        }
+    }
+
+    fn observe_wire(&self, kind: &str, value: &serde_json::Value) {
+        let (handle, agent_index) = self.observer_parts();
+        if let Some(handle) = handle {
+            handle.emit(
+                kind,
+                agent_index,
+                &self.context_for_message(value),
+                value.clone(),
+            );
+        }
+    }
+
+    async fn write_ndjson(&self, value: &serde_json::Value) -> Result<(), AcpError> {
+        const WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+        let line = serde_json::to_string(value)?;
+        let mut stdin = self.stdin.lock().await;
+        let stdin = stdin
+            .as_mut()
+            .ok_or_else(|| AcpError::Protocol("agent stdin is closed".into()))?;
+        tokio::time::timeout(WRITE_TIMEOUT, async {
+            stdin.write_all(line.as_bytes()).await?;
+            stdin.write_all(b"\n").await?;
+            stdin.flush().await?;
+            Ok::<(), std::io::Error>(())
+        })
+        .await
+        .map_err(|_| AcpError::WriteTimeout(WRITE_TIMEOUT))?
+        .map_err(AcpError::Io)?;
+        self.observe_wire("acp_write", value);
+        Ok(())
+    }
+}
+
+async fn run_reader_pump(
+    stdout: ChildStdout,
+    stdin: Arc<AsyncMutex<Option<ChildStdin>>>,
+    inbound: broadcast::Sender<Inbound>,
+    observer: Arc<Mutex<ObserverRouting>>,
+) {
+    let mut reader = FramedRead::new(stdout, LinesCodec::new_with_max_length(MAX_LINE_SIZE));
+    while let Some(line) = reader.next().await {
+        let line = match line {
+            Ok(line) => line,
+            Err(LinesCodecError::MaxLineLengthExceeded) => {
+                let _ = inbound.send(Inbound::Failed(
+                    "agent stdout line exceeded 10MB limit".into(),
+                ));
+                return;
+            }
+            Err(error) => {
+                let _ = inbound.send(Inbound::Failed(error.to_string()));
+                return;
+            }
+        };
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        tracing::debug!(target: "acp::wire", "← {trimmed}");
+        let message: serde_json::Value = match serde_json::from_str(trimmed) {
+            Ok(value) => value,
+            Err(error) => {
+                tracing::warn!(target: "acp::wire", "failed to parse line as JSON: {error} — skipping");
+                continue;
+            }
+        };
+
+        if let Ok(routing) = observer.lock() {
+            if let Some(handle) = &routing.handle {
+                let session_id = message
+                    .pointer("/params/sessionId")
+                    .and_then(|value| value.as_str());
+                let context = session_id
+                    .and_then(|id| routing.sessions.get(id).cloned())
+                    .unwrap_or_else(|| ObserverContext {
+                        session_id: session_id.map(str::to_owned),
+                        ..ObserverContext::default()
+                    });
+                handle.emit("acp_read", routing.agent_index, &context, message.clone());
+            }
+        }
+
+        // Publish first so the owning prompt's idle clock observes permission
+        // traffic. The pump itself is the sole responder, preventing duplicate
+        // replies when several session subscribers see the same frame.
+        let _ = inbound.send(Inbound::Message(message.clone()));
+
+        let method = message.get("method").and_then(|value| value.as_str());
+        let response = match method {
+            Some("session/request_permission") => permission_response_for_request(&message),
+            Some("session/update") | Some("_goose/unstable/session/update") | None => None,
+            Some(other) if message.get("id").is_some() => Some(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": message["id"],
+                "error": {"code": -32601, "message": format!("Method not found: {other}")}
+            })),
+            Some(_) => None,
+        };
+        if let Some(response) = response {
+            let line = match serde_json::to_string(&response) {
+                Ok(line) => line,
+                Err(error) => {
+                    let _ = inbound.send(Inbound::Failed(error.to_string()));
+                    return;
+                }
+            };
+            let write = async {
+                let mut guard = stdin.lock().await;
+                let writer = guard
+                    .as_mut()
+                    .ok_or_else(|| std::io::Error::other("agent stdin is closed"))?;
+                writer.write_all(line.as_bytes()).await?;
+                writer.write_all(b"\n").await?;
+                writer.flush().await
+            };
+            match tokio::time::timeout(std::time::Duration::from_secs(30), write).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    let _ = inbound.send(Inbound::Failed(error.to_string()));
+                    return;
+                }
+                Err(_) => {
+                    let _ = inbound.send(Inbound::Failed(
+                        "permission response write timed out".into(),
+                    ));
+                    return;
+                }
+            }
+        }
+    }
+    let _ = inbound.send(Inbound::Exited);
+}
+
+fn permission_response_for_request(message: &serde_json::Value) -> Option<serde_json::Value> {
+    let id = message.get("id")?.clone();
+    let selected = message
+        .pointer("/params/options")
+        .and_then(|options| options.as_array())
+        .and_then(|options| {
+            options
+                .iter()
+                .find(|option| {
+                    option.get("kind").and_then(|kind| kind.as_str()) == Some("allow_once")
+                })
+                .or_else(|| {
+                    options.iter().find(|option| {
+                        option.get("kind").and_then(|kind| kind.as_str()) == Some("reject_once")
+                    })
+                })
+        });
+    match selected.and_then(|option| option.get("optionId")?.as_str()) {
+        Some(option_id) => Some(permission_response_selected(&id, option_id)),
+        None => Some(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "error": {"code": -32602, "message": "permission request has no usable option"}
+        })),
+    }
+}
+
 impl AcpClient {
     /// Gracefully close the agent's stdin and wait for it to exit.
     ///
@@ -438,14 +651,27 @@ impl AcpClient {
         graceful_timeout: std::time::Duration,
         forced_timeout: std::time::Duration,
     ) -> bool {
-        if let Some(mut stdin) = self.stdin.take() {
+        if self.shared.shutting_down.swap(true, Ordering::AcqRel) {
+            return true;
+        }
+        if let Some(mut stdin) = self.shared.stdin.lock().await.take() {
             if let Err(error) = stdin.shutdown().await {
                 tracing::debug!("could not flush agent stdin during graceful shutdown: {error}");
             }
             drop(stdin);
         }
 
-        match tokio::time::timeout(graceful_timeout, self.child.wait()).await {
+        let Some(mut child) = self
+            .shared
+            .child
+            .lock()
+            .ok()
+            .and_then(|mut child| child.take())
+        else {
+            return true;
+        };
+
+        match tokio::time::timeout(graceful_timeout, child.wait()).await {
             Ok(Ok(status)) => {
                 tracing::debug!(%status, "agent exited after stdin EOF");
                 return true;
@@ -464,14 +690,14 @@ impl AcpClient {
         // The child was spawned with process_group(0), so its PID == its PGID.
         // Killing the entire group also removes MCP servers and tool processes.
         // Fall back to the direct child on platforms without process groups.
-        match self.child.id() {
+        match child.id() {
             Some(pid) if kill_process_group(pid) => {}
             _ => {
-                let _ = self.child.start_kill();
+                let _ = child.start_kill();
             }
         }
 
-        match tokio::time::timeout(forced_timeout, self.child.wait()).await {
+        match tokio::time::timeout(forced_timeout, child.wait()).await {
             Ok(Ok(_)) => {}
             Ok(Err(e)) => tracing::debug!("child wait error after kill: {e}"),
             Err(_) => tracing::warn!(
@@ -576,55 +802,75 @@ impl AcpClient {
             .take()
             .ok_or_else(|| AcpError::Protocol("failed to open agent stdout".into()))?;
 
+        let (inbound_tx, inbound_rx) = broadcast::channel(4096);
+        let stdin = Arc::new(AsyncMutex::new(Some(stdin)));
+        let observer = Arc::new(Mutex::new(ObserverRouting::default()));
+        tokio::spawn(run_reader_pump(
+            stdout,
+            Arc::clone(&stdin),
+            inbound_tx.clone(),
+            Arc::clone(&observer),
+        ));
+        let shared = Arc::new(AcpShared {
+            child: Mutex::new(Some(child)),
+            stdin,
+            inbound: inbound_tx,
+            next_id: AtomicU64::new(0),
+            observer,
+            steering_supported: AtomicBool::new(false),
+            goose_usage: Mutex::new(UsageTracker::default()),
+            shutting_down: AtomicBool::new(false),
+        });
+
         Ok(Self {
-            child,
-            stdin: Some(stdin),
-            reader: FramedRead::new(stdout, LinesCodec::new_with_max_length(MAX_LINE_SIZE)),
-            next_id: 0,
-            pending_permission_id: None,
-            permission_responded: false,
+            shared,
+            inbound: inbound_rx,
             last_prompt_id: None,
             current_hard_deadline: None,
-            observer: None,
-            observer_agent_index: None,
             observer_context: ObserverContext::default(),
             active_run_id: None,
-            steering_supported: false,
             steer_rx: None,
-            goose_usage: UsageTracker::default(),
+            usage_session: None,
         })
     }
 
     /// Attach a local observer feed to this ACP client.
     pub fn set_observer(&mut self, observer: Option<ObserverHandle>, agent_index: usize) {
-        self.observer = observer;
-        self.observer_agent_index = Some(agent_index);
+        if let Ok(mut routing) = self.shared.observer.lock() {
+            routing.handle = observer;
+            routing.agent_index = Some(agent_index);
+        }
     }
 
     /// Update metadata that will be attached to subsequent raw wire events.
     pub fn set_observer_context(&mut self, context: ObserverContext) {
+        if let Some(session_id) = &context.session_id {
+            if let Ok(mut routing) = self.shared.observer.lock() {
+                routing.sessions.insert(session_id.clone(), context.clone());
+            }
+        }
         self.observer_context = context;
     }
 
     /// Return a clone of the observer handle, if attached.
     pub(crate) fn observer_handle(&self) -> Option<ObserverHandle> {
-        self.observer.clone()
+        self.shared.observer_parts().0
     }
 
     /// Return the pool slot index for this agent process.
     pub(crate) fn observer_agent_index(&self) -> Option<usize> {
-        self.observer_agent_index
+        self.shared.observer_parts().1
+    }
+
+    pub(crate) fn shares_connection_with(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.shared, &other.shared)
     }
 
     /// Emit a semantic event to the local observer feed, if enabled.
     pub fn observe(&self, kind: impl Into<String>, payload: serde_json::Value) {
-        if let Some(observer) = &self.observer {
-            observer.emit(
-                kind,
-                self.observer_agent_index,
-                &self.observer_context,
-                payload,
-            );
+        let (observer, agent_index) = self.shared.observer_parts();
+        if let Some(observer) = observer {
+            observer.emit(kind, agent_index, &self.observer_context, payload);
         }
     }
 
@@ -642,10 +888,13 @@ impl AcpClient {
         // on ACP v2 ahead of the upstream ACP RFD. Revisit when that RFD merges.
         let params = build_initialize_params();
         let result = self.send_request("initialize", params).await?;
-        self.steering_supported = result
-            .pointer("/_meta/steering/supported")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
+        self.shared.steering_supported.store(
+            result
+                .pointer("/_meta/steering/supported")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            Ordering::Release,
+        );
         tracing::debug!(target: "acp::init", "initialize response: {result}");
         Ok(result)
     }
@@ -800,11 +1049,13 @@ impl AcpClient {
         // Mark the usage tracker as in-flight for this turn BEFORE sending the
         // prompt so that any setup notifications recorded earlier are not
         // misattributed to this turn.
-        self.goose_usage.begin_turn(session_id);
+        if let Ok(mut usage) = self.shared.goose_usage.lock() {
+            usage.begin_turn(session_id);
+        }
+        self.usage_session = Some(session_id.to_owned());
 
-        self.last_prompt_id = Some(self.next_id);
-        let id = self.next_id;
-        self.next_id += 1;
+        let id = self.shared.next_id();
+        self.last_prompt_id = Some(id);
 
         let msg = serde_json::json!({
             "jsonrpc": "2.0",
@@ -889,7 +1140,7 @@ impl AcpClient {
     /// The read loop's steer arm reads the field directly; this accessor exists
     /// for the supervisor's post-initialize log line.
     pub fn steering_supported(&self) -> bool {
-        self.steering_supported
+        self.shared.steering_supported.load(Ordering::Acquire)
     }
 
     /// Consume and return the per-turn usage record computed from the most
@@ -903,7 +1154,12 @@ impl AcpClient {
     /// Intended for consumption by `publish_agent_turn_metric` in `pool.rs` to
     /// publish a kind 44200 NIP-AM event.
     pub fn take_turn_usage(&mut self) -> Option<TurnUsage> {
-        self.goose_usage.take()
+        let session_id = self.usage_session.take()?;
+        self.shared
+            .goose_usage
+            .lock()
+            .ok()
+            .and_then(|mut usage| usage.take_for(&session_id))
     }
 
     /// Install a per-turn steer request channel for goose-native
@@ -1028,22 +1284,8 @@ impl AcpClient {
             AcpError::Protocol("cancel_with_cleanup called with no in-flight prompt".into())
         })?;
 
-        // Step 1: respond to any pending permission request with "cancelled",
-        // but only if we haven't already responded (guards against double-response race).
-        if let Some(perm_id) = self.pending_permission_id.clone() {
-            if !self.permission_responded {
-                let response = permission_response_cancelled(&perm_id);
-                self.write_ndjson(&response).await?;
-                tracing::debug!(
-                    target: "acp::cancel",
-                    "responded cancelled to pending permission id={perm_id}"
-                );
-            }
-            self.pending_permission_id = None;
-            self.permission_responded = false;
-        }
-
-        // Step 2: send session/cancel notification (no id)
+        // Permission requests are answered immediately by the shared reader
+        // pump, so cancellation only needs to notify and drain this session.
         self.session_cancel(session_id).await?;
         tracing::info!(target: "acp::cancel", "sent session/cancel for {session_id}");
         // Use a fixed 30s idle timeout during cleanup — the cancel notification
@@ -1071,23 +1313,7 @@ impl AcpClient {
     /// Bounded by a 30-second write timeout. If the agent stops reading stdin
     /// (e.g., it's stuck or dead), the write would otherwise block forever.
     async fn write_ndjson(&mut self, value: &serde_json::Value) -> Result<(), AcpError> {
-        const WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
-        let line = serde_json::to_string(value)?;
-        let stdin = self
-            .stdin
-            .as_mut()
-            .ok_or_else(|| AcpError::Protocol("agent stdin is closed".into()))?;
-        tokio::time::timeout(WRITE_TIMEOUT, async {
-            stdin.write_all(line.as_bytes()).await?;
-            stdin.write_all(b"\n").await?;
-            stdin.flush().await?;
-            Ok::<(), std::io::Error>(())
-        })
-        .await
-        .map_err(|_| AcpError::WriteTimeout(WRITE_TIMEOUT))?
-        .map_err(AcpError::Io)?;
-        self.observe("acp_write", value.clone());
-        Ok(())
+        self.shared.write_ndjson(value).await
     }
 
     /// Default timeout for non-prompt RPCs (initialize, session/new, etc.).
@@ -1107,8 +1333,7 @@ impl AcpClient {
         method: &str,
         params: serde_json::Value,
     ) -> Result<serde_json::Value, AcpError> {
-        let id = self.next_id;
-        self.next_id += 1;
+        let id = self.shared.next_id();
 
         let msg = serde_json::json!({
             "jsonrpc": "2.0",
@@ -1153,15 +1378,14 @@ impl AcpClient {
             if remaining.is_zero() {
                 break;
             }
-            let read_result = tokio::time::timeout(remaining, self.reader.next()).await;
+            let read_result = tokio::time::timeout(remaining, self.inbound.recv()).await;
             match read_result {
                 // Timeout or stream ended — buffer is empty or agent exited.
-                Err(_) | Ok(None) => break,
-                Ok(Some(Ok(_))) => {
+                Err(_) | Ok(Err(_)) => break,
+                Ok(Ok(_)) => {
                     // Consumed one buffered line; loop to drain more.
                     tracing::debug!(target: "acp::wire", "drained stale buffered line");
                 }
-                Ok(Some(Err(_))) => break,
             }
         }
     }
@@ -1202,48 +1426,17 @@ impl AcpClient {
         expected_id: u64,
     ) -> Result<serde_json::Value, AcpError> {
         loop {
-            // LinesCodec::new_with_max_length enforces MAX_LINE_SIZE at the
-            // read level — the buffer never grows beyond the limit, preventing
-            // OOM from rogue agents writing infinite non-newline bytes.
-            let line = match self.reader.next().await {
-                None => return Err(AcpError::AgentExited),
-                Some(Err(LinesCodecError::MaxLineLengthExceeded)) => {
-                    return Err(AcpError::Protocol(
-                        "agent stdout line exceeded 10MB limit".into(),
-                    ));
-                }
-                Some(Err(e)) => {
-                    return Err(AcpError::Io(std::io::Error::other(e)));
-                }
-                Some(Ok(line)) => line,
-            };
-
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-
-            // Only log and reset idle after we have a valid non-empty line.
-            tracing::debug!(target: "acp::wire", "← {trimmed}");
-
-            let msg: serde_json::Value = match serde_json::from_str(trimmed) {
-                Ok(v) => v,
-                Err(e) => {
-                    self.observe(
-                        "acp_parse_error",
-                        serde_json::json!({
-                            "line": trimmed,
-                            "error": e.to_string(),
-                        }),
-                    );
-                    tracing::warn!(
-                        target: "acp::wire",
-                        "failed to parse line as JSON: {e} — skipping"
-                    );
-                    continue;
+            let msg = match self.inbound.recv().await {
+                Ok(Inbound::Message(message)) => message,
+                Ok(Inbound::Exited) => return Err(AcpError::AgentExited),
+                Ok(Inbound::Failed(error)) => return Err(AcpError::Protocol(error)),
+                Err(broadcast::error::RecvError::Closed) => return Err(AcpError::AgentExited),
+                Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                    return Err(AcpError::Protocol(format!(
+                        "ACP reader fell behind by {skipped} messages"
+                    )))
                 }
             };
-            self.observe("acp_read", msg.clone());
 
             // Check if this is a response to our expected request (has matching id
             // AND no `method` field — a `method` field means it's an agent-initiated
@@ -1266,24 +1459,9 @@ impl AcpClient {
                     "_goose/unstable/session/update" => {
                         self.handle_goose_usage_update(&msg);
                     }
-                    "session/request_permission" => {
-                        self.handle_permission_request(&msg).await?;
-                    }
+                    "session/request_permission" => {}
                     other => {
-                        // If the unknown message has an id, it's a request expecting a reply.
-                        // Silence would cause the agent to hang waiting for a response.
-                        // Send a JSON-RPC -32601 "Method not found" error.
-                        if msg.get("id").is_some() {
-                            let err_resp = serde_json::json!({
-                                "jsonrpc": "2.0",
-                                "id": msg["id"],
-                                "error": {"code": -32601, "message": format!("Method not found: {other}")}
-                            });
-                            // Surface write failures — a broken pipe means the
-                            // agent process is dead and continuing would hang.
-                            self.write_ndjson(&err_resp).await?;
-                        }
-                        tracing::debug!(target: "acp::wire", "ignoring unknown method: {other}");
+                        tracing::debug!(target: "acp::wire", "reader pump handled method: {other}");
                     }
                 }
             }
@@ -1394,7 +1572,7 @@ impl AcpClient {
             // read level — the buffer never grows beyond the limit.
             let read_result = tokio::select! {
                 biased;
-                read_result = self.reader.next() => Some(read_result),
+                read_result = self.inbound.recv() => Some(read_result),
                 // Steer arm: gated off whenever a steer write is already in
                 // flight so we don't stack two writes against the same
                 // process. The `async { steer_rx.as_mut()?.recv().await }`
@@ -1436,7 +1614,7 @@ impl AcpClient {
                     // delivered steer and silently drop the user's message.
                     let prompt_block_refs: Vec<&str> =
                         req.prompt_blocks.iter().map(String::as_str).collect();
-                    let selected = match (&self.active_run_id, self.steering_supported) {
+                    let selected = match (&self.active_run_id, self.steering_supported()) {
                         (Some(run_id), _) => Some((
                             SteerTransport::Goose,
                             GOOSE_STEER_METHOD,
@@ -1460,8 +1638,7 @@ impl AcpClient {
                             ));
                         }
                         Some((transport, method, params)) => {
-                            let id = self.next_id;
-                            self.next_id += 1;
+                            let id = self.shared.next_id();
                             let msg = serde_json::json!({
                                 "jsonrpc": "2.0",
                                 "id": id,
@@ -1521,52 +1698,40 @@ impl AcpClient {
             };
 
             match read_result {
-                None => {
+                Err(broadcast::error::RecvError::Closed) | Ok(Inbound::Exited) => {
                     if let Some((_, _, ack_tx)) = pending_steer.take() {
                         let _ = ack_tx.send(crate::pool::SteerAck::PromptCompletedNeutral);
                     }
                     return Err(AcpError::AgentExited);
                 }
-                Some(Err(LinesCodecError::MaxLineLengthExceeded)) => {
+                Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                    tracing::warn!(
+                        skipped,
+                        session_id,
+                        "ACP session subscriber fell behind; continuing to its deadline"
+                    );
+                    continue;
+                }
+                Ok(Inbound::Failed(error)) => {
                     if let Some((_, _, ack_tx)) = pending_steer.take() {
                         let _ = ack_tx.send(crate::pool::SteerAck::PromptCompletedNeutral);
                     }
-                    return Err(AcpError::Protocol(
-                        "agent stdout line exceeded 10MB limit".into(),
-                    ));
+                    return Err(AcpError::Protocol(error));
                 }
-                Some(Err(e)) => {
-                    if let Some((_, _, ack_tx)) = pending_steer.take() {
-                        let _ = ack_tx.send(crate::pool::SteerAck::PromptCompletedNeutral);
-                    }
-                    return Err(AcpError::Io(std::io::Error::other(e)));
-                }
-                Some(Ok(line)) => {
-                    let trimmed = line.trim();
-                    if trimmed.is_empty() {
+                Ok(Inbound::Message(msg)) => {
+                    // Activity is session-local. Output from another concurrent
+                    // thread must not keep this turn alive indefinitely.
+                    let message_session = msg
+                        .pointer("/params/sessionId")
+                        .and_then(|value| value.as_str());
+                    let is_own_response = msg.get("method").is_none()
+                        && (msg.get("id") == Some(&serde_json::json!(expected_id))
+                            || pending_steer.as_ref().is_some_and(|(id, _, _)| {
+                                msg.get("id") == Some(&serde_json::json!(*id))
+                            }));
+                    if !is_own_response && message_session != Some(session_id) {
                         continue;
                     }
-
-                    tracing::debug!(target: "acp::wire", "← {trimmed}");
-
-                    let msg: serde_json::Value = match serde_json::from_str(trimmed) {
-                        Ok(v) => v,
-                        Err(e) => {
-                            self.observe(
-                                "acp_parse_error",
-                                serde_json::json!({
-                                    "line": trimmed,
-                                    "error": e.to_string(),
-                                }),
-                            );
-                            tracing::warn!(
-                                target: "acp::wire",
-                                "failed to parse line as JSON: {e} — skipping"
-                            );
-                            continue;
-                        }
-                    };
-                    self.observe("acp_read", msg.clone());
 
                     let activity_now = Instant::now();
                     idle_deadline = activity_now + idle_timeout;
@@ -1710,24 +1875,9 @@ impl AcpClient {
                             "_goose/unstable/session/update" => {
                                 self.handle_goose_usage_update(&msg);
                             }
-                            "session/request_permission" => {
-                                self.handle_permission_request(&msg).await?;
-                            }
+                            "session/request_permission" => {}
                             other => {
-                                // If the unknown message has an id, it's a request expecting a reply.
-                                // Silence would cause the agent to hang waiting for a response.
-                                // Send a JSON-RPC -32601 "Method not found" error.
-                                if msg.get("id").is_some() {
-                                    let err_resp = serde_json::json!({
-                                        "jsonrpc": "2.0",
-                                        "id": msg["id"],
-                                        "error": {"code": -32601, "message": format!("Method not found: {other}")}
-                                    });
-                                    // Surface write failures — a broken pipe means the
-                                    // agent process is dead and continuing would hang.
-                                    self.write_ndjson(&err_resp).await?;
-                                }
-                                tracing::debug!(target: "acp::wire", "ignoring unknown method: {other}");
+                                tracing::debug!(target: "acp::wire", "reader pump handled method: {other}");
                             }
                         }
                     }
@@ -1887,7 +2037,9 @@ impl AcpClient {
                         cached = payload.accumulated_cached_input_tokens,
                         "goose usage update"
                     );
-                    self.goose_usage.record(&notif.session_id, payload);
+                    if let Ok(mut usage) = self.shared.goose_usage.lock() {
+                        usage.record(&notif.session_id, payload);
+                    }
                 }
             }
             Err(e) => {
@@ -1897,92 +2049,6 @@ impl AcpClient {
                 );
             }
         }
-    }
-
-    /// Auto-approve a `session/request_permission` request from the agent.
-    ///
-    /// Finds the option with `kind == "allow_once"` and responds with its `optionId`.
-    /// If no `allow_once` option exists, falls back to `reject_once`.
-    ///
-    /// **Critical:** Never hardcode `optionId` — always find it dynamically by `kind`.
-    ///
-    /// The request `id` is stored as `serde_json::Value` to support both numeric
-    /// and string IDs per JSON-RPC 2.0.
-    async fn handle_permission_request(&mut self, msg: &serde_json::Value) -> Result<(), AcpError> {
-        // Extract id as a Value — JSON-RPC 2.0 allows both numeric and string IDs.
-        let id = msg
-            .get("id")
-            .cloned()
-            .ok_or_else(|| AcpError::Protocol("permission request missing id".into()))?;
-
-        // Store pending permission id so cancel_with_cleanup can respond to it.
-        self.pending_permission_id = Some(id.clone());
-        // Mark as not yet responded — guards against double-response race.
-        self.permission_responded = false;
-
-        let options = msg["params"]["options"]
-            .as_array()
-            .ok_or_else(|| AcpError::Protocol("permission request missing options".into()))?;
-
-        tracing::debug!(
-            target: "acp::permission",
-            "session/request_permission id={id}, {} options",
-            options.len()
-        );
-
-        // Find allow_once by kind — NEVER hardcode optionId.
-        let allow_once = options
-            .iter()
-            .find(|opt| opt.get("kind").and_then(|k| k.as_str()) == Some("allow_once"));
-
-        let response = if let Some(opt) = allow_once {
-            let option_id = opt["optionId"]
-                .as_str()
-                .ok_or_else(|| AcpError::Protocol("allow_once option missing optionId".into()))?;
-            tracing::info!(
-                target: "acp::permission",
-                "auto-approving permission id={id} with allow_once optionId={option_id:?}"
-            );
-            permission_response_selected(&id, option_id)
-        } else {
-            // No allow_once — fall back to reject_once.
-            tracing::warn!(
-                target: "acp::permission",
-                "no allow_once option found in permission request id={id}, falling back to reject_once"
-            );
-            let reject = options
-                .iter()
-                .find(|opt| opt.get("kind").and_then(|k| k.as_str()) == Some("reject_once"));
-
-            if let Some(opt) = reject {
-                let option_id = opt["optionId"].as_str().unwrap_or("reject");
-                permission_response_selected(&id, option_id)
-            } else {
-                return Err(AcpError::Protocol(
-                    "no suitable permission option found (neither allow_once nor reject_once)"
-                        .into(),
-                ));
-            }
-        };
-
-        // Write the response first, then mark as responded.
-        //
-        // Previous ordering (flag-before-write) was intended to guard against a
-        // double-response if a timeout fires between write and flag-set. However,
-        // the deadlock risk is worse: if write_ndjson fails (e.g. WriteTimeout),
-        // the flag would be true but no response was actually sent. Then
-        // cancel_with_cleanup would see permission_responded=true, skip sending
-        // the cancelled outcome, and the agent would hang waiting for a reply
-        // that never arrives — a guaranteed deadlock.
-        //
-        // The correct fix: set the flag AFTER a successful write. The double-
-        // response window (between write completion and flag-set) is negligibly
-        // small and bounded by a single memory store; the deadlock window was
-        // unbounded.
-        self.write_ndjson(&response).await?;
-        self.permission_responded = true;
-        self.pending_permission_id = None;
-        Ok(())
     }
 
     /// Parse `stopReason` from a `session/prompt` result value.
@@ -2063,15 +2129,6 @@ fn permission_response_selected(id: &serde_json::Value, option_id: &str) -> serd
         "jsonrpc": "2.0",
         "id": id,
         "result": { "outcome": { "outcome": "selected", "optionId": option_id } }
-    })
-}
-
-/// Build a JSON-RPC permission response with `outcome: "cancelled"`.
-fn permission_response_cancelled(id: &serde_json::Value) -> serde_json::Value {
-    serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": id,
-        "result": { "outcome": { "outcome": "cancelled" } }
     })
 }
 
@@ -2211,21 +2268,22 @@ pub fn model_in_catalog(
 
 // ─── Drop: kill child process ─────────────────────────────────────────────────
 
-impl Drop for AcpClient {
+impl Drop for AcpShared {
     fn drop(&mut self) {
         // Best-effort SIGKILL + reap. We cannot `await` in Drop (sync context).
         // Kill the process group when possible so subprocesses don't leak.
         // Callers SHOULD still call `shutdown().await` for guaranteed reaping.
-        drop(self.stdin.take());
-        match self.child.id() {
-            Some(pid) if kill_process_group(pid) => {}
-            _ => {
-                let _ = self.child.start_kill();
+        if let Ok(mut slot) = self.child.lock() {
+            if let Some(child) = slot.as_mut() {
+                match child.id() {
+                    Some(pid) if kill_process_group(pid) => {}
+                    _ => {
+                        let _ = child.start_kill();
+                    }
+                }
+                let _ = child.try_wait();
             }
         }
-        // Non-blocking reap attempt — prevents zombie accumulation in the
-        // common case where SIGKILL takes effect before Drop returns.
-        let _ = self.child.try_wait();
     }
 }
 
@@ -2915,7 +2973,7 @@ mod tests {
         let path = dir.join(file_name);
         std::fs::write(
             &path,
-            format!("#!/bin/sh\nprintf '%s\\n' \"${{{var}:-<unset>}}\"\n"),
+            format!("#!/bin/sh\nprintf '\"%s\"\\n' \"${{{var}:-<unset>}}\"\n"),
         )
         .expect("write env probe script");
         let mut permissions = std::fs::metadata(&path).expect("stat probe").permissions();
@@ -2930,12 +2988,13 @@ mod tests {
         )
         .await
         .expect("spawn env probe script");
-        let observed = client
-            .reader
-            .next()
-            .await
-            .unwrap_or_else(|| panic!("child produced no output for {var}"))
-            .expect("child stdout was not readable");
+        let observed = match client.inbound.recv().await {
+            Ok(Inbound::Message(value)) => value
+                .as_str()
+                .unwrap_or_else(|| panic!("child output for {var} was not a string"))
+                .to_owned(),
+            other => panic!("child produced no output for {var}: {other:?}"),
+        };
         client.shutdown().await;
         std::fs::remove_dir_all(&dir).expect("remove env probe dir");
         observed
@@ -2944,7 +3003,7 @@ mod tests {
     #[tokio::test]
     async fn shutdown_delivers_stdin_eof_before_forcing_exit() {
         let mut client =
-            spawn_script("while IFS= read -r _line; do :; done; printf 'GRACEFUL_EOF_SEEN\\n'")
+            spawn_script("while IFS= read -r _line; do :; done; printf '\"GRACEFUL_EOF_SEEN\"\\n'")
                 .await;
 
         let graceful = client
@@ -2955,12 +3014,11 @@ mod tests {
             .await;
         assert!(graceful, "cooperative child should exit during EOF grace");
 
-        let output = tokio::time::timeout(std::time::Duration::from_secs(1), client.reader.next())
+        let output = tokio::time::timeout(std::time::Duration::from_secs(1), client.inbound.recv())
             .await
             .expect("timed out reading graceful child output")
-            .expect("graceful child produced no output")
-            .expect("graceful child output was not readable");
-        assert_eq!(output, "GRACEFUL_EOF_SEEN");
+            .expect("graceful child produced no output");
+        assert!(matches!(output, Inbound::Message(value) if value == "GRACEFUL_EOF_SEEN"));
     }
 
     #[tokio::test]
@@ -2978,14 +3036,6 @@ mod tests {
         assert!(
             !graceful,
             "non-cooperative child unexpectedly exited on EOF"
-        );
-        assert!(
-            client
-                .child
-                .try_wait()
-                .expect("query forced child")
-                .is_some(),
-            "forced child is still running"
         );
         assert!(
             started.elapsed() < std::time::Duration::from_secs(2),
@@ -3090,7 +3140,7 @@ mod tests {
         // Send valid JSON (session/update notifications) to reset the idle timer.
         // Non-JSON lines no longer reset idle — only valid JSON notifications do.
         let mut client = spawn_script(
-            r#"for i in $(seq 1 10); do echo '{"jsonrpc":"2.0","method":"session/update","params":{"update":{"sessionUpdate":"agent_thought_chunk","content":{"text":"thinking"}}}}'; sleep 0.05; done; sleep 10"#,
+            r#"for i in $(seq 1 10); do echo '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"test","update":{"sessionUpdate":"agent_thought_chunk","content":{"text":"thinking"}}}}'; sleep 0.05; done; sleep 10"#,
         )
         .await;
         let max_dur = std::time::Duration::from_secs(10);
@@ -3113,6 +3163,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn another_sessions_activity_does_not_reset_this_turns_idle_clock() {
+        let mut client = spawn_script(
+            r#"for i in $(seq 1 10); do echo '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"session-b","update":{"sessionUpdate":"agent_message_chunk","content":{"text":"busy elsewhere"}}}}'; sleep 0.05; done; sleep 10"#,
+        )
+        .await;
+        let max_duration = std::time::Duration::from_secs(2);
+        let started = std::time::Instant::now();
+        let result = client
+            .read_until_response_with_idle_timeout(
+                "session-a",
+                999,
+                std::time::Duration::from_millis(100),
+                tokio::time::Instant::now() + max_duration,
+                max_duration,
+            )
+            .await;
+        assert!(matches!(result, Err(AcpError::IdleTimeout(_))));
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(300),
+            "activity from session-b kept session-a alive"
+        );
+    }
+
+    #[tokio::test]
     async fn response_returned_when_matching_id_arrives() {
         let mut client =
             spawn_script(r#"echo '{"jsonrpc":"2.0","id":42,"result":{"stopReason":"end_turn"}}'"#)
@@ -3130,6 +3204,54 @@ mod tests {
             .await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap()["stopReason"].as_str(), Some("end_turn"));
+    }
+
+    #[tokio::test]
+    async fn concurrent_sessions_share_one_connection_and_route_out_of_order_responses() {
+        // The fake server waits for two prompt requests before answering either.
+        // An exclusive/serialized client therefore times out; a multiplexed
+        // connection completes both even when responses arrive in reverse order.
+        let script = r#"
+            IFS= read -r _first
+            IFS= read -r _second
+            printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"stopReason":"end_turn"}}'
+            printf '%s\n' '{"jsonrpc":"2.0","id":0,"result":{"stopReason":"end_turn"}}'
+        "#;
+        let client = spawn_script(script).await;
+        let mut first = client.clone();
+        let mut second = client.clone();
+        let timeout = std::time::Duration::from_secs(2);
+
+        let (first_result, second_result) = tokio::join!(
+            first.session_prompt_with_idle_timeout("session-a", "alpha", timeout, timeout),
+            second.session_prompt_with_idle_timeout("session-b", "beta", timeout, timeout),
+        );
+
+        assert_eq!(first_result.unwrap(), StopReason::EndTurn);
+        assert_eq!(second_result.unwrap(), StopReason::EndTurn);
+    }
+
+    #[tokio::test]
+    async fn shared_reader_answers_permission_once_with_advertised_option() {
+        let script = r#"
+            IFS= read -r _prompt
+            printf '%s\n' '{"jsonrpc":"2.0","id":"perm-a","method":"session/request_permission","params":{"sessionId":"session-a","options":[{"optionId":"dynamic-allow","kind":"allow_once"}]}}'
+            IFS= read -r permission
+            case "$permission" in
+              *'"id":"perm-a"'*'"optionId":"dynamic-allow"'*)
+                printf '%s\n' '{"jsonrpc":"2.0","id":0,"result":{"stopReason":"end_turn"}}'
+                ;;
+              *)
+                printf '%s\n' '{"jsonrpc":"2.0","id":0,"error":{"code":-1,"message":"bad permission response"}}'
+                ;;
+            esac
+        "#;
+        let mut client = spawn_script(script).await;
+        let timeout = std::time::Duration::from_secs(2);
+        let result = client
+            .session_prompt_with_idle_timeout("session-a", "alpha", timeout, timeout)
+            .await;
+        assert_eq!(result.unwrap(), StopReason::EndTurn);
     }
 
     #[tokio::test]
@@ -3227,7 +3349,7 @@ mod tests {
         // and the reader hits EOF (`AgentExited`) before the timer fires,
         // masking whether the pre-select check actually works.
         let mut client = spawn_script(
-            r#"while :; do echo '{"jsonrpc":"2.0","method":"session/update","params":{"update":{"sessionUpdate":"agent_message_chunk","content":{"text":"x"}}}}'; done"#,
+            r#"while :; do echo '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"test","update":{"sessionUpdate":"agent_message_chunk","content":{"text":"x"}}}}'; done"#,
         )
         .await;
         let hard = std::time::Duration::from_millis(300);
@@ -3287,7 +3409,7 @@ mod tests {
         // Keepalive session/update lines every 50ms against a 100ms idle deadline.
         // The turn should survive well past the 100ms deadline (proves the fix).
         let mut client = spawn_script(
-            r#"for i in $(seq 1 20); do echo '{"jsonrpc":"2.0","method":"session/update","params":{"update":{"sessionUpdate":"keepalive"}}}'; sleep 0.05; done; sleep 10"#,
+            r#"for i in $(seq 1 20); do echo '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"test","update":{"sessionUpdate":"keepalive"}}}'; sleep 0.05; done; sleep 10"#,
         )
         .await;
         let max_dur = std::time::Duration::from_secs(10);
@@ -3913,7 +4035,10 @@ mod tests {
     /// running a real `initialize` handshake. The capability-parsing tests
     /// cover the handshake itself.
     fn set_steering_supported(client: &mut AcpClient) {
-        client.steering_supported = true;
+        client
+            .shared
+            .steering_supported
+            .store(true, Ordering::Release);
     }
 
     /// Run `initialize` against a script that replies with `init_result` as
@@ -4276,7 +4401,8 @@ mod tests {
         assert!(client.take_turn_usage().is_none(), "starts empty");
 
         // begin_turn before sending the prompt — mirrors the real call flow.
-        client.goose_usage.begin_turn("s1");
+        client.shared.goose_usage.lock().unwrap().begin_turn("s1");
+        client.usage_session = Some("s1".into());
         let msg = goose_usage_update_msg("s1", 1000, 200, Some(0.01));
         client.handle_goose_usage_update(&msg);
 
@@ -4301,11 +4427,13 @@ mod tests {
     async fn goose_usage_second_turn_delta_reliable() {
         let mut client = spawn_inert_client().await;
         // Turn 1.
-        client.goose_usage.begin_turn("s2");
+        client.shared.goose_usage.lock().unwrap().begin_turn("s2");
+        client.usage_session = Some("s2".into());
         client.handle_goose_usage_update(&goose_usage_update_msg("s2", 1000, 200, None));
         let _ = client.take_turn_usage();
         // Turn 2.
-        client.goose_usage.begin_turn("s2");
+        client.shared.goose_usage.lock().unwrap().begin_turn("s2");
+        client.usage_session = Some("s2".into());
         client.handle_goose_usage_update(&goose_usage_update_msg("s2", 1800, 450, None));
         let usage = client.take_turn_usage().expect("turn 2 usage");
         assert!(usage.delta_reliable);

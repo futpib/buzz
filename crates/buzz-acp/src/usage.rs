@@ -31,7 +31,7 @@
 //! The `TurnUsage` produced after each turn is consumed by the
 //! `TurnCompletionGuard` in `pool.rs` to publish a kind 44200 relay event.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Wire-format deserialization for `_goose/unstable/session/update` params.
 ///
@@ -211,12 +211,10 @@ pub struct TurnUsage {
 pub(crate) struct UsageTracker {
     /// One entry per goose `sessionId` ever seen in this process.
     sessions: HashMap<String, SessionState>,
-    /// The session that currently has an in-flight `session/prompt`.
-    /// `None` means no prompt is in flight; `record()` will still update
-    /// the baseline but will not set `pending`.
-    in_flight_session: Option<String>,
-    /// The most recently computed turn usage, ready for `take()`.
-    pending: Option<TurnUsage>,
+    /// Sessions with an in-flight `session/prompt` on the shared connection.
+    in_flight_sessions: HashSet<String>,
+    /// Latest usage per in-flight session, ready for `take_for()`.
+    pending: HashMap<String, TurnUsage>,
 }
 
 impl UsageTracker {
@@ -227,8 +225,8 @@ impl UsageTracker {
     /// request is sent so that setup notifications received before this call
     /// do not become publishable for this turn.
     pub(crate) fn begin_turn(&mut self, session_id: &str) {
-        self.in_flight_session = Some(session_id.to_string());
-        self.pending = None;
+        self.in_flight_sessions.insert(session_id.to_string());
+        self.pending.remove(session_id);
     }
 
     /// Process a `usage_update` notification payload.
@@ -265,7 +263,7 @@ impl UsageTracker {
         // Determine whether this session is currently in-flight so we know
         // whether to set `pending`. We compute the delta regardless so that
         // setup notifications (no in-flight turn) still advance the baseline.
-        let is_in_flight = self.in_flight_session.as_deref() == Some(session_id);
+        let is_in_flight = self.in_flight_sessions.contains(session_id);
 
         let (delta_reliable, turn_input, turn_output, turn_cost, turn_seq) =
             match self.sessions.get(session_id) {
@@ -334,23 +332,26 @@ impl UsageTracker {
         if is_in_flight {
             // In-flight-match: update pending with the latest cumulative values.
             // Baseline is NOT advanced here — it advances only on take().
-            self.pending = Some(TurnUsage {
-                session_id: session_id.to_string(),
-                turn_seq,
-                delta_reliable,
-                turn_input_tokens: turn_input,
-                turn_output_tokens: turn_output,
-                turn_total_tokens: turn_total,
-                turn_cost_usd: turn_cost,
-                turn_cache_read_tokens: turn_cache_read,
-                cumulative_input_tokens: current_input,
-                cumulative_output_tokens: current_output,
-                cumulative_total_tokens: current_total,
-                cumulative_cost_usd: current_cost,
-                cumulative_cache_read_tokens: current_cached_input,
-                model: payload.model.clone(),
-            });
-        } else if self.in_flight_session.is_none() {
+            self.pending.insert(
+                session_id.to_string(),
+                TurnUsage {
+                    session_id: session_id.to_string(),
+                    turn_seq,
+                    delta_reliable,
+                    turn_input_tokens: turn_input,
+                    turn_output_tokens: turn_output,
+                    turn_total_tokens: turn_total,
+                    turn_cost_usd: turn_cost,
+                    turn_cache_read_tokens: turn_cache_read,
+                    cumulative_input_tokens: current_input,
+                    cumulative_output_tokens: current_output,
+                    cumulative_total_tokens: current_total,
+                    cumulative_cost_usd: current_cost,
+                    cumulative_cache_read_tokens: current_cached_input,
+                    model: payload.model.clone(),
+                },
+            );
+        } else if self.in_flight_sessions.is_empty() {
             // Not in-flight at all: advance the committed baseline so the next
             // in-flight turn computes its delta from this notification.
             // This handles setup notifications that fire during `session/new`
@@ -370,9 +371,6 @@ impl UsageTracker {
                 },
             );
         }
-        // else: in-flight-for-another-session — ignore. A late notification
-        // for session X while session Y is in-flight must NOT advance X's
-        // committed baseline; doing so would undercount X's next published delta.
     }
 
     /// Consume and return the most recently computed turn usage record, then
@@ -383,8 +381,13 @@ impl UsageTracker {
     /// caller (`TurnCompletionGuard`) must handle `None`.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn take(&mut self) -> Option<TurnUsage> {
-        self.in_flight_session = None;
-        let record = self.pending.take()?;
+        let session_id = self.pending.keys().next()?.clone();
+        self.take_for(&session_id)
+    }
+
+    pub(crate) fn take_for(&mut self, session_id: &str) -> Option<TurnUsage> {
+        self.in_flight_sessions.remove(session_id);
+        let record = self.pending.remove(session_id)?;
         // Advance the committed baseline to this published record so the
         // *next* turn measures its delta from here.
         self.sessions.insert(
@@ -498,7 +501,7 @@ mod tests {
         tracker.record("sess-setup", &payload(500, 100, Some(0.005)));
         // No turn is in-flight — pending must stay None.
         assert!(
-            tracker.pending.is_none(),
+            tracker.pending.is_empty(),
             "setup notification must not set pending before begin_turn"
         );
 

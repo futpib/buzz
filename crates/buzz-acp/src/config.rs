@@ -30,6 +30,9 @@ pub(crate) const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 900;
 /// Override via `--max-turn-duration` / `BUZZ_ACP_MAX_TURN_DURATION`.
 pub(crate) const DEFAULT_MAX_TURN_DURATION_SECS: u64 = 7200;
 
+/// Concurrent ACP sessions multiplexed over each agent connection.
+pub(crate) const DEFAULT_SESSION_CONCURRENCY: u32 = 4;
+
 /// Upper bound for `max_turn_duration` (7 days). Any higher is operationally
 /// meaningless and risks arithmetic overflow when deriving the in-flight
 /// deadline (`max_turn_duration + IN_FLIGHT_DEADLINE_BUFFER_SECS`).
@@ -288,10 +291,15 @@ pub struct CliArgs {
     )]
     pub system_prompt_file: Option<PathBuf>,
 
-    /// Number of parallel agent subprocesses.
+    /// Legacy subprocess count. Multiplexed session routing currently uses one.
     #[arg(long, env = "BUZZ_ACP_AGENTS", default_value_t = 1,
           value_parser = clap::value_parser!(u32).range(1..=32))]
     pub agents: u32,
+
+    /// Concurrent sessions per ACP subprocess/connection.
+    #[arg(long, env = "BUZZ_ACP_SESSION_CONCURRENCY", default_value_t = DEFAULT_SESSION_CONCURRENCY,
+          value_parser = clap::value_parser!(u32).range(1..=32))]
+    pub session_concurrency: u32,
 
     /// Seconds between heartbeat prompts. 0 = disabled.
     #[arg(long, env = "BUZZ_ACP_HEARTBEAT_INTERVAL", default_value_t = 0)]
@@ -498,6 +506,7 @@ pub struct Config {
     pub idle_timeout_secs: u64,
     pub max_turn_duration_secs: u64,
     pub agents: u32,
+    pub session_concurrency: u32,
     pub heartbeat_interval_secs: u64,
     /// Seconds between per-turn liveness pings. 0 = disabled. Distinct from
     /// `heartbeat_interval_secs` (agent self-prompting) — this is the desktop
@@ -1062,6 +1071,7 @@ impl Config {
             idle_timeout_secs,
             max_turn_duration_secs,
             agents: args.agents,
+            session_concurrency: args.session_concurrency,
             heartbeat_interval_secs: heartbeat_interval,
             turn_liveness_secs,
             heartbeat_prompt,
@@ -1123,7 +1133,7 @@ impl Config {
             format!(" allowed_respond_to=[{}]", modes.join(","))
         };
         format!(
-            "relay={} pubkey={} agent_cmd={} {} mcp_cmd={} idle_timeout={}s max_turn={}s agents={} heartbeat={}s subscribe={:?} dedup={:?} meh={:?} ignore_self={} context_limit={} max_turns_per_session={} presence={} typing={} memory={} model={} permission_mode={} {}{}",
+            "relay={} pubkey={} agent_cmd={} {} mcp_cmd={} idle_timeout={}s max_turn={}s agents={} session_concurrency={} heartbeat={}s subscribe={:?} dedup={:?} meh={:?} ignore_self={} context_limit={} max_turns_per_session={} presence={} typing={} memory={} model={} permission_mode={} {}{}",
             self.relay_url,
             self.keys.public_key().to_hex(),
             self.agent_command,
@@ -1132,6 +1142,7 @@ impl Config {
             self.idle_timeout_secs,
             self.max_turn_duration_secs,
             self.agents,
+            self.session_concurrency,
             self.heartbeat_interval_secs,
             self.subscribe_mode,
             self.dedup_mode,
@@ -1440,6 +1451,7 @@ mod tests {
             idle_timeout_secs: DEFAULT_IDLE_TIMEOUT_SECS,
             max_turn_duration_secs: DEFAULT_MAX_TURN_DURATION_SECS,
             agents: 1,
+            session_concurrency: DEFAULT_SESSION_CONCURRENCY,
             heartbeat_interval_secs: 0,
             turn_liveness_secs: 10,
             heartbeat_prompt: None,
@@ -2171,6 +2183,21 @@ channels = "ALL"
     fn lazy_pool_defaults_off() {
         let key = "0".repeat(64);
         assert!(!CliArgs::parse_from(["buzz-acp", "--private-key", &key]).lazy_pool);
+    }
+
+    #[test]
+    fn session_multiplexing_defaults_on_and_can_be_serialized_explicitly() {
+        let key = "0".repeat(64);
+        let defaults = CliArgs::parse_from(["buzz-acp", "--private-key", &key]);
+        assert_eq!(defaults.session_concurrency, DEFAULT_SESSION_CONCURRENCY);
+        let serialized = CliArgs::parse_from([
+            "buzz-acp",
+            "--private-key",
+            &key,
+            "--session-concurrency",
+            "1",
+        ]);
+        assert_eq!(serialized.session_concurrency, 1);
     }
 
     #[test]
