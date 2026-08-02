@@ -17,7 +17,6 @@ use uuid::Uuid;
 const DEFAULT_RELAY_URL: &str = "ws://localhost:3000";
 const LIVE_SUBSCRIPTION_ID: &str = "thread-mention-live";
 const THREAD_SUBSCRIPTION_ID: &str = "thread-mention-query";
-const EVENT_SUBSCRIPTION_ID: &str = "thread-mention-event";
 const ROUTE_SUBSCRIPTION_ID: &str = "thread-mention-routes";
 const REACTION_SUBSCRIPTION_ID: &str = "thread-mention-reaction";
 const CHANNEL_SUBSCRIPTION_ID: &str = "thread-mention-channels";
@@ -286,18 +285,11 @@ async fn listen_once(config: &Config) -> Result<()> {
                 now.saturating_sub(LIVE_REPLAY_WINDOW_SECS),
             ))
             .custom_tags(SingleLetterTag::lowercase(Alphabet::H), [channel.as_str()]);
-        let reactions = Filter::new()
-            .kind(Kind::Reaction)
-            .since(Timestamp::from_secs(
-                now.saturating_sub(LIVE_REPLAY_WINDOW_SECS),
-            ))
-            .custom_tags(SingleLetterTag::lowercase(Alphabet::H), [channel.as_str()]);
         connection
             .send_raw(&json!([
                 "REQ",
                 format!("{LIVE_SUBSCRIPTION_ID}:{channel_id}"),
-                owner_messages,
-                reactions
+                owner_messages
             ]))
             .await?;
     }
@@ -329,27 +321,12 @@ async fn listen_once(config: &Config) -> Result<()> {
                     subscription_id,
                     event,
                 }) if subscription_id.starts_with(LIVE_SUBSCRIPTION_ID) => {
-                    let result = match event.kind {
-                        Kind::Custom(9) => maybe_route(
-                            config,
-                            &mut connection,
-                            &event,
-                            &mut pending_routes,
-                        ).await,
-                        Kind::Reaction => match live_subscription_channel(&subscription_id) {
-                            Some(channel_id) => {
-                                maybe_delete_acknowledged_route(
-                                    config,
-                                    &mut connection,
-                                    channel_id,
-                                    &event,
-                                    &mut pending_routes,
-                                ).await
-                            }
-                            None => Err(anyhow!("invalid live subscription id {subscription_id:?}")),
-                        },
-                        _ => Ok(()),
-                    };
+                    let result = maybe_route(
+                        config,
+                        &mut connection,
+                        &event,
+                        &mut pending_routes,
+                    ).await;
                     if let Err(error) = result {
                         eprintln!("failed to evaluate {}: {error:#}", event.id.to_hex());
                     }
@@ -366,15 +343,6 @@ async fn listen_once(config: &Config) -> Result<()> {
             }
         }
     }
-}
-
-fn live_subscription_channel(subscription_id: &str) -> Option<Uuid> {
-    Uuid::parse_str(
-        subscription_id
-            .strip_prefix(LIVE_SUBSCRIPTION_ID)?
-            .strip_prefix(':')?,
-    )
-    .ok()
 }
 
 async fn discover_channels(config: &Config) -> Result<Vec<Uuid>> {
@@ -495,40 +463,6 @@ async fn maybe_route(
     Ok(())
 }
 
-async fn maybe_delete_acknowledged_route(
-    config: &Config,
-    live_connection: &mut NostrWsConnection,
-    channel_id: Uuid,
-    reaction: &Event,
-    pending_routes: &mut HashMap<EventId, PendingRoute>,
-) -> Result<()> {
-    let Some(target_id) = reaction_target(reaction) else {
-        return Ok(());
-    };
-    let Some(target) = load_event(config, channel_id, target_id).await? else {
-        return Ok(());
-    };
-    if !routed_message_acknowledged_by(reaction, &target, &config.bot_keys.public_key()) {
-        return Ok(());
-    }
-
-    let deletion = config.sign(buzz_sdk::build_delete_message(channel_id, target_id)?)?;
-    let response = live_connection.send_event(deletion).await?;
-    if !response.accepted {
-        bail!(
-            "relay rejected acknowledged route deletion: {}",
-            response.message
-        );
-    }
-    eprintln!(
-        "deleted routed mention {} after agent reaction {}",
-        target_id.to_hex(),
-        reaction.id.to_hex()
-    );
-    pending_routes.remove(&target_id);
-    Ok(())
-}
-
 async fn poll_acknowledged_routes(
     config: &Config,
     live_connection: &mut NostrWsConnection,
@@ -571,14 +505,8 @@ fn reaction_target(event: &Event) -> Option<EventId> {
         .and_then(|value| EventId::from_hex(value).ok())
 }
 
-fn routed_message_acknowledged_by(reaction: &Event, routed: &Event, bot: &PublicKey) -> bool {
-    if reaction_target(reaction) != Some(routed.id)
-        || routed.kind != Kind::Custom(9)
-        || routed.pubkey != *bot
-    {
-        return false;
-    }
-    routed_message_agent(routed, bot).is_some_and(|agent| agent == reaction.pubkey)
+fn route_acknowledged_by(reaction: &Event, target_id: EventId, route: PendingRoute) -> bool {
+    reaction_target(reaction) == Some(target_id) && reaction.pubkey == route.agent
 }
 
 fn routed_message_agent(routed: &Event, bot: &PublicKey) -> Option<PublicKey> {
@@ -773,7 +701,7 @@ async fn load_reaction(
                 event,
             } if subscription_id == REACTION_SUBSCRIPTION_ID => {
                 event.verify().context("invalid reaction signature")?;
-                if reaction_target(&event) == Some(target_id) && event.pubkey == route.agent {
+                if route_acknowledged_by(&event, target_id, route) {
                     found = Some(*event);
                 }
             }
@@ -787,51 +715,6 @@ async fn load_reaction(
                 message,
             } if subscription_id == REACTION_SUBSCRIPTION_ID => {
                 bail!("relay closed reaction query: {message}");
-            }
-            _ => {}
-        }
-    }
-    let _ = connection.disconnect().await;
-    Ok(found)
-}
-
-async fn load_event(config: &Config, channel_id: Uuid, event_id: EventId) -> Result<Option<Event>> {
-    let mut connection = NostrWsConnection::connect_authenticated(
-        &config.relay_url,
-        &config.bot_keys,
-        config.owner_auth_tag.as_ref(),
-    )
-    .await?;
-    let channel = channel_id.to_string();
-    connection
-        .send_raw(&json!([
-            "REQ",
-            EVENT_SUBSCRIPTION_ID,
-            Filter::new()
-                .id(event_id)
-                .kind(Kind::Custom(9))
-                .custom_tags(SingleLetterTag::lowercase(Alphabet::H), [channel.as_str()])
-                .limit(1)
-        ]))
-        .await?;
-    let mut found = None;
-    loop {
-        match connection.next_event(THREAD_QUERY_TIMEOUT).await? {
-            RelayMessage::Event {
-                subscription_id,
-                event,
-            } if subscription_id == EVENT_SUBSCRIPTION_ID => {
-                event.verify().context("invalid target event signature")?;
-                found = Some(*event);
-            }
-            RelayMessage::Eose { subscription_id } if subscription_id == EVENT_SUBSCRIPTION_ID => {
-                break;
-            }
-            RelayMessage::Closed {
-                subscription_id,
-                message,
-            } if subscription_id == EVENT_SUBSCRIPTION_ID => {
-                bail!("relay closed target event query: {message}");
             }
             _ => {}
         }
@@ -1334,13 +1217,14 @@ mod tests {
         .sign_with_keys(&fixture.bot)
         .unwrap();
         let ack = reaction(&fixture.agent, routed.id);
+        let route = PendingRoute {
+            channel_id: fixture.channel,
+            agent: fixture.agent.public_key(),
+            created_at: routed.created_at.as_secs(),
+        };
 
         assert_eq!(reaction_target(&ack), Some(routed.id));
-        assert!(routed_message_acknowledged_by(
-            &ack,
-            &routed,
-            &fixture.bot.public_key()
-        ));
+        assert!(route_acknowledged_by(&ack, routed.id, route));
     }
 
     #[test]
@@ -1357,16 +1241,21 @@ mod tests {
         .unwrap()
         .sign_with_keys(&fixture.bot)
         .unwrap();
+        let route = PendingRoute {
+            channel_id: fixture.channel,
+            agent: fixture.agent.public_key(),
+            created_at: routed.created_at.as_secs(),
+        };
 
-        assert!(!routed_message_acknowledged_by(
+        assert!(!route_acknowledged_by(
             &reaction(&fixture.owner, routed.id),
-            &routed,
-            &fixture.bot.public_key()
+            routed.id,
+            route
         ));
-        assert!(!routed_message_acknowledged_by(
+        assert!(!route_acknowledged_by(
             &reaction(&fixture.agent, candidate.id),
-            &routed,
-            &fixture.bot.public_key()
+            routed.id,
+            route
         ));
     }
 
@@ -1382,16 +1271,6 @@ mod tests {
             .unwrap();
 
         assert_eq!(reaction_target(&event), None);
-    }
-
-    #[test]
-    fn live_subscription_id_carries_channel() {
-        let channel = Uuid::new_v4();
-        assert_eq!(
-            live_subscription_channel(&format!("{LIVE_SUBSCRIPTION_ID}:{channel}")),
-            Some(channel)
-        );
-        assert_eq!(live_subscription_channel(LIVE_SUBSCRIPTION_ID), None);
     }
 
     #[test]
