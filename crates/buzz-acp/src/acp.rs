@@ -633,15 +633,7 @@ fn permission_response_for_request(message: &serde_json::Value) -> Option<serde_
 }
 
 impl AcpClient {
-    /// Gracefully close the agent's stdin and wait for it to exit.
-    ///
-    /// ACP servers use stdin EOF as their lifecycle boundary. Giving them a
-    /// bounded grace period lets adapters release external resources (such as
-    /// slopd-managed panes) before Buzz terminates the process group. A wedged
-    /// server is still forcibly killed and reaped after the grace period.
-    ///
-    /// `Drop` cannot await this handshake and remains a forced-kill fallback.
-    /// Call this method whenever an owned client is deliberately retired.
+    /// Close stdin, then force-kill after a bounded wait.
     pub async fn shutdown(&mut self) {
         self.shutdown_with_timeouts(GRACEFUL_SHUTDOWN_TIMEOUT, FORCED_SHUTDOWN_TIMEOUT)
             .await;
