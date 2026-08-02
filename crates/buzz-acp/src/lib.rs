@@ -2801,11 +2801,8 @@ async fn tokio_main() -> Result<()> {
     // 30 s is generous for in-flight prompts to be cancelled; using
     // max_turn_duration here would cause Ctrl+C to hang for up to an hour.
     let grace = Duration::from_secs(30);
-    // Best-effort drain of both join_set and result_rx during the grace period.
-    // Tasks that finish normally send their OwnedAgent through result_rx — we
-    // explicitly shut them down here to reap child processes. If the grace
-    // period expires, remaining tasks are aborted and fall back to
-    // AcpClient::Drop (start_kill + try_wait — best-effort, not guaranteed).
+    // Drain tasks before shutting down each shared agent connection once.
+    let mut shutdown_agents = Vec::new();
     let (rx_ref, js_ref) = pool.rx_and_join_set();
     let shutdown_result = tokio::time::timeout(grace, async {
         loop {
@@ -2818,10 +2815,8 @@ async fn tokio_main() -> Result<()> {
                     }
                 }
                 maybe_result = rx_ref.recv() => {
-                    if let Some(mut pr) = maybe_result {
-                        let idx = pr.agent.index;
-                        pr.agent.shutdown().await;
-                        tracing::debug!(agent = idx, "reaped checked-out agent on shutdown");
+                    if let Some(pr) = maybe_result {
+                        push_unique_agent(&mut shutdown_agents, pr.agent);
                     }
                     // If None, channel closed — tasks are done.
                 }
@@ -2835,20 +2830,20 @@ async fn tokio_main() -> Result<()> {
     }
     // Drain any remaining results that arrived after join_set drained but
     // before tasks were aborted.
-    while let Ok(mut pr) = pool.result_rx_try_recv() {
-        let idx = pr.agent.index;
-        pr.agent.shutdown().await;
-        tracing::debug!(agent = idx, "reaped late-arriving agent on shutdown");
+    while let Ok(pr) = pool.result_rx_try_recv() {
+        push_unique_agent(&mut shutdown_agents, pr.agent);
     }
-    // Explicitly shut down idle agents still sitting in their slots.
     for slot in pool.agents_mut().iter_mut() {
-        if let Some(mut agent) = slot.take() {
-            let idx = agent.index;
-            agent.shutdown().await;
-            tracing::debug!(agent = idx, "reaped idle agent on shutdown");
+        if let Some(agent) = slot.take() {
+            push_unique_agent(&mut shutdown_agents, agent);
         }
     }
     drop(pool);
+    for mut agent in shutdown_agents {
+        let idx = agent.index;
+        agent.shutdown().await;
+        tracing::debug!(agent = idx, "reaped agent on shutdown");
+    }
 
     // Abort any in-flight respawn tasks. They may be sleeping in backoff or
     // running spawn_and_init — either way, we don't want them spawning new
@@ -3936,6 +3931,16 @@ async fn shutdown_agent_slots(slots: &mut [Option<OwnedAgent>]) {
             agent.shutdown().await;
         }
     }
+}
+
+fn push_unique_agent(agents: &mut Vec<OwnedAgent>, agent: OwnedAgent) {
+    if agents
+        .iter()
+        .any(|existing| existing.acp.shares_connection_with(&agent.acp))
+    {
+        return;
+    }
+    agents.push(agent);
 }
 
 async fn shutdown_agent_pool(pool: &mut AgentPool) {
@@ -5512,6 +5517,17 @@ mod error_outcome_emission_tests {
             // non-systemPrompt path, the simplest valid value.
             1,
         )
+    }
+
+    #[tokio::test]
+    async fn shutdown_deduplicates_multiplexed_leases() {
+        let agent = dummy_agent(0).await;
+        let lease = agent.clone();
+        let mut agents = Vec::new();
+        push_unique_agent(&mut agents, lease);
+        push_unique_agent(&mut agents, agent);
+        assert_eq!(agents.len(), 1);
+        agents[0].shutdown().await;
     }
 
     /// Drive one error outcome through `handle_prompt_result` and return how
