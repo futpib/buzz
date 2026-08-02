@@ -76,6 +76,18 @@ esac
 : "${BUZZ_AGENT_SESSION_TITLE:?BUZZ_AGENT_SESSION_TITLE is required}"
 
 respond_to="${BUZZ_AGENT_RESPOND_TO:-owner-only}"
+respond_to_allowlist="${BUZZ_AGENT_RESPOND_TO_ALLOWLIST:-}"
+if [[ -n "${BUZZ_THREAD_MENTION_BOT_PUBKEY:-}" ]]; then
+  if [[ ! "${BUZZ_THREAD_MENTION_BOT_PUBKEY}" =~ ^[0-9a-f]{64}$ ]]; then
+    echo "buzz-slopd-agent: BUZZ_THREAD_MENTION_BOT_PUBKEY must be a lowercase hex pubkey" >&2
+    exit 1
+  fi
+  respond_to=allowlist
+  case ",${respond_to_allowlist}," in
+    *",${BUZZ_THREAD_MENTION_BOT_PUBKEY},"*) ;;
+    *) respond_to_allowlist="${respond_to_allowlist:+${respond_to_allowlist},}${BUZZ_THREAD_MENTION_BOT_PUBKEY}" ;;
+  esac
+fi
 
 if [[ -n "${BUZZ_AGENT_COMMAND:-}" ]]; then
   agent_command="${BUZZ_AGENT_COMMAND}"
@@ -104,8 +116,8 @@ buzz_args+=(
   --agents 1
   --session-title "${BUZZ_AGENT_SESSION_TITLE}"
 )
-if [[ -n "${BUZZ_AGENT_RESPOND_TO_ALLOWLIST:-}" ]]; then
-  buzz_args+=(--respond-to-allowlist "${BUZZ_AGENT_RESPOND_TO_ALLOWLIST}")
+if [[ -n "${respond_to_allowlist}" ]]; then
+  buzz_args+=(--respond-to-allowlist "${respond_to_allowlist}")
 fi
 
 export BUZZ_PRIVATE_KEY="${private_key}"

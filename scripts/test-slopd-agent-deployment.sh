@@ -46,6 +46,11 @@ for unit in "${!expected_auth_files[@]}"; do
     echo "${unit} does not load its per-agent NIP-OA auth tag" >&2
     exit 1
   fi
+  if ! rg -q -F 'EnvironmentFile=-%h/.config/buzz-thread-mention-bot/public.env' \
+    "${deployment_dir}/systemd/${unit}"; then
+    echo "${unit} does not load the thread mention bot identity" >&2
+    exit 1
+  fi
 done
 
 tmp_dir="$(mktemp -d)"
@@ -97,6 +102,31 @@ for expected in \
 do
   if [[ "${allowlist_output}" != *"${expected}"* ]]; then
     echo "allowlist launcher output is missing: ${expected}" >&2
+    exit 1
+  fi
+done
+
+printf -v router_existing '%064d' 4
+printf -v router_bot '%064d' 5
+router_output="$(
+  env \
+    BUZZ_SLOPD_AGENT_IDENTITY_FILE="${identity_file}" \
+    BUZZ_ACP_BIN=/usr/bin/echo \
+    BUZZ_RELAY_WS_URL=wss://relay.example.test \
+    BUZZ_AGENT_OWNER=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc \
+    BUZZ_AGENT_COMMAND=/usr/bin/opencode \
+    BUZZ_AGENT_RESPOND_TO=allowlist \
+    BUZZ_AGENT_RESPOND_TO_ALLOWLIST="${router_existing}" \
+    BUZZ_THREAD_MENTION_BOT_PUBKEY="${router_bot}" \
+    BUZZ_AGENT_SESSION_TITLE='z.ai glm-5.2 max' \
+    "${launcher}"
+)"
+for expected in \
+  '--respond-to allowlist' \
+  "--respond-to-allowlist ${router_existing},${router_bot}"
+do
+  if [[ "${router_output}" != *"${expected}"* ]]; then
+    echo "router allowlist launcher output is missing: ${expected}" >&2
     exit 1
   fi
 done

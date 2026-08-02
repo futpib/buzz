@@ -109,16 +109,19 @@ authored only by the human owner and one owner-attested agent, an untagged owner
 reply gets a nested bot reply carrying the agent's real `p` tag. It ignores
 top-level messages and fails closed for any additional or unverified author.
 
-Install it with a dedicated identity and one-time owner attestation:
+Install it with a dedicated identity. The installer adds that exact identity
+to the existing ACP agents' response allowlists, keeping the human owner
+implicitly allowed:
 
 ```bash
-./deploy/private-host/install-thread-mention-bot.sh --sign --restart
+./deploy/private-host/install-thread-mention-bot.sh --restart
 ```
 
-The prompt does not echo the owner nsec, and only the resulting NIP-OA tag is
-stored. The bot watches every accessible open channel by default. For a private
-channel, repeat the command with `--channel CHANNEL_UUID`; subsequent code
-updates only need `--restart`.
+No owner secret is needed for standalone mode. The bot watches every
+accessible open channel by default. Private channels must add it as a member;
+the optional `--sign --channel CHANNEL_UUID --restart` path prompts without
+echo and stores only the resulting NIP-OA tag. Subsequent code updates only
+need `--restart`.
 
 The optional `buzz-zai-agent.service` uses the same launcher and identity
 plumbing but connects Buzz directly to `opencode acp`, without slopd. It pins

@@ -29,6 +29,8 @@ const MAX_THREAD_EVENTS: usize = 1_000;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     match std::env::args().nth(1).as_deref() {
         Some("auth-tag") => return print_auth_tag(),
         Some("generate-key") => return print_generated_key(),
@@ -91,22 +93,31 @@ struct Config {
     relay_url: String,
     channel_ids: Vec<Uuid>,
     bot_keys: Keys,
-    owner_auth_tag: Tag,
+    owner_auth_tag: Option<Tag>,
     owner_pubkey: PublicKey,
 }
 
 impl Config {
     fn from_env() -> Result<Self> {
-        let relay_url = std::env::var("BUZZ_RELAY_URL")
-            .or_else(|_| std::env::var("BUZZ_RELAY_WS_URL"))
+        let relay_url = std::env::var("BUZZ_RELAY_WS_URL")
+            .or_else(|_| std::env::var("BUZZ_RELAY_URL"))
             .unwrap_or_else(|_| DEFAULT_RELAY_URL.to_string());
         let bot_keys = Keys::parse(&required_env("BUZZ_BOT_PRIVATE_KEY")?)
             .context("BUZZ_BOT_PRIVATE_KEY must be an nsec or hex private key")?;
-        let auth_tag_json = required_env("BUZZ_AUTH_TAG")?;
-        let owner_pubkey =
-            buzz_sdk::nip_oa::verify_auth_tag(&auth_tag_json, &bot_keys.public_key())
-                .context("BUZZ_AUTH_TAG is not valid for BUZZ_BOT_PRIVATE_KEY")?;
-        let owner_auth_tag = buzz_sdk::nip_oa::parse_auth_tag(&auth_tag_json)?;
+        let (owner_pubkey, owner_auth_tag) = match std::env::var("BUZZ_AUTH_TAG") {
+            Ok(auth_tag_json) if !auth_tag_json.trim().is_empty() => {
+                let owner_pubkey =
+                    buzz_sdk::nip_oa::verify_auth_tag(&auth_tag_json, &bot_keys.public_key())
+                        .context("BUZZ_AUTH_TAG is not valid for BUZZ_BOT_PRIVATE_KEY")?;
+                let owner_auth_tag = buzz_sdk::nip_oa::parse_auth_tag(&auth_tag_json)?;
+                (owner_pubkey, Some(owner_auth_tag))
+            }
+            _ => {
+                let owner_pubkey = PublicKey::parse(&required_env("BUZZ_OWNER_PUBKEY")?)
+                    .context("BUZZ_OWNER_PUBKEY must be an npub or hex public key")?;
+                (owner_pubkey, None)
+            }
+        };
 
         let channel_ids_raw = std::env::var("BUZZ_CHANNEL_IDS")
             .or_else(|_| std::env::var("BUZZ_CHANNEL_ID"))
@@ -138,9 +149,11 @@ impl Config {
     }
 
     fn sign(&self, builder: EventBuilder) -> Result<Event> {
-        Ok(builder
-            .tag(self.owner_auth_tag.clone())
-            .sign_with_keys(&self.bot_keys)?)
+        let builder = match &self.owner_auth_tag {
+            Some(tag) => builder.tag(tag.clone()),
+            None => builder,
+        };
+        Ok(builder.sign_with_keys(&self.bot_keys)?)
     }
 }
 
@@ -186,7 +199,7 @@ async fn bootstrap(config: &Config) -> Result<()> {
     let mut connection = NostrWsConnection::connect_authenticated(
         &config.relay_url,
         &config.bot_keys,
-        Some(&config.owner_auth_tag),
+        config.owner_auth_tag.as_ref(),
     )
     .await?;
 
@@ -237,7 +250,7 @@ async fn listen_once(config: &Config) -> Result<()> {
     let mut connection = NostrWsConnection::connect_authenticated(
         &config.relay_url,
         &config.bot_keys,
-        Some(&config.owner_auth_tag),
+        config.owner_auth_tag.as_ref(),
     )
     .await?;
     let now = Timestamp::now().as_secs();
@@ -343,7 +356,7 @@ async fn load_thread(config: &Config, channel_id: Uuid, root_id: EventId) -> Res
     let mut connection = NostrWsConnection::connect_authenticated(
         &config.relay_url,
         &config.bot_keys,
-        Some(&config.owner_auth_tag),
+        config.owner_auth_tag.as_ref(),
     )
     .await?;
     let channel = channel_id.to_string();
@@ -639,6 +652,31 @@ mod tests {
             .sign_with_keys(&fixture.bot)
             .unwrap();
         assert!(event_mentions(&event, &fixture.bot.public_key()));
+    }
+
+    #[test]
+    fn standalone_signing_keeps_message_tags_without_auth() {
+        let fixture = Fixture::new();
+        let config = Config {
+            relay_url: DEFAULT_RELAY_URL.to_string(),
+            channel_ids: Vec::new(),
+            bot_keys: fixture.bot,
+            owner_auth_tag: None,
+            owner_pubkey: fixture.owner.public_key(),
+        };
+        let event = config
+            .sign(
+                buzz_sdk::build_message(fixture.channel, "message", None, &[], false, &[]).unwrap(),
+            )
+            .unwrap();
+        assert_eq!(
+            event_channel(&event),
+            Some(fixture.channel.to_string()).as_deref()
+        );
+        assert!(!event
+            .tags
+            .iter()
+            .any(|tag| tag.as_slice().first().map(String::as_str) == Some("auth")));
     }
 
     #[test]

@@ -30,15 +30,17 @@ parent, so the agent receives the real conversation as thread context.
 
 ## Configuration
 
-The bot has its own key. `BUZZ_AUTH_TAG` must be an unrestricted NIP-OA
-attestation signed by the owner for that bot key. The bot publishes the
-attestation on its kind `0` profile and routed messages, allowing a default
-`buzz-acp --respond-to=owner-only` agent to verify it as a same-owner sibling.
+The bot has its own key. It can run either as a standalone identity configured
+with `BUZZ_OWNER_PUBKEY`, or with an unrestricted `BUZZ_AUTH_TAG` signed by the
+owner for that bot key. An owner-attested bot works with the default
+`buzz-acp --respond-to=owner-only` gate. A standalone bot must be explicitly
+included in each target agent's `--respond-to=allowlist`; the private-host
+installer configures that exact-key allowlist automatically.
 
 ```bash
 export BUZZ_RELAY_URL=wss://buzz.example.com
 export BUZZ_BOT_PRIVATE_KEY=<bot-nsec-or-hex-secret>
-export BUZZ_AUTH_TAG='["auth","<owner-pubkey>","","<signature>"]'
+export BUZZ_OWNER_PUBKEY=<owner-npub-or-hex-public-key>
 # Optional: restrict routing to specific channels.
 export BUZZ_CHANNEL_IDS=<channel-uuid>[,<channel-uuid>...]
 
@@ -48,8 +50,9 @@ cargo run -p thread-mention-bot
 Omit `BUZZ_CHANNEL_IDS` to watch every channel the bot can access.
 `BUZZ_CHANNEL_ID` is accepted as a single-channel compatibility alias.
 
-To generate the bot-specific attestation once, provide the owner key only to
-the short-lived helper invocation and save its output as `BUZZ_AUTH_TAG`:
+To upgrade from standalone mode, generate the bot-specific attestation once
+and save its output as `BUZZ_AUTH_TAG`. When present, the verified attestation
+defines the owner and `BUZZ_OWNER_PUBKEY` is ignored:
 
 ```bash
 printf '%s\n' '<owner-nsec-or-hex-secret>' | \
@@ -73,19 +76,21 @@ BUZZ_BOT_PRIVATE_KEY=<bot-nsec-or-hex-secret> \
 ## Private-host installation
 
 The repository's private-host installer builds and installs the binary and its
-tracked user service. On first use it generates a dedicated bot identity, then
-prompts without echo for the owner key to create the one-time attestation:
+tracked user service. On first use it generates a dedicated bot identity and
+adds only that public key to each installed ACP agent's response allowlist:
 
 ```bash
-./deploy/private-host/install-thread-mention-bot.sh --sign --restart
+./deploy/private-host/install-thread-mention-bot.sh --restart
 ```
 
-The owner key is passed to the signer over stdin and is not written to disk or
-placed in a process argument or environment variable. Add `--channel UUID` to
-the same command for each private channel that should admit the bot. Open
-channels need no per-channel setup. Subsequent code updates need only
-`--restart`; the identity and attestation remain in the mode-0600 files under
-`~/.config/buzz-thread-mention-bot/`.
+This standalone path needs no owner secret. Open channels require no
+per-channel setup. Private channels must admit the bot through an existing
+member. If desired, `--sign --channel UUID --restart` prompts without echo for
+the owner key, writes only the resulting attestation, and adds the bot to that
+private channel. The owner key is passed to the signer over stdin and is not
+written to disk or placed in a process argument or environment variable.
+Subsequent code updates need only `--restart`; the stable identity remains in
+the mode-0600 files under `~/.config/buzz-thread-mention-bot/`.
 
 ## Generic systemd
 

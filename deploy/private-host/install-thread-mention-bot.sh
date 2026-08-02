@@ -7,6 +7,7 @@ bridge_config="${BUZZ_AGENT_BRIDGE_CONFIG:-${HOME}/.config/buzz-slopd-agent/brid
 config_dir="${HOME}/.config/buzz-thread-mention-bot"
 identity_file="${config_dir}/identity.env"
 auth_file="${config_dir}/auth.env"
+public_file="${config_dir}/public.env"
 unit_dir="${HOME}/.config/systemd/user"
 libexec_dir="${HOME}/.local/libexec"
 binary="${libexec_dir}/buzz-thread-mention-bot"
@@ -20,10 +21,10 @@ usage() {
 Usage: install-thread-mention-bot.sh [OPTIONS]
 
 Build and install the deterministic two-party thread mention bot and its
-tracked systemd user service. The first --sign invocation prompts without echo
-for the human Buzz owner's nsec and stores only the resulting NIP-OA tag.
+tracked systemd user service. Standalone mode is allowlisted in the installed
+ACP agent services. Optional --sign upgrades the bot to a same-owner identity.
 
-  --sign         Sign or refresh the bot's owner attestation.
+  --sign         Prompt without echo to sign or refresh the owner attestation.
   --channel UUID Add the bot to a private channel while the owner key is loaded.
                  May be repeated and requires --sign.
   --restart      Enable and restart the installed user service.
@@ -80,6 +81,16 @@ source "${repo_root}/bin/activate-hermit"
 cargo build --quiet --locked -p thread-mention-bot
 install -Dm700 "${repo_root}/target/debug/thread-mention-bot" "${binary}"
 install -Dm644 "${script_dir}/systemd/${unit}" "${unit_dir}/${unit}"
+install -Dm700 "${script_dir}/buzz-slopd-agent" "${libexec_dir}/buzz-slopd-agent"
+agent_units=(
+  buzz-slopd-agent.service
+  buzz-slopd-opencode-agent.service
+  buzz-slopd-claude-agent.service
+  buzz-zai-agent.service
+)
+for agent_unit in "${agent_units[@]}"; do
+  install -Dm644 "${script_dir}/systemd/${agent_unit}" "${unit_dir}/${agent_unit}"
+done
 install -d -m 700 "${config_dir}"
 
 if [[ ! -f "${identity_file}" ]]; then
@@ -96,14 +107,28 @@ if [[ ! -f "${identity_file}" ]]; then
   echo "Created ${identity_file}"
 fi
 
-if [[ "${sign}" == true ]]; then
-  expected_owner="$(sed -n 's/^BUZZ_AGENT_OWNER=//p' "${bridge_config}" | tail -n 1)"
-  bot_secret="$(sed -n "s/^BUZZ_BOT_PRIVATE_KEY=['\"]\{0,1\}\([^'\"]*\)['\"]\{0,1\}$/\1/p" "${identity_file}" | tail -n 1)"
-  if [[ ! "${expected_owner}" =~ ^[0-9a-f]{64}$ || -z "${bot_secret}" ]]; then
-    echo "Bridge owner or bot identity is invalid" >&2
-    exit 1
-  fi
+set -a
+# shellcheck source=/dev/null
+source "${bridge_config}"
+# shellcheck source=/dev/null
+source "${identity_file}"
+set +a
+expected_owner="${BUZZ_AGENT_OWNER:-}"
+bot_secret="${BUZZ_BOT_PRIVATE_KEY:-}"
+if [[ ! "${expected_owner}" =~ ^[0-9a-f]{64}$ || -z "${bot_secret}" ]]; then
+  echo "Bridge owner or bot identity is invalid" >&2
+  exit 1
+fi
+bot_public_key="$(BUZZ_BOT_PRIVATE_KEY="${bot_secret}" "${binary}" public-key)"
+temporary_public="$(mktemp "${config_dir}/.public.env.XXXXXX")"
+printf '%s\n' \
+  "BUZZ_OWNER_PUBKEY=${expected_owner}" \
+  "BUZZ_THREAD_MENTION_BOT_PUBKEY=${bot_public_key}" \
+  >"${temporary_public}"
+chmod 600 "${temporary_public}"
+mv -f "${temporary_public}" "${public_file}"
 
+if [[ "${sign}" == true ]]; then
   owner_secret=""
   trap 'owner_secret=""; bot_secret=""' EXIT
   IFS= read -r -s -p "Buzz owner nsec: " owner_secret </dev/tty
@@ -127,9 +152,8 @@ if [[ "${sign}" == true ]]; then
   echo "Wrote ${auth_file}"
 
   if ((${#channels[@]} > 0)); then
-    relay_url="$(sed -n 's/^BUZZ_RELAY_URL=//p' "${bridge_config}" | tail -n 1)"
-    buzz_cli="$(sed -n 's/^BUZZ_CLI_BIN=//p' "${bridge_config}" | tail -n 1)"
-    bot_public_key="$(BUZZ_BOT_PRIVATE_KEY="${bot_secret}" "${binary}" public-key)"
+    relay_url="${BUZZ_RELAY_URL:-}"
+    buzz_cli="${BUZZ_CLI_BIN:-}"
     if [[ -z "${relay_url}" || ! -x "${buzz_cli}" ]]; then
       echo "BUZZ_RELAY_URL and executable BUZZ_CLI_BIN are required for --channel" >&2
       exit 1
@@ -149,15 +173,12 @@ fi
 
 systemctl --user daemon-reload
 if [[ "${restart}" == true ]]; then
-  if [[ ! -r "${auth_file}" ]]; then
-    echo "Missing ${auth_file}; run with --sign before --restart" >&2
-    exit 1
-  fi
   systemctl --user enable "${unit}"
   systemctl --user restart "${unit}"
-  echo "Enabled and restarted ${unit}"
+  systemctl --user try-restart "${agent_units[@]}"
+  echo "Enabled and restarted ${unit} and refreshed active ACP agents"
 elif [[ ! -r "${auth_file}" ]]; then
-  echo "Run this command again with --sign --restart to authorize and start the bot."
+  echo "Run with --restart for standalone allowlisted mode, or --sign --restart for owner-attested mode."
 else
   echo "Run with --restart to restart the installed bot."
 fi
