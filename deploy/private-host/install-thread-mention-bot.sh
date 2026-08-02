@@ -8,9 +8,11 @@ config_dir="${HOME}/.config/buzz-thread-mention-bot"
 identity_file="${config_dir}/identity.env"
 auth_file="${config_dir}/auth.env"
 public_file="${config_dir}/public.env"
+avatar_file="${config_dir}/avatar.env"
 unit_dir="${HOME}/.config/systemd/user"
 libexec_dir="${HOME}/.local/libexec"
 binary="${libexec_dir}/buzz-thread-mention-bot"
+avatar_source="${script_dir}/agent-avatars/thread-mention-bot.png"
 unit="buzz-thread-mention-bot.service"
 sign=false
 restart=false
@@ -128,6 +130,37 @@ printf '%s\n' \
 chmod 600 "${temporary_public}"
 mv -f "${temporary_public}" "${public_file}"
 
+relay_url="${BUZZ_RELAY_URL:-}"
+buzz_cli="${BUZZ_CLI_BIN:-}"
+if [[ -r "${avatar_source}" ]]; then
+  if [[ -z "${relay_url}" || ! -x "${buzz_cli}" ]]; then
+    echo "BUZZ_RELAY_URL and executable BUZZ_CLI_BIN are required to publish the bot avatar" >&2
+    exit 1
+  fi
+  if ! command -v jq >/dev/null; then
+    echo "jq is required to publish the bot avatar" >&2
+    exit 1
+  fi
+  avatar_json="$(
+    env -u BUZZ_AUTH_TAG \
+      BUZZ_PRIVATE_KEY="${bot_secret}" \
+      BUZZ_RELAY_URL="${relay_url}" \
+      "${buzz_cli}" upload file --file "${avatar_source}"
+  )"
+  avatar_url="$(printf '%s' "${avatar_json}" | jq -r '.url // empty')"
+  if [[ ! "${avatar_url}" =~ ^https?:// ]] ||
+    [[ "${avatar_url}" == *[[:space:]]* ]] ||
+    [[ "${avatar_url}" == *"'"* ]]; then
+    echo "Bot avatar upload returned an invalid URL" >&2
+    exit 1
+  fi
+  temporary_avatar="$(mktemp "${config_dir}/.avatar.env.XXXXXX")"
+  printf "BUZZ_BOT_PICTURE_URL='%s'\n" "${avatar_url}" >"${temporary_avatar}"
+  chmod 600 "${temporary_avatar}"
+  mv -f "${temporary_avatar}" "${avatar_file}"
+  echo "Published thread mention bot avatar"
+fi
+
 if [[ "${sign}" == true ]]; then
   owner_secret=""
   trap 'owner_secret=""; bot_secret=""' EXIT
@@ -152,8 +185,6 @@ if [[ "${sign}" == true ]]; then
   echo "Wrote ${auth_file}"
 
   if ((${#channels[@]} > 0)); then
-    relay_url="${BUZZ_RELAY_URL:-}"
-    buzz_cli="${BUZZ_CLI_BIN:-}"
     if [[ -z "${relay_url}" || ! -x "${buzz_cli}" ]]; then
       echo "BUZZ_RELAY_URL and executable BUZZ_CLI_BIN are required for --channel" >&2
       exit 1

@@ -17,15 +17,20 @@ use uuid::Uuid;
 const DEFAULT_RELAY_URL: &str = "ws://localhost:3000";
 const LIVE_SUBSCRIPTION_ID: &str = "thread-mention-live";
 const THREAD_SUBSCRIPTION_ID: &str = "thread-mention-query";
+const CHANNEL_SUBSCRIPTION_ID: &str = "thread-mention-channels";
+const PROFILE_SUBSCRIPTION_ID: &str = "thread-mention-profile";
+const ROUTED_SOURCE_TAG: &str = "thread-mention-for";
 const BOT_NAME: &str = "thread-mention-bot";
 const BOT_DISPLAY_NAME: &str = "Thread Mention Bot";
 const BOT_ABOUT: &str =
     "Deterministically tags the sole same-owner agent in an otherwise two-party thread.";
 const RECONNECT_DELAY: Duration = Duration::from_secs(3);
+const CHANNEL_REFRESH_INTERVAL: Duration = Duration::from_secs(300);
 const LIVE_REPLAY_WINDOW_SECS: u64 = 300;
 const RECEIVE_TIMEOUT: Duration = Duration::from_secs(60);
 const THREAD_QUERY_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_THREAD_EVENTS: usize = 1_000;
+const MAX_CHANNELS: usize = 500;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -95,6 +100,7 @@ struct Config {
     bot_keys: Keys,
     owner_auth_tag: Option<Tag>,
     owner_pubkey: PublicKey,
+    picture_url: Option<String>,
 }
 
 impl Config {
@@ -141,6 +147,9 @@ impl Config {
             bot_keys,
             owner_auth_tag,
             owner_pubkey,
+            picture_url: std::env::var("BUZZ_BOT_PICTURE_URL")
+                .ok()
+                .filter(|value| !value.trim().is_empty()),
         })
     }
 
@@ -206,7 +215,7 @@ async fn bootstrap(config: &Config) -> Result<()> {
     let profile = config.sign(buzz_sdk::build_profile(
         Some(BOT_DISPLAY_NAME),
         Some(BOT_NAME),
-        None,
+        config.picture_url.as_deref(),
         Some(BOT_ABOUT),
         None,
     )?)?;
@@ -247,6 +256,7 @@ async fn publish_required(
 }
 
 async fn listen_once(config: &Config) -> Result<()> {
+    let channel_ids = discover_channels(config).await?;
     let mut connection = NostrWsConnection::connect_authenticated(
         &config.relay_url,
         &config.bot_keys,
@@ -254,34 +264,41 @@ async fn listen_once(config: &Config) -> Result<()> {
     )
     .await?;
     let now = Timestamp::now().as_secs();
-    let channel_values = config
-        .channel_ids
-        .iter()
-        .map(Uuid::to_string)
-        .collect::<Vec<_>>();
-    let mut filter = Filter::new()
-        .kind(Kind::Custom(9))
-        .author(config.owner_pubkey)
-        .since(Timestamp::from_secs(
-            now.saturating_sub(LIVE_REPLAY_WINDOW_SECS),
-        ));
-    if !channel_values.is_empty() {
-        filter = filter.custom_tags(
-            SingleLetterTag::lowercase(Alphabet::H),
-            channel_values.iter().map(String::as_str),
-        );
+    for channel_id in &channel_ids {
+        let channel = channel_id.to_string();
+        let filter = Filter::new()
+            .kind(Kind::Custom(9))
+            .author(config.owner_pubkey)
+            .since(Timestamp::from_secs(
+                now.saturating_sub(LIVE_REPLAY_WINDOW_SECS),
+            ))
+            .custom_tags(SingleLetterTag::lowercase(Alphabet::H), [channel.as_str()]);
+        connection
+            .send_raw(&json!([
+                "REQ",
+                format!("{LIVE_SUBSCRIPTION_ID}:{channel_id}"),
+                filter
+            ]))
+            .await?;
     }
-    connection
-        .send_raw(&json!(["REQ", LIVE_SUBSCRIPTION_ID, filter]))
-        .await?;
-    eprintln!("listening for owner-authored thread replies");
+    eprintln!(
+        "listening for owner-authored thread replies in {} channel(s)",
+        channel_ids.len()
+    );
+
+    let refresh = tokio::time::sleep(CHANNEL_REFRESH_INTERVAL);
+    tokio::pin!(refresh);
 
     loop {
-        match connection.next_event(RECEIVE_TIMEOUT).await {
+        let message = tokio::select! {
+            _ = &mut refresh => bail!("refreshing channel subscriptions"),
+            message = connection.next_event(RECEIVE_TIMEOUT) => message,
+        };
+        match message {
             Ok(RelayMessage::Event {
                 subscription_id,
                 event,
-            }) if subscription_id == LIVE_SUBSCRIPTION_ID => {
+            }) if subscription_id.starts_with(LIVE_SUBSCRIPTION_ID) => {
                 if let Err(error) = maybe_route(config, &mut connection, &event).await {
                     eprintln!("failed to evaluate {}: {error:#}", event.id.to_hex());
                 }
@@ -289,7 +306,7 @@ async fn listen_once(config: &Config) -> Result<()> {
             Ok(RelayMessage::Closed {
                 subscription_id,
                 message,
-            }) if subscription_id == LIVE_SUBSCRIPTION_ID => {
+            }) if subscription_id.starts_with(LIVE_SUBSCRIPTION_ID) => {
                 bail!("relay closed live subscription: {message}");
             }
             Ok(RelayMessage::Notice { message }) => eprintln!("relay notice: {message}"),
@@ -297,6 +314,62 @@ async fn listen_once(config: &Config) -> Result<()> {
             Err(error) => return Err(error.into()),
         }
     }
+}
+
+async fn discover_channels(config: &Config) -> Result<Vec<Uuid>> {
+    if !config.channel_ids.is_empty() {
+        return Ok(config.channel_ids.clone());
+    }
+    let mut connection = NostrWsConnection::connect_authenticated(
+        &config.relay_url,
+        &config.bot_keys,
+        config.owner_auth_tag.as_ref(),
+    )
+    .await?;
+    connection
+        .send_raw(&json!([
+            "REQ",
+            CHANNEL_SUBSCRIPTION_ID,
+            Filter::new().kind(Kind::Custom(39000)).limit(MAX_CHANNELS)
+        ]))
+        .await?;
+    let mut channels = HashSet::new();
+    loop {
+        match connection.next_event(THREAD_QUERY_TIMEOUT).await? {
+            RelayMessage::Event {
+                subscription_id,
+                event,
+            } if subscription_id == CHANNEL_SUBSCRIPTION_ID => {
+                event
+                    .verify()
+                    .context("invalid channel metadata signature")?;
+                if let Some(channel) =
+                    event_tag_value(&event, "d").and_then(|value| Uuid::parse_str(value).ok())
+                {
+                    channels.insert(channel);
+                }
+            }
+            RelayMessage::Eose { subscription_id }
+                if subscription_id == CHANNEL_SUBSCRIPTION_ID =>
+            {
+                break;
+            }
+            RelayMessage::Closed {
+                subscription_id,
+                message,
+            } if subscription_id == CHANNEL_SUBSCRIPTION_ID => {
+                bail!("relay closed channel query: {message}");
+            }
+            _ => {}
+        }
+    }
+    let _ = connection.disconnect().await;
+    let mut channels = channels.into_iter().collect::<Vec<_>>();
+    channels.sort_unstable();
+    if channels.is_empty() {
+        bail!("relay returned no accessible channels");
+    }
+    Ok(channels)
 }
 
 async fn maybe_route(
@@ -325,20 +398,18 @@ async fn maybe_route(
     };
 
     let agent_hex = agent.to_hex();
-    let agent_npub = agent
-        .to_bech32()
-        .context("failed to encode target agent as npub")?;
-    let thread_ref = ThreadRef {
-        root_event_id: relation.root_event_id,
-        parent_event_id: candidate.id,
-    };
-    let event = config.sign(buzz_sdk::build_message(
+    let label = load_agent_label(config, &agent)
+        .await
+        .unwrap_or_else(|error| {
+            eprintln!("could not resolve agent profile {agent_hex}: {error:#}");
+            "agent".to_string()
+        });
+    let event = config.sign(build_routed_message(
         channel_id,
-        &format!("nostr:{agent_npub}"),
-        Some(&thread_ref),
-        &[&agent_hex],
-        false,
-        &[],
+        relation.root_event_id,
+        candidate.id,
+        &agent_hex,
+        &label,
     )?)?;
     let response = live_connection.send_event(event).await?;
     if !response.accepted {
@@ -350,6 +421,82 @@ async fn maybe_route(
         candidate.id.to_hex()
     );
     Ok(())
+}
+
+fn build_routed_message(
+    channel_id: Uuid,
+    root_event_id: EventId,
+    candidate_id: EventId,
+    agent_hex: &str,
+    agent_label: &str,
+) -> Result<EventBuilder> {
+    let thread_ref = ThreadRef {
+        root_event_id,
+        parent_event_id: root_event_id,
+    };
+    Ok(buzz_sdk::build_message(
+        channel_id,
+        &format!("@{}", agent_label.trim().trim_start_matches('@')),
+        Some(&thread_ref),
+        &[agent_hex],
+        false,
+        &[],
+    )?
+    .tag(Tag::parse([
+        ROUTED_SOURCE_TAG,
+        candidate_id.to_hex().as_str(),
+    ])?))
+}
+
+async fn load_agent_label(config: &Config, agent: &PublicKey) -> Result<String> {
+    let mut connection = NostrWsConnection::connect_authenticated(
+        &config.relay_url,
+        &config.bot_keys,
+        config.owner_auth_tag.as_ref(),
+    )
+    .await?;
+    connection
+        .send_raw(&json!([
+            "REQ",
+            PROFILE_SUBSCRIPTION_ID,
+            Filter::new().kind(Kind::Custom(0)).author(*agent).limit(1)
+        ]))
+        .await?;
+    let mut label = None;
+    loop {
+        match connection.next_event(THREAD_QUERY_TIMEOUT).await? {
+            RelayMessage::Event {
+                subscription_id,
+                event,
+            } if subscription_id == PROFILE_SUBSCRIPTION_ID => {
+                event.verify().context("invalid agent profile signature")?;
+                let profile: serde_json::Value = serde_json::from_str(&event.content)
+                    .context("agent profile is not valid JSON")?;
+                label = ["display_name", "name"].into_iter().find_map(|key| {
+                    profile
+                        .get(key)
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .map(str::to_string)
+                });
+            }
+            RelayMessage::Eose { subscription_id }
+                if subscription_id == PROFILE_SUBSCRIPTION_ID =>
+            {
+                break;
+            }
+            RelayMessage::Closed {
+                subscription_id,
+                message,
+            } if subscription_id == PROFILE_SUBSCRIPTION_ID => {
+                bail!("relay closed profile query: {message}");
+            }
+            _ => {}
+        }
+    }
+    let _ = connection.disconnect().await;
+    label.ok_or_else(|| anyhow!("agent has no display_name or name"))
 }
 
 async fn load_thread(config: &Config, channel_id: Uuid, root_id: EventId) -> Result<Vec<Event>> {
@@ -485,8 +632,9 @@ fn route_target(
     if thread.iter().any(|event| {
         event.pubkey == *bot
             && event_mentions(event, &agent)
-            && parse_thread_relation(event)
-                .is_some_and(|relation| relation.parent_event_id == candidate.id)
+            && (event_tag_value(event, ROUTED_SOURCE_TAG) == Some(candidate.id.to_hex().as_str())
+                || parse_thread_relation(event)
+                    .is_some_and(|relation| relation.parent_event_id == candidate.id))
     }) {
         return None;
     }
@@ -521,9 +669,13 @@ fn event_mentions(event: &Event, pubkey: &PublicKey) -> bool {
 }
 
 fn event_channel(event: &Event) -> Option<&str> {
+    event_tag_value(event, "h")
+}
+
+fn event_tag_value<'a>(event: &'a Event, name: &str) -> Option<&'a str> {
     event.tags.iter().find_map(|tag| {
         let parts = tag.as_slice();
-        (parts.first().map(String::as_str) == Some("h"))
+        (parts.first().map(String::as_str) == Some(name))
             .then(|| parts.get(1).map(String::as_str))
             .flatten()
     })
@@ -663,6 +815,7 @@ mod tests {
             bot_keys: fixture.bot,
             owner_auth_tag: None,
             owner_pubkey: fixture.owner.public_key(),
+            picture_url: None,
         };
         let event = config
             .sign(
@@ -762,6 +915,42 @@ mod tests {
             }),
             &[&agent_hex],
         );
+        let mut thread = fixture.base_thread(&candidate);
+        thread.push(routed);
+        assert!(route_target(
+            &thread,
+            &candidate,
+            &fixture.owner.public_key(),
+            &fixture.bot.public_key(),
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn routed_message_is_a_sibling_with_a_friendly_label_and_source_marker() {
+        let fixture = Fixture::new();
+        let candidate = fixture.candidate(&[]);
+        let agent_hex = fixture.agent.public_key().to_hex();
+        let routed = build_routed_message(
+            fixture.channel,
+            fixture.root.id,
+            candidate.id,
+            &agent_hex,
+            "slopd-codex",
+        )
+        .unwrap()
+        .sign_with_keys(&fixture.bot)
+        .unwrap();
+        let relation = parse_thread_relation(&routed).unwrap();
+        assert_eq!(relation.root_event_id, fixture.root.id);
+        assert_eq!(relation.parent_event_id, fixture.root.id);
+        assert_eq!(routed.content, "@slopd-codex");
+        assert_eq!(
+            event_tag_value(&routed, ROUTED_SOURCE_TAG),
+            Some(candidate.id.to_hex().as_str())
+        );
+        assert!(event_mentions(&routed, &fixture.agent.public_key()));
+
         let mut thread = fixture.base_thread(&candidate);
         thread.push(routed);
         assert!(route_target(

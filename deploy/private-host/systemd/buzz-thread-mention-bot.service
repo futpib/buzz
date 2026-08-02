@@ -12,6 +12,7 @@ EnvironmentFile=%h/.config/buzz-slopd-agent/bridge.env
 EnvironmentFile=%h/.config/buzz-thread-mention-bot/identity.env
 EnvironmentFile=%h/.config/buzz-thread-mention-bot/public.env
 EnvironmentFile=-%h/.config/buzz-thread-mention-bot/auth.env
+EnvironmentFile=-%h/.config/buzz-thread-mention-bot/avatar.env
 EnvironmentFile=-%h/.config/buzz-thread-mention-bot/config.env
 ExecStart=%h/.local/libexec/buzz-thread-mention-bot
 Restart=always

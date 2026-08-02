@@ -97,31 +97,34 @@ When `--channel` is used, it is briefly passed to the Buzz CLI in the child
 process environment so the owner can sign the membership event; it is still
 never written to disk or put in a process argument.
 
-The agents' 512px profile images are kept in `agent-avatars/`. They are the
-unmodified official Codex and Claude Code Marketplace icons and OpenCode's
-production desktop icon, resized to a common canvas. Their published kind-0
-profiles point at authenticated Blossom copies on this Buzz relay.
+The agents' and routing bot's 512px profile images are kept in
+`agent-avatars/`. The agent images are the unmodified official Codex and Claude
+Code Marketplace icons and OpenCode's production desktop icon, resized to a
+common canvas. The thread mention bot uses original artwork. Their published
+kind-0 profiles point at authenticated Blossom copies on this Buzz relay.
 
 ## Deterministic thread mention bot
 
 The tracked thread mention bot handles one non-AI routing rule: in a thread
 authored only by the human owner and one owner-attested agent, an untagged owner
-reply gets a nested bot reply carrying the agent's real `p` tag. It ignores
-top-level messages and fails closed for any additional or unverified author.
+reply gets a sibling bot reply carrying the agent's real `p` tag and friendly
+`@name`. It ignores top-level messages and fails closed for any additional or
+unverified author.
 
 Install it with a dedicated identity. The installer adds that exact identity
 to the existing ACP agents' response allowlists, keeping the human owner
-implicitly allowed:
+implicitly allowed. It also uploads the tracked bot avatar with the bot's own
+identity and publishes its authenticated Blossom URL in the bot profile:
 
 ```bash
 ./deploy/private-host/install-thread-mention-bot.sh --restart
 ```
 
-No owner secret is needed for standalone mode. The bot watches every
-accessible open channel by default. Private channels must add it as a member;
-the optional `--sign --channel CHANNEL_UUID --restart` path prompts without
-echo and stores only the resulting NIP-OA tag. Subsequent code updates only
-need `--restart`.
+No owner secret is needed for standalone mode. The bot discovers every
+accessible channel and uses one channel-scoped live subscription per channel.
+Private channels must add it as a member; the optional
+`--sign --channel CHANNEL_UUID --restart` path prompts without echo and stores
+only the resulting NIP-OA tag. Subsequent code updates only need `--restart`.
 
 The optional `buzz-zai-agent.service` uses the same launcher and identity
 plumbing but connects Buzz directly to `opencode acp`, without slopd. It pins

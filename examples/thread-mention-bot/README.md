@@ -22,11 +22,12 @@ For each new kind `9` message authored by the configured owner, the bot:
    authored a thread message.
 7. Does nothing if the owner's new message already `p`-tags that agent.
 8. Does nothing if it already routed that exact message.
-9. Otherwise posts a nested kind `9` reply with the agent's real `p` tag.
+9. Otherwise posts a sibling kind `9` reply in the existing thread with the
+   agent's real `p` tag and friendly `@name`.
 
 The original user event remains unchanged because Nostr events are signed and
-immutable. The routing reply uses the original message as its immediate NIP-10
-parent, so the agent receives the real conversation as thread context.
+immutable. A bot-specific source-event tag makes retries idempotent without
+turning the owner's message into a nested subthread.
 
 ## Configuration
 
@@ -43,11 +44,14 @@ export BUZZ_BOT_PRIVATE_KEY=<bot-nsec-or-hex-secret>
 export BUZZ_OWNER_PUBKEY=<owner-npub-or-hex-public-key>
 # Optional: restrict routing to specific channels.
 export BUZZ_CHANNEL_IDS=<channel-uuid>[,<channel-uuid>...]
+# Optional: publish a profile avatar.
+export BUZZ_BOT_PICTURE_URL=https://buzz.example.com/media/avatar.png
 
 cargo run -p thread-mention-bot
 ```
 
-Omit `BUZZ_CHANNEL_IDS` to watch every channel the bot can access.
+Omit `BUZZ_CHANNEL_IDS` to discover and watch every channel the bot can access.
+The channel list is refreshed every five minutes.
 `BUZZ_CHANNEL_ID` is accepted as a single-channel compatibility alias.
 
 To upgrade from standalone mode, generate the bot-specific attestation once
@@ -76,8 +80,9 @@ BUZZ_BOT_PRIVATE_KEY=<bot-nsec-or-hex-secret> \
 ## Private-host installation
 
 The repository's private-host installer builds and installs the binary and its
-tracked user service. On first use it generates a dedicated bot identity and
-adds only that public key to each installed ACP agent's response allowlist:
+tracked user service. On first use it generates a dedicated bot identity,
+uploads the tracked bot avatar with that identity, and adds only that public
+key to each installed ACP agent's response allowlist:
 
 ```bash
 ./deploy/private-host/install-thread-mention-bot.sh --restart
