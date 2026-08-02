@@ -8,7 +8,8 @@ launcher="${deployment_dir}/buzz-slopd-agent"
 for unit in \
   buzz-slopd-agent.service \
   buzz-slopd-opencode-agent.service \
-  buzz-slopd-claude-agent.service
+  buzz-slopd-claude-agent.service \
+  buzz-zai-agent.service
 do
   unit_path="${deployment_dir}/systemd/${unit}"
   if rg -q -- '--no-(base-prompt|memory)' "${unit_path}"; then
@@ -17,10 +18,27 @@ do
   fi
 done
 
+if ! rg -q -F 'Environment=BUZZ_AGENT_COMMAND=/usr/bin/opencode' \
+  "${deployment_dir}/systemd/buzz-zai-agent.service"; then
+  echo "buzz-zai-agent.service does not use OpenCode directly" >&2
+  exit 1
+fi
+if rg -q -F 'slopd-buzz-agent.service' \
+  "${deployment_dir}/systemd/buzz-zai-agent.service"; then
+  echo "buzz-zai-agent.service unexpectedly depends on slopd" >&2
+  exit 1
+fi
+if ! rg -q -F 'EnvironmentFile=%h/.config/buzz-machine/public.env' \
+  "${deployment_dir}/systemd/buzz-zai-agent.service"; then
+  echo "buzz-zai-agent.service does not load its machine owner identity" >&2
+  exit 1
+fi
+
 declare -A expected_auth_files=(
   [buzz-slopd-agent.service]=auth-codex.env
   [buzz-slopd-opencode-agent.service]=auth-opencode.env
   [buzz-slopd-claude-agent.service]=auth-claude.env
+  [buzz-zai-agent.service]=auth-zai.env
 )
 for unit in "${!expected_auth_files[@]}"; do
   if ! rg -q -F "EnvironmentFile=-%h/.config/buzz-slopd-agent/${expected_auth_files[${unit}]}" \
@@ -38,6 +56,50 @@ printf '%s\n' \
   'Public key: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' \
   'Secret key: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' \
   >"${identity_file}"
+
+direct_output="$(
+  env \
+    BUZZ_SLOPD_AGENT_IDENTITY_FILE="${identity_file}" \
+    BUZZ_ACP_BIN=/usr/bin/echo \
+    BUZZ_RELAY_WS_URL=wss://relay.example.test \
+    BUZZ_AGENT_OWNER=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc \
+    BUZZ_AGENT_COMMAND=/usr/bin/opencode \
+    BUZZ_AGENT_ARGS=acp,--pure \
+    BUZZ_AGENT_SESSION_TITLE='z.ai glm-4.7' \
+    "${launcher}"
+)"
+for expected in \
+  '--agent-command /usr/bin/opencode' \
+  '--agent-args=acp,--pure' \
+  '--session-title z.ai glm-4.7'
+do
+  if [[ "${direct_output}" != *"${expected}"* ]]; then
+    echo "direct launcher output is missing: ${expected}" >&2
+    exit 1
+  fi
+done
+
+allowlist_output="$(
+  env \
+    BUZZ_SLOPD_AGENT_IDENTITY_FILE="${identity_file}" \
+    BUZZ_ACP_BIN=/usr/bin/echo \
+    BUZZ_RELAY_WS_URL=wss://relay.example.test \
+    BUZZ_AGENT_OWNER=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc \
+    BUZZ_AGENT_COMMAND=/usr/bin/opencode \
+    BUZZ_AGENT_RESPOND_TO=allowlist \
+    BUZZ_AGENT_RESPOND_TO_ALLOWLIST=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd \
+    BUZZ_AGENT_SESSION_TITLE='z.ai glm-4.7' \
+    "${launcher}"
+)"
+for expected in \
+  '--respond-to allowlist' \
+  '--respond-to-allowlist dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd'
+do
+  if [[ "${allowlist_output}" != *"${expected}"* ]]; then
+    echo "allowlist launcher output is missing: ${expected}" >&2
+    exit 1
+  fi
+done
 
 output="$(
   env \
@@ -87,8 +149,9 @@ if [[ ! "${pem_public_key}" =~ ^[0-9a-fA-F]{64}$ ]]; then
   exit 1
 fi
 
-cargo build --quiet --manifest-path "${repo_root}/Cargo.toml" \
-  -p buzz-sdk --example compute_auth_tag
+pushd "${repo_root}" >/dev/null
+cargo build --quiet -p buzz-sdk --example compute_auth_tag
+popd >/dev/null
 signer="${repo_root}/target/debug/examples/compute_auth_tag"
 installed_libexec="${tmp_dir}/installed-libexec"
 install -Dm700 "${deployment_dir}/sign-slopd-agents.sh" \
@@ -123,6 +186,36 @@ for account in codex opencode claude; do
     exit 1
   fi
 done
+
+zai_auth_config_dir="${tmp_dir}/zai-auth-config"
+printf '%s\n' "${test_owner_nsec}" |
+  env \
+    BUZZ_AGENT_BRIDGE_CONFIG="${bridge_config}" \
+    BUZZ_AGENT_AUTH_CONFIG_DIR="${zai_auth_config_dir}" \
+    BUZZ_AGENT_ZAI_PUBKEY="${test_agent_pubkey}" \
+    "${installed_libexec}/sign-slopd-agents" --nsec-stdin --agent zai
+if [[ "$(stat -c '%a' "${zai_auth_config_dir}/auth-zai.env")" != 600 ]]; then
+  echo "Z.AI auth file is not mode 0600" >&2
+  exit 1
+fi
+if [[ -e "${zai_auth_config_dir}/auth-codex.env" ]]; then
+  echo "single-agent signing unexpectedly wrote another agent's auth file" >&2
+  exit 1
+fi
+
+pem_owner_auth_config_dir="${tmp_dir}/pem-owner-auth-config"
+env \
+  BUZZ_AGENT_BRIDGE_CONFIG="${bridge_config}" \
+  BUZZ_AGENT_EXPECTED_OWNER="${pem_public_key}" \
+  BUZZ_AGENT_AUTH_CONFIG_DIR="${pem_owner_auth_config_dir}" \
+  BUZZ_AGENT_ZAI_PUBKEY="${test_agent_pubkey}" \
+  "${installed_libexec}/sign-slopd-agents" \
+  --agent zai \
+  --owner-pem "${pem_file}"
+if [[ ! -f "${pem_owner_auth_config_dir}/auth-zai.env" ]]; then
+  echo "PEM owner signing did not write the selected agent auth file" >&2
+  exit 1
+fi
 
 wrong_auth_config_dir="${tmp_dir}/wrong-auth-config"
 if printf '%064d\n' 2 |

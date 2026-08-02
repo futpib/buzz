@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+export BUZZ_SLOPD_AGENT_IDENTITY_FORMAT=pem
+export BUZZ_SLOPD_AGENT_IDENTITY_FILE="${BUZZ_MACHINE_IDENTITY_FILE:-${HOME}/.config/buzz-machine/identity.pem}"
+
+set -a
+source "${BUZZ_AGENT_BRIDGE_CONFIG:-${HOME}/.config/buzz-slopd-agent/bridge.env}"
+set +a
+
+exec "${BUZZ_MACHINE_LAUNCHER:-${HOME}/.local/libexec/buzz-slopd-agent}" --cli "$@"

@@ -59,7 +59,7 @@ The bootstrap owner keypair is stored outside the repository at
 secret key is the initial owner identity and must never be committed or pasted
 into logs.
 
-## Always-on slopd agents
+## Always-on agents
 
 The three Buzz ACP bridges are installed from the tracked launcher and systemd
 units in this directory. Their shared host-specific settings live outside Git
@@ -92,9 +92,41 @@ The command prompts for the owner `nsec` without echoing it, passes it to the
 NIP-OA signer over stdin, verifies that the derived owner matches
 `BUZZ_AGENT_OWNER`, and writes only the resulting auth tags to mode-0600 files
 under `~/.config/buzz-slopd-agent/`. The `nsec` is never written to disk, put in
-an environment variable, or passed in a process argument.
+an environment variable, or passed in a process argument when only signing.
+When `--channel` is used, it is briefly passed to the Buzz CLI in the child
+process environment so the owner can sign the membership event; it is still
+never written to disk or put in a process argument.
 
 The agents' 512px profile images are kept in `agent-avatars/`. They are the
 unmodified official Codex and Claude Code Marketplace icons and OpenCode's
 production desktop icon, resized to a common canvas. Their published kind-0
 profiles point at authenticated Blossom copies on this Buzz relay.
+
+The optional `buzz-zai-agent.service` uses the same launcher and identity
+plumbing but connects Buzz directly to `opencode acp`, without slopd. It pins
+OpenCode to `zai-coding-plan/glm-4.7` and requires a Z.AI Coding Plan credential
+in OpenCode's normal credential store. Provision only this agent with:
+
+```bash
+opencode auth login --provider zai-coding-plan
+./deploy/private-host/install-slopd-agents.sh
+~/.local/libexec/sign-slopd-agents \
+  --agent zai \
+  --channel CHANNEL_UUID \
+  --profile 'Z.AI GLM-4.7' \
+  --about 'Z.AI Coding Plan via OpenCode ACP' \
+  --restart
+systemctl --user enable buzz-zai-agent.service
+```
+
+Repeat `--channel` for each channel. The helper writes only the selected
+agent's owner credential, adds it with channel role `bot`, publishes its
+profile, and restarts only its unit. It does not add the agent as an ordinary
+relay member; NIP-OA/NIP-AA supplies the owner mapping instead.
+
+For unattended host-owned agents, the installer also creates a shared
+mode-0600 machine identity at `~/.config/buzz-machine/identity.pem` and installs
+`buzz-machine`. The wrapper runs the normal Buzz CLI as that identity without
+putting its secret in shell configuration. `buzz-zai-agent.service` uses the
+same machine identity as its NIP-OA owner and allowlists the human pubkey from
+`bridge.env`, so both the host and the human Buzz user can prompt it.

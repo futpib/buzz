@@ -19,6 +19,14 @@ compose() {
   docker compose --env-file .env "${COMPOSE_FILES[@]}" "$@"
 }
 
+admin() {
+  local admin_bin="${BUZZ_ADMIN_BIN:-/usr/local/bin/buzz-admin}"
+  if ! compose exec -T relay test -x "${admin_bin}"; then
+    admin_bin=/workspace/target/debug/buzz-admin
+  fi
+  compose exec -T relay "${admin_bin}" "$@"
+}
+
 require_env() {
   if [[ ! -f .env ]]; then
     cat >&2 <<'MSG'
@@ -90,13 +98,13 @@ case "${1:-help}" in
     backup_hint
     ;;
   add-member)
-    docker compose exec relay /usr/local/bin/buzz-admin add-member --pubkey "${2:?Usage: ./run.sh add-member <npub-or-hex> [--role member|admin]}" "${@:3}"
+    admin add-member --pubkey "${2:?Usage: ./run.sh add-member <npub-or-hex> [--role member|admin]}" "${@:3}"
     ;;
   remove-member)
-    docker compose exec relay /usr/local/bin/buzz-admin remove-member --pubkey "${2:?Usage: ./run.sh remove-member <npub-or-hex> [--role member|admin]}" "${@:3}"
+    admin remove-member --pubkey "${2:?Usage: ./run.sh remove-member <npub-or-hex> [--role member|admin]}" "${@:3}"
     ;;
   list-members)
-    docker compose exec relay /usr/local/bin/buzz-admin list-members
+    admin list-members
     ;;
   help|-h|--help)
     cat <<'MSG'
