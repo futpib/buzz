@@ -1,0 +1,21 @@
+[Unit]
+Description=Deterministic Buzz two-party thread mention bot
+Documentation=https://github.com/block/buzz
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+WorkingDirectory=%h
+EnvironmentFile=%h/.config/buzz-slopd-agent/bridge.env
+EnvironmentFile=%h/.config/buzz-thread-mention-bot/identity.env
+EnvironmentFile=%h/.config/buzz-thread-mention-bot/auth.env
+EnvironmentFile=-%h/.config/buzz-thread-mention-bot/config.env
+ExecStart=%h/.local/libexec/buzz-thread-mention-bot
+Restart=always
+RestartSec=3
+TimeoutStopSec=15
+
+[Install]
+WantedBy=default.target

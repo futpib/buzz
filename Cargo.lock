@@ -9454,6 +9454,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "thread-mention-bot"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "buzz-sdk",
+ "buzz-ws-client",
+ "nostr",
+ "serde_json",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "thread_local"
 version = "1.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"

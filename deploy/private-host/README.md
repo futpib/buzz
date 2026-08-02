@@ -102,6 +102,24 @@ unmodified official Codex and Claude Code Marketplace icons and OpenCode's
 production desktop icon, resized to a common canvas. Their published kind-0
 profiles point at authenticated Blossom copies on this Buzz relay.
 
+## Deterministic thread mention bot
+
+The tracked thread mention bot handles one non-AI routing rule: in a thread
+authored only by the human owner and one owner-attested agent, an untagged owner
+reply gets a nested bot reply carrying the agent's real `p` tag. It ignores
+top-level messages and fails closed for any additional or unverified author.
+
+Install it with a dedicated identity and one-time owner attestation:
+
+```bash
+./deploy/private-host/install-thread-mention-bot.sh --sign --restart
+```
+
+The prompt does not echo the owner nsec, and only the resulting NIP-OA tag is
+stored. The bot watches every accessible open channel by default. For a private
+channel, repeat the command with `--channel CHANNEL_UUID`; subsequent code
+updates only need `--restart`.
+
 The optional `buzz-zai-agent.service` uses the same launcher and identity
 plumbing but connects Buzz directly to `opencode acp`, without slopd. It pins
 OpenCode to the flagship `zai-coding-plan/glm-5.2` model at max reasoning effort

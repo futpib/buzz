@@ -28,6 +28,7 @@ members = [
     "crates/buzz-dev-mcp",
     "crates/buzz-voice",
     "examples/countdown-bot",
+    "examples/thread-mention-bot",
 ]
 exclude = ["desktop/src-tauri"]
 resolver = "2"
