@@ -17,6 +17,9 @@ use uuid::Uuid;
 const DEFAULT_RELAY_URL: &str = "ws://localhost:3000";
 const LIVE_SUBSCRIPTION_ID: &str = "thread-mention-live";
 const THREAD_SUBSCRIPTION_ID: &str = "thread-mention-query";
+const EVENT_SUBSCRIPTION_ID: &str = "thread-mention-event";
+const ROUTE_SUBSCRIPTION_ID: &str = "thread-mention-routes";
+const REACTION_SUBSCRIPTION_ID: &str = "thread-mention-reaction";
 const CHANNEL_SUBSCRIPTION_ID: &str = "thread-mention-channels";
 const PROFILE_SUBSCRIPTION_ID: &str = "thread-mention-profile";
 const ROUTED_SOURCE_TAG: &str = "thread-mention-for";
@@ -25,8 +28,10 @@ const BOT_DISPLAY_NAME: &str = "Thread Mention Bot";
 const BOT_ABOUT: &str =
     "Deterministically tags the sole same-owner agent in an otherwise two-party thread.";
 const RECONNECT_DELAY: Duration = Duration::from_secs(3);
+const REACTION_POLL_INTERVAL: Duration = Duration::from_secs(2);
 const CHANNEL_REFRESH_INTERVAL: Duration = Duration::from_secs(300);
 const LIVE_REPLAY_WINDOW_SECS: u64 = 300;
+const ROUTE_ACK_WINDOW_SECS: u64 = 3_600;
 const RECEIVE_TIMEOUT: Duration = Duration::from_secs(60);
 const THREAD_QUERY_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_THREAD_EVENTS: usize = 1_000;
@@ -101,6 +106,13 @@ struct Config {
     owner_auth_tag: Option<Tag>,
     owner_pubkey: PublicKey,
     picture_url: Option<String>,
+}
+
+#[derive(Clone, Copy)]
+struct PendingRoute {
+    channel_id: Uuid,
+    agent: PublicKey,
+    created_at: u64,
 }
 
 impl Config {
@@ -257,6 +269,7 @@ async fn publish_required(
 
 async fn listen_once(config: &Config) -> Result<()> {
     let channel_ids = discover_channels(config).await?;
+    let mut pending_routes = load_pending_routes(config, &channel_ids).await?;
     let mut connection = NostrWsConnection::connect_authenticated(
         &config.relay_url,
         &config.bot_keys,
@@ -266,9 +279,15 @@ async fn listen_once(config: &Config) -> Result<()> {
     let now = Timestamp::now().as_secs();
     for channel_id in &channel_ids {
         let channel = channel_id.to_string();
-        let filter = Filter::new()
+        let owner_messages = Filter::new()
             .kind(Kind::Custom(9))
             .author(config.owner_pubkey)
+            .since(Timestamp::from_secs(
+                now.saturating_sub(LIVE_REPLAY_WINDOW_SECS),
+            ))
+            .custom_tags(SingleLetterTag::lowercase(Alphabet::H), [channel.as_str()]);
+        let reactions = Filter::new()
+            .kind(Kind::Reaction)
             .since(Timestamp::from_secs(
                 now.saturating_sub(LIVE_REPLAY_WINDOW_SECS),
             ))
@@ -277,43 +296,85 @@ async fn listen_once(config: &Config) -> Result<()> {
             .send_raw(&json!([
                 "REQ",
                 format!("{LIVE_SUBSCRIPTION_ID}:{channel_id}"),
-                filter
+                owner_messages,
+                reactions
             ]))
             .await?;
     }
     eprintln!(
-        "listening for owner-authored thread replies in {} channel(s)",
-        channel_ids.len()
+        "listening for owner-authored thread replies in {} channel(s); tracking {} routed mention(s)",
+        channel_ids.len(),
+        pending_routes.len()
     );
 
     let refresh = tokio::time::sleep(CHANNEL_REFRESH_INTERVAL);
     tokio::pin!(refresh);
+    let mut reaction_poll = tokio::time::interval(REACTION_POLL_INTERVAL);
+    reaction_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
-        let message = tokio::select! {
+        tokio::select! {
             _ = &mut refresh => bail!("refreshing channel subscriptions"),
-            message = connection.next_event(RECEIVE_TIMEOUT) => message,
-        };
-        match message {
-            Ok(RelayMessage::Event {
-                subscription_id,
-                event,
-            }) if subscription_id.starts_with(LIVE_SUBSCRIPTION_ID) => {
-                if let Err(error) = maybe_route(config, &mut connection, &event).await {
-                    eprintln!("failed to evaluate {}: {error:#}", event.id.to_hex());
+            _ = reaction_poll.tick(), if !pending_routes.is_empty() => {
+                if let Err(error) = poll_acknowledged_routes(
+                    config,
+                    &mut connection,
+                    &mut pending_routes,
+                ).await {
+                    eprintln!("failed to poll routed mentions: {error:#}");
                 }
             }
-            Ok(RelayMessage::Closed {
-                subscription_id,
-                message,
-            }) if subscription_id.starts_with(LIVE_SUBSCRIPTION_ID) => {
-                bail!("relay closed live subscription: {message}");
+            message = connection.next_event(RECEIVE_TIMEOUT) => match message {
+                Ok(RelayMessage::Event {
+                    subscription_id,
+                    event,
+                }) if subscription_id.starts_with(LIVE_SUBSCRIPTION_ID) => {
+                    let result = match event.kind {
+                        Kind::Custom(9) => maybe_route(
+                            config,
+                            &mut connection,
+                            &event,
+                            &mut pending_routes,
+                        ).await,
+                        Kind::Reaction => match live_subscription_channel(&subscription_id) {
+                            Some(channel_id) => {
+                                maybe_delete_acknowledged_route(
+                                    config,
+                                    &mut connection,
+                                    channel_id,
+                                    &event,
+                                    &mut pending_routes,
+                                ).await
+                            }
+                            None => Err(anyhow!("invalid live subscription id {subscription_id:?}")),
+                        },
+                        _ => Ok(()),
+                    };
+                    if let Err(error) = result {
+                        eprintln!("failed to evaluate {}: {error:#}", event.id.to_hex());
+                    }
+                }
+                Ok(RelayMessage::Closed {
+                    subscription_id,
+                    message,
+                }) if subscription_id.starts_with(LIVE_SUBSCRIPTION_ID) => {
+                    bail!("relay closed live subscription: {message}");
+                }
+                Ok(RelayMessage::Notice { message }) => eprintln!("relay notice: {message}"),
+                Ok(_) | Err(WsClientError::Timeout) => {}
+                Err(error) => return Err(error.into()),
             }
-            Ok(RelayMessage::Notice { message }) => eprintln!("relay notice: {message}"),
-            Ok(_) | Err(WsClientError::Timeout) => {}
-            Err(error) => return Err(error.into()),
         }
     }
+}
+
+fn live_subscription_channel(subscription_id: &str) -> Option<Uuid> {
+    Uuid::parse_str(
+        subscription_id
+            .strip_prefix(LIVE_SUBSCRIPTION_ID)?
+            .strip_prefix(':')?,
+    )
+    .ok()
 }
 
 async fn discover_channels(config: &Config) -> Result<Vec<Uuid>> {
@@ -376,6 +437,7 @@ async fn maybe_route(
     config: &Config,
     live_connection: &mut NostrWsConnection,
     candidate: &Event,
+    pending_routes: &mut HashMap<EventId, PendingRoute>,
 ) -> Result<()> {
     if candidate.kind != Kind::Custom(9) || candidate.pubkey != config.owner_pubkey {
         return Ok(());
@@ -411,6 +473,8 @@ async fn maybe_route(
         &agent_hex,
         &label,
     )?)?;
+    let event_id = event.id;
+    let created_at = event.created_at.as_secs();
     let response = live_connection.send_event(event).await?;
     if !response.accepted {
         bail!("relay rejected routed mention: {}", response.message);
@@ -420,7 +484,108 @@ async fn maybe_route(
         agent_hex,
         candidate.id.to_hex()
     );
+    pending_routes.insert(
+        event_id,
+        PendingRoute {
+            channel_id,
+            agent,
+            created_at,
+        },
+    );
     Ok(())
+}
+
+async fn maybe_delete_acknowledged_route(
+    config: &Config,
+    live_connection: &mut NostrWsConnection,
+    channel_id: Uuid,
+    reaction: &Event,
+    pending_routes: &mut HashMap<EventId, PendingRoute>,
+) -> Result<()> {
+    let Some(target_id) = reaction_target(reaction) else {
+        return Ok(());
+    };
+    let Some(target) = load_event(config, channel_id, target_id).await? else {
+        return Ok(());
+    };
+    if !routed_message_acknowledged_by(reaction, &target, &config.bot_keys.public_key()) {
+        return Ok(());
+    }
+
+    let deletion = config.sign(buzz_sdk::build_delete_message(channel_id, target_id)?)?;
+    let response = live_connection.send_event(deletion).await?;
+    if !response.accepted {
+        bail!(
+            "relay rejected acknowledged route deletion: {}",
+            response.message
+        );
+    }
+    eprintln!(
+        "deleted routed mention {} after agent reaction {}",
+        target_id.to_hex(),
+        reaction.id.to_hex()
+    );
+    pending_routes.remove(&target_id);
+    Ok(())
+}
+
+async fn poll_acknowledged_routes(
+    config: &Config,
+    live_connection: &mut NostrWsConnection,
+    pending_routes: &mut HashMap<EventId, PendingRoute>,
+) -> Result<()> {
+    let cutoff = Timestamp::now()
+        .as_secs()
+        .saturating_sub(ROUTE_ACK_WINDOW_SECS);
+    pending_routes.retain(|_, route| route.created_at >= cutoff);
+    let routes = pending_routes
+        .iter()
+        .map(|(event_id, route)| (*event_id, *route))
+        .collect::<Vec<_>>();
+    for (event_id, route) in routes {
+        let Some(reaction) = load_reaction(config, event_id, route).await? else {
+            continue;
+        };
+        let deletion = config.sign(buzz_sdk::build_delete_message(route.channel_id, event_id)?)?;
+        let response = live_connection.send_event(deletion).await?;
+        if !response.accepted {
+            bail!(
+                "relay rejected acknowledged route deletion: {}",
+                response.message
+            );
+        }
+        eprintln!(
+            "deleted routed mention {} after agent reaction {} (poll fallback)",
+            event_id.to_hex(),
+            reaction.id.to_hex()
+        );
+        pending_routes.remove(&event_id);
+    }
+    Ok(())
+}
+
+fn reaction_target(event: &Event) -> Option<EventId> {
+    (event.kind == Kind::Reaction)
+        .then(|| unique_event_tag_value(event, "e"))
+        .flatten()
+        .and_then(|value| EventId::from_hex(value).ok())
+}
+
+fn routed_message_acknowledged_by(reaction: &Event, routed: &Event, bot: &PublicKey) -> bool {
+    if reaction_target(reaction) != Some(routed.id)
+        || routed.kind != Kind::Custom(9)
+        || routed.pubkey != *bot
+    {
+        return false;
+    }
+    routed_message_agent(routed, bot).is_some_and(|agent| agent == reaction.pubkey)
+}
+
+fn routed_message_agent(routed: &Event, bot: &PublicKey) -> Option<PublicKey> {
+    (routed.kind == Kind::Custom(9) && routed.pubkey == *bot).then_some(())?;
+    unique_event_tag_value(routed, ROUTED_SOURCE_TAG)
+        .and_then(|value| EventId::from_hex(value).ok())?;
+    unique_event_tag_value(routed, "p").and_then(|value| PublicKey::parse(value).ok())
 }
 
 fn build_routed_message(
@@ -497,6 +662,182 @@ async fn load_agent_label(config: &Config, agent: &PublicKey) -> Result<String> 
     }
     let _ = connection.disconnect().await;
     label.ok_or_else(|| anyhow!("agent has no display_name or name"))
+}
+
+async fn load_pending_routes(
+    config: &Config,
+    channel_ids: &[Uuid],
+) -> Result<HashMap<EventId, PendingRoute>> {
+    let mut pending = HashMap::new();
+    for channel_id in channel_ids {
+        pending.extend(load_channel_routes(config, *channel_id).await?);
+    }
+    Ok(pending)
+}
+
+async fn load_channel_routes(
+    config: &Config,
+    channel_id: Uuid,
+) -> Result<HashMap<EventId, PendingRoute>> {
+    let mut connection = NostrWsConnection::connect_authenticated(
+        &config.relay_url,
+        &config.bot_keys,
+        config.owner_auth_tag.as_ref(),
+    )
+    .await?;
+    let channel = channel_id.to_string();
+    let since = Timestamp::from_secs(
+        Timestamp::now()
+            .as_secs()
+            .saturating_sub(ROUTE_ACK_WINDOW_SECS),
+    );
+    connection
+        .send_raw(&json!([
+            "REQ",
+            ROUTE_SUBSCRIPTION_ID,
+            Filter::new()
+                .kind(Kind::Custom(9))
+                .author(config.bot_keys.public_key())
+                .since(since)
+                .custom_tags(SingleLetterTag::lowercase(Alphabet::H), [channel.as_str()])
+                .limit(MAX_THREAD_EVENTS)
+        ]))
+        .await?;
+    let mut pending = HashMap::new();
+    loop {
+        match connection.next_event(THREAD_QUERY_TIMEOUT).await? {
+            RelayMessage::Event {
+                subscription_id,
+                event,
+            } if subscription_id == ROUTE_SUBSCRIPTION_ID => {
+                event.verify().context("invalid routed message signature")?;
+                if event_channel(&event) == Some(channel.as_str()) {
+                    if let Some(agent) = routed_message_agent(&event, &config.bot_keys.public_key())
+                    {
+                        pending.insert(
+                            event.id,
+                            PendingRoute {
+                                channel_id,
+                                agent,
+                                created_at: event.created_at.as_secs(),
+                            },
+                        );
+                    }
+                }
+            }
+            RelayMessage::Eose { subscription_id } if subscription_id == ROUTE_SUBSCRIPTION_ID => {
+                break;
+            }
+            RelayMessage::Closed {
+                subscription_id,
+                message,
+            } if subscription_id == ROUTE_SUBSCRIPTION_ID => {
+                bail!("relay closed routed message query: {message}");
+            }
+            _ => {}
+        }
+    }
+    let _ = connection.disconnect().await;
+    Ok(pending)
+}
+
+async fn load_reaction(
+    config: &Config,
+    target_id: EventId,
+    route: PendingRoute,
+) -> Result<Option<Event>> {
+    let mut connection = NostrWsConnection::connect_authenticated(
+        &config.relay_url,
+        &config.bot_keys,
+        config.owner_auth_tag.as_ref(),
+    )
+    .await?;
+    let target = target_id.to_hex();
+    connection
+        .send_raw(&json!([
+            "REQ",
+            REACTION_SUBSCRIPTION_ID,
+            Filter::new()
+                .kind(Kind::Reaction)
+                .author(route.agent)
+                .since(Timestamp::from_secs(route.created_at))
+                .custom_tags(SingleLetterTag::lowercase(Alphabet::E), [target.as_str()])
+                .limit(1)
+        ]))
+        .await?;
+    let mut found = None;
+    loop {
+        match connection.next_event(THREAD_QUERY_TIMEOUT).await? {
+            RelayMessage::Event {
+                subscription_id,
+                event,
+            } if subscription_id == REACTION_SUBSCRIPTION_ID => {
+                event.verify().context("invalid reaction signature")?;
+                if reaction_target(&event) == Some(target_id) && event.pubkey == route.agent {
+                    found = Some(*event);
+                }
+            }
+            RelayMessage::Eose { subscription_id }
+                if subscription_id == REACTION_SUBSCRIPTION_ID =>
+            {
+                break;
+            }
+            RelayMessage::Closed {
+                subscription_id,
+                message,
+            } if subscription_id == REACTION_SUBSCRIPTION_ID => {
+                bail!("relay closed reaction query: {message}");
+            }
+            _ => {}
+        }
+    }
+    let _ = connection.disconnect().await;
+    Ok(found)
+}
+
+async fn load_event(config: &Config, channel_id: Uuid, event_id: EventId) -> Result<Option<Event>> {
+    let mut connection = NostrWsConnection::connect_authenticated(
+        &config.relay_url,
+        &config.bot_keys,
+        config.owner_auth_tag.as_ref(),
+    )
+    .await?;
+    let channel = channel_id.to_string();
+    connection
+        .send_raw(&json!([
+            "REQ",
+            EVENT_SUBSCRIPTION_ID,
+            Filter::new()
+                .id(event_id)
+                .kind(Kind::Custom(9))
+                .custom_tags(SingleLetterTag::lowercase(Alphabet::H), [channel.as_str()])
+                .limit(1)
+        ]))
+        .await?;
+    let mut found = None;
+    loop {
+        match connection.next_event(THREAD_QUERY_TIMEOUT).await? {
+            RelayMessage::Event {
+                subscription_id,
+                event,
+            } if subscription_id == EVENT_SUBSCRIPTION_ID => {
+                event.verify().context("invalid target event signature")?;
+                found = Some(*event);
+            }
+            RelayMessage::Eose { subscription_id } if subscription_id == EVENT_SUBSCRIPTION_ID => {
+                break;
+            }
+            RelayMessage::Closed {
+                subscription_id,
+                message,
+            } if subscription_id == EVENT_SUBSCRIPTION_ID => {
+                bail!("relay closed target event query: {message}");
+            }
+            _ => {}
+        }
+    }
+    let _ = connection.disconnect().await;
+    Ok(found)
 }
 
 async fn load_thread(config: &Config, channel_id: Uuid, root_id: EventId) -> Result<Vec<Event>> {
@@ -681,6 +1022,15 @@ fn event_tag_value<'a>(event: &'a Event, name: &str) -> Option<&'a str> {
     })
 }
 
+fn unique_event_tag_value<'a>(event: &'a Event, name: &str) -> Option<&'a str> {
+    let mut tags = event
+        .tags
+        .iter()
+        .filter(|tag| tag.as_slice().first().map(String::as_str) == Some(name));
+    let value = tags.next()?.as_slice().get(1).map(String::as_str);
+    (tags.next().is_none()).then_some(value).flatten()
+}
+
 fn required_env(name: &str) -> Result<String> {
     let value = std::env::var(name).with_context(|| format!("{name} is required"))?;
     if value.trim().is_empty() {
@@ -712,6 +1062,13 @@ mod tests {
             None => builder,
         };
         builder.sign_with_keys(keys).unwrap()
+    }
+
+    fn reaction(keys: &Keys, target: EventId) -> Event {
+        buzz_sdk::build_reaction(target, "👀")
+            .unwrap()
+            .sign_with_keys(keys)
+            .unwrap()
     }
 
     struct Fixture {
@@ -960,6 +1317,81 @@ mod tests {
             &fixture.bot.public_key(),
         )
         .is_none());
+    }
+
+    #[test]
+    fn target_agent_reaction_acknowledges_routed_message() {
+        let fixture = Fixture::new();
+        let candidate = fixture.candidate(&[]);
+        let routed = build_routed_message(
+            fixture.channel,
+            fixture.root.id,
+            candidate.id,
+            &fixture.agent.public_key().to_hex(),
+            "agent",
+        )
+        .unwrap()
+        .sign_with_keys(&fixture.bot)
+        .unwrap();
+        let ack = reaction(&fixture.agent, routed.id);
+
+        assert_eq!(reaction_target(&ack), Some(routed.id));
+        assert!(routed_message_acknowledged_by(
+            &ack,
+            &routed,
+            &fixture.bot.public_key()
+        ));
+    }
+
+    #[test]
+    fn unrelated_reaction_does_not_acknowledge_routed_message() {
+        let fixture = Fixture::new();
+        let candidate = fixture.candidate(&[]);
+        let routed = build_routed_message(
+            fixture.channel,
+            fixture.root.id,
+            candidate.id,
+            &fixture.agent.public_key().to_hex(),
+            "agent",
+        )
+        .unwrap()
+        .sign_with_keys(&fixture.bot)
+        .unwrap();
+
+        assert!(!routed_message_acknowledged_by(
+            &reaction(&fixture.owner, routed.id),
+            &routed,
+            &fixture.bot.public_key()
+        ));
+        assert!(!routed_message_acknowledged_by(
+            &reaction(&fixture.agent, candidate.id),
+            &routed,
+            &fixture.bot.public_key()
+        ));
+    }
+
+    #[test]
+    fn reaction_with_ambiguous_targets_is_ignored() {
+        let fixture = Fixture::new();
+        let event = EventBuilder::new(Kind::Reaction, "👀")
+            .tags([
+                Tag::event(fixture.root.id),
+                Tag::event(fixture.agent_reply.id),
+            ])
+            .sign_with_keys(&fixture.agent)
+            .unwrap();
+
+        assert_eq!(reaction_target(&event), None);
+    }
+
+    #[test]
+    fn live_subscription_id_carries_channel() {
+        let channel = Uuid::new_v4();
+        assert_eq!(
+            live_subscription_channel(&format!("{LIVE_SUBSCRIPTION_ID}:{channel}")),
+            Some(channel)
+        );
+        assert_eq!(live_subscription_channel(LIVE_SUBSCRIPTION_ID), None);
     }
 
     #[test]
