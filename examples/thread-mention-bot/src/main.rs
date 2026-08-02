@@ -111,7 +111,14 @@ struct Config {
 struct PendingRoute {
     channel_id: Uuid,
     agent: PublicKey,
+    source_event_id: EventId,
     created_at: u64,
+}
+
+#[derive(Default)]
+struct RouteState {
+    pending: HashMap<EventId, PendingRoute>,
+    handled_sources: HashSet<EventId>,
 }
 
 impl Config {
@@ -268,7 +275,7 @@ async fn publish_required(
 
 async fn listen_once(config: &Config) -> Result<()> {
     let channel_ids = discover_channels(config).await?;
-    let mut pending_routes = load_pending_routes(config, &channel_ids).await?;
+    let mut routes = load_route_state(config, &channel_ids).await?;
     let mut connection = NostrWsConnection::connect_authenticated(
         &config.relay_url,
         &config.bot_keys,
@@ -294,9 +301,10 @@ async fn listen_once(config: &Config) -> Result<()> {
             .await?;
     }
     eprintln!(
-        "listening for owner-authored thread replies in {} channel(s); tracking {} routed mention(s)",
+        "listening for owner-authored thread replies in {} channel(s); tracking {} pending route(s), {} handled source(s)",
         channel_ids.len(),
-        pending_routes.len()
+        routes.pending.len(),
+        routes.handled_sources.len()
     );
 
     let refresh = tokio::time::sleep(CHANNEL_REFRESH_INTERVAL);
@@ -307,11 +315,11 @@ async fn listen_once(config: &Config) -> Result<()> {
     loop {
         tokio::select! {
             _ = &mut refresh => bail!("refreshing channel subscriptions"),
-            _ = reaction_poll.tick(), if !pending_routes.is_empty() => {
+            _ = reaction_poll.tick(), if !routes.pending.is_empty() => {
                 if let Err(error) = poll_acknowledged_routes(
                     config,
                     &mut connection,
-                    &mut pending_routes,
+                    &mut routes.pending,
                 ).await {
                     eprintln!("failed to poll routed mentions: {error:#}");
                 }
@@ -325,7 +333,7 @@ async fn listen_once(config: &Config) -> Result<()> {
                         config,
                         &mut connection,
                         &event,
-                        &mut pending_routes,
+                        &mut routes,
                     ).await;
                     if let Err(error) = result {
                         eprintln!("failed to evaluate {}: {error:#}", event.id.to_hex());
@@ -405,7 +413,7 @@ async fn maybe_route(
     config: &Config,
     live_connection: &mut NostrWsConnection,
     candidate: &Event,
-    pending_routes: &mut HashMap<EventId, PendingRoute>,
+    routes: &mut RouteState,
 ) -> Result<()> {
     if candidate.kind != Kind::Custom(9) || candidate.pubkey != config.owner_pubkey {
         return Ok(());
@@ -413,6 +421,9 @@ async fn maybe_route(
     let Some(relation) = parse_thread_relation(candidate) else {
         return Ok(());
     };
+    if routes.handled_sources.contains(&candidate.id) {
+        return Ok(());
+    }
     let channel_id = event_channel(candidate)
         .and_then(|value| Uuid::parse_str(value).ok())
         .filter(|channel| config.channel_ids.is_empty() || config.channel_ids.contains(channel))
@@ -452,11 +463,13 @@ async fn maybe_route(
         agent_hex,
         candidate.id.to_hex()
     );
-    pending_routes.insert(
+    routes.handled_sources.insert(candidate.id);
+    routes.pending.insert(
         event_id,
         PendingRoute {
             channel_id,
             agent,
+            source_event_id: candidate.id,
             created_at,
         },
     );
@@ -480,7 +493,11 @@ async fn poll_acknowledged_routes(
         let Some(reaction) = load_reaction(config, event_id, route).await? else {
             continue;
         };
-        let deletion = config.sign(buzz_sdk::build_delete_message(route.channel_id, event_id)?)?;
+        let deletion = config.sign(build_routed_deletion(
+            route.channel_id,
+            event_id,
+            route.source_event_id,
+        )?)?;
         let response = live_connection.send_event(deletion).await?;
         if !response.accepted {
             bail!(
@@ -511,9 +528,17 @@ fn route_acknowledged_by(reaction: &Event, target_id: EventId, route: PendingRou
 
 fn routed_message_agent(routed: &Event, bot: &PublicKey) -> Option<PublicKey> {
     (routed.kind == Kind::Custom(9) && routed.pubkey == *bot).then_some(())?;
-    unique_event_tag_value(routed, ROUTED_SOURCE_TAG)
-        .and_then(|value| EventId::from_hex(value).ok())?;
+    routed_source_event_id(routed, bot)?;
     unique_event_tag_value(routed, "p").and_then(|value| PublicKey::parse(value).ok())
+}
+
+fn routed_source_event_id(event: &Event, bot: &PublicKey) -> Option<EventId> {
+    (event.pubkey == *bot
+        && (event.kind == Kind::Custom(9)
+            || event.kind == Kind::EventDeletion
+            || event.kind == Kind::Custom(9005)))
+    .then_some(())?;
+    unique_event_tag_value(event, ROUTED_SOURCE_TAG).and_then(|value| EventId::from_hex(value).ok())
 }
 
 fn build_routed_message(
@@ -539,6 +564,19 @@ fn build_routed_message(
         ROUTED_SOURCE_TAG,
         candidate_id.to_hex().as_str(),
     ])?))
+}
+
+fn build_routed_deletion(
+    channel_id: Uuid,
+    routed_event_id: EventId,
+    source_event_id: EventId,
+) -> Result<EventBuilder> {
+    Ok(
+        buzz_sdk::build_delete_compat(channel_id, routed_event_id)?.tag(Tag::parse([
+            ROUTED_SOURCE_TAG,
+            source_event_id.to_hex().as_str(),
+        ])?),
+    )
 }
 
 async fn load_agent_label(config: &Config, agent: &PublicKey) -> Result<String> {
@@ -592,21 +630,17 @@ async fn load_agent_label(config: &Config, agent: &PublicKey) -> Result<String> 
     label.ok_or_else(|| anyhow!("agent has no display_name or name"))
 }
 
-async fn load_pending_routes(
-    config: &Config,
-    channel_ids: &[Uuid],
-) -> Result<HashMap<EventId, PendingRoute>> {
-    let mut pending = HashMap::new();
+async fn load_route_state(config: &Config, channel_ids: &[Uuid]) -> Result<RouteState> {
+    let mut state = RouteState::default();
     for channel_id in channel_ids {
-        pending.extend(load_channel_routes(config, *channel_id).await?);
+        let channel_state = load_channel_route_state(config, *channel_id).await?;
+        state.pending.extend(channel_state.pending);
+        state.handled_sources.extend(channel_state.handled_sources);
     }
-    Ok(pending)
+    Ok(state)
 }
 
-async fn load_channel_routes(
-    config: &Config,
-    channel_id: Uuid,
-) -> Result<HashMap<EventId, PendingRoute>> {
+async fn load_channel_route_state(config: &Config, channel_id: Uuid) -> Result<RouteState> {
     let mut connection = NostrWsConnection::connect_authenticated(
         &config.relay_url,
         &config.bot_keys,
@@ -624,14 +658,14 @@ async fn load_channel_routes(
             "REQ",
             ROUTE_SUBSCRIPTION_ID,
             Filter::new()
-                .kind(Kind::Custom(9))
+                .kinds([Kind::Custom(9), Kind::EventDeletion, Kind::Custom(9005),])
                 .author(config.bot_keys.public_key())
                 .since(since)
                 .custom_tags(SingleLetterTag::lowercase(Alphabet::H), [channel.as_str()])
                 .limit(MAX_THREAD_EVENTS)
         ]))
         .await?;
-    let mut pending = HashMap::new();
+    let mut state = RouteState::default();
     loop {
         match connection.next_event(THREAD_QUERY_TIMEOUT).await? {
             RelayMessage::Event {
@@ -640,17 +674,12 @@ async fn load_channel_routes(
             } if subscription_id == ROUTE_SUBSCRIPTION_ID => {
                 event.verify().context("invalid routed message signature")?;
                 if event_channel(&event) == Some(channel.as_str()) {
-                    if let Some(agent) = routed_message_agent(&event, &config.bot_keys.public_key())
-                    {
-                        pending.insert(
-                            event.id,
-                            PendingRoute {
-                                channel_id,
-                                agent,
-                                created_at: event.created_at.as_secs(),
-                            },
-                        );
-                    }
+                    record_route_event(
+                        &mut state,
+                        channel_id,
+                        &event,
+                        &config.bot_keys.public_key(),
+                    );
                 }
             }
             RelayMessage::Eose { subscription_id } if subscription_id == ROUTE_SUBSCRIPTION_ID => {
@@ -666,7 +695,25 @@ async fn load_channel_routes(
         }
     }
     let _ = connection.disconnect().await;
-    Ok(pending)
+    Ok(state)
+}
+
+fn record_route_event(state: &mut RouteState, channel_id: Uuid, event: &Event, bot: &PublicKey) {
+    let Some(source_event_id) = routed_source_event_id(event, bot) else {
+        return;
+    };
+    state.handled_sources.insert(source_event_id);
+    if let Some(agent) = routed_message_agent(event, bot) {
+        state.pending.insert(
+            event.id,
+            PendingRoute {
+                channel_id,
+                agent,
+                source_event_id,
+                created_at: event.created_at.as_secs(),
+            },
+        );
+    }
 }
 
 async fn load_reaction(
@@ -1203,6 +1250,42 @@ mod tests {
     }
 
     #[test]
+    fn deleted_route_keeps_its_source_handled_after_reconnect() {
+        let fixture = Fixture::new();
+        let candidate = fixture.candidate(&[]);
+        let routed = build_routed_message(
+            fixture.channel,
+            fixture.root.id,
+            candidate.id,
+            &fixture.agent.public_key().to_hex(),
+            "agent",
+        )
+        .unwrap()
+        .sign_with_keys(&fixture.bot)
+        .unwrap();
+        let deletion = build_routed_deletion(fixture.channel, routed.id, candidate.id)
+            .unwrap()
+            .sign_with_keys(&fixture.bot)
+            .unwrap();
+
+        assert_eq!(deletion.kind, Kind::EventDeletion);
+        assert_eq!(
+            routed_source_event_id(&deletion, &fixture.bot.public_key()),
+            Some(candidate.id)
+        );
+
+        let mut rebuilt = RouteState::default();
+        record_route_event(
+            &mut rebuilt,
+            fixture.channel,
+            &deletion,
+            &fixture.bot.public_key(),
+        );
+        assert!(rebuilt.handled_sources.contains(&candidate.id));
+        assert!(rebuilt.pending.is_empty());
+    }
+
+    #[test]
     fn target_agent_reaction_acknowledges_routed_message() {
         let fixture = Fixture::new();
         let candidate = fixture.candidate(&[]);
@@ -1220,6 +1303,7 @@ mod tests {
         let route = PendingRoute {
             channel_id: fixture.channel,
             agent: fixture.agent.public_key(),
+            source_event_id: candidate.id,
             created_at: routed.created_at.as_secs(),
         };
 
@@ -1244,6 +1328,7 @@ mod tests {
         let route = PendingRoute {
             channel_id: fixture.channel,
             agent: fixture.agent.public_key(),
+            source_event_id: candidate.id,
             created_at: routed.created_at.as_secs(),
         };
 

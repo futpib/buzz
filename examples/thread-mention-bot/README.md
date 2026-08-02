@@ -26,8 +26,10 @@ For each new kind `9` message authored by the configured owner, the bot:
    agent's real `p` tag and friendly `@name`.
 
 The original user event remains unchanged because Nostr events are signed and
-immutable. A bot-specific source-event tag makes retries idempotent without
-turning the owner's message into a nested subthread.
+immutable. Once the target agent reacts to the routed mention, the bot removes
+that mention with a channel-scoped NIP-09 deletion. The deletion keeps the
+bot-specific source-event tag as a durable handled receipt, so removing the
+visible mention cannot make the owner message eligible again after a reconnect.
 
 ## Configuration
 
@@ -116,5 +118,5 @@ WantedBy=multi-user.target
 ```
 
 The bot reconnects automatically. Each candidate is checked against relay
-history, and an existing bot reply to the same source event prevents duplicate
-routing after reconnects or restarts.
+history, and either an existing route or its durable deletion receipt prevents
+duplicate routing after reconnects or restarts.
