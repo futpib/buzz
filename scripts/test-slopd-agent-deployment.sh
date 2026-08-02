@@ -65,13 +65,13 @@ direct_output="$(
     BUZZ_AGENT_OWNER=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc \
     BUZZ_AGENT_COMMAND=/usr/bin/opencode \
     BUZZ_AGENT_ARGS=acp,--pure \
-    BUZZ_AGENT_SESSION_TITLE='z.ai glm-4.7' \
+    BUZZ_AGENT_SESSION_TITLE='z.ai glm-5.2 max' \
     "${launcher}"
 )"
 for expected in \
   '--agent-command /usr/bin/opencode' \
   '--agent-args=acp,--pure' \
-  '--session-title z.ai glm-4.7'
+  '--session-title z.ai glm-5.2 max'
 do
   if [[ "${direct_output}" != *"${expected}"* ]]; then
     echo "direct launcher output is missing: ${expected}" >&2
@@ -88,7 +88,7 @@ allowlist_output="$(
     BUZZ_AGENT_COMMAND=/usr/bin/opencode \
     BUZZ_AGENT_RESPOND_TO=allowlist \
     BUZZ_AGENT_RESPOND_TO_ALLOWLIST=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd \
-    BUZZ_AGENT_SESSION_TITLE='z.ai glm-4.7' \
+    BUZZ_AGENT_SESSION_TITLE='z.ai glm-5.2 max' \
     "${launcher}"
 )"
 for expected in \
@@ -100,6 +100,12 @@ do
     exit 1
   fi
 done
+
+if ! rg -q 'glm-5\.2.*variant.*max.*reasoningEffort.*max' \
+  "${deployment_dir}/systemd/buzz-zai-agent.service"; then
+  echo "buzz-zai-agent.service is not pinned to GLM-5.2 max effort" >&2
+  exit 1
+fi
 
 output="$(
   env \

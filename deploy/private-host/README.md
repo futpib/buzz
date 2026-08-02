@@ -104,8 +104,9 @@ profiles point at authenticated Blossom copies on this Buzz relay.
 
 The optional `buzz-zai-agent.service` uses the same launcher and identity
 plumbing but connects Buzz directly to `opencode acp`, without slopd. It pins
-OpenCode to `zai-coding-plan/glm-4.7` and requires a Z.AI Coding Plan credential
-in OpenCode's normal credential store. Provision only this agent with:
+OpenCode to the flagship `zai-coding-plan/glm-5.2` model at max reasoning effort
+and requires a Z.AI Coding Plan credential in OpenCode's normal credential
+store. Provision only this agent with:
 
 ```bash
 opencode auth login --provider zai-coding-plan
@@ -113,7 +114,7 @@ opencode auth login --provider zai-coding-plan
 ~/.local/libexec/sign-slopd-agents \
   --agent zai \
   --channel CHANNEL_UUID \
-  --profile 'Z.AI GLM-4.7' \
+  --profile 'Z.AI GLM-5.2 Max' \
   --about 'Z.AI Coding Plan via OpenCode ACP' \
   --restart
 systemctl --user enable buzz-zai-agent.service

@@ -16,8 +16,8 @@ Environment=BUZZ_SLOPD_AGENT_IDENTITY_FORMAT=pem
 Environment=BUZZ_SLOPD_AGENT_IDENTITY_FILE=%h/.config/buzz-zai-agent/identity.pem
 Environment=BUZZ_AGENT_COMMAND=/usr/bin/opencode
 Environment=BUZZ_AGENT_ARGS=acp,--pure
-Environment="OPENCODE_CONFIG_CONTENT={\"model\":\"zai-coding-plan/glm-4.7\",\"small_model\":\"zai-coding-plan/glm-4.7\",\"enabled_providers\":[\"zai-coding-plan\"]}"
-Environment="BUZZ_AGENT_SESSION_TITLE=z.ai glm-4.7"
+Environment="OPENCODE_CONFIG_CONTENT={\"model\":\"zai-coding-plan/glm-5.2\",\"small_model\":\"zai-coding-plan/glm-5.2\",\"enabled_providers\":[\"zai-coding-plan\"],\"agent\":{\"build\":{\"model\":\"zai-coding-plan/glm-5.2\",\"variant\":\"max\"}},\"provider\":{\"zai-coding-plan\":{\"models\":{\"glm-5.2\":{\"options\":{\"reasoningEffort\":\"max\"},\"variants\":{\"high\":{\"disabled\":true},\"max\":{\"reasoningEffort\":\"max\"}}}}}}}"
+Environment="BUZZ_AGENT_SESSION_TITLE=z.ai glm-5.2 max"
 ExecStart=%h/.local/libexec/buzz-slopd-agent
 Restart=always
 RestartSec=5
