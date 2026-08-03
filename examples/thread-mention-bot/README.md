@@ -20,7 +20,7 @@ For each new kind `9` message authored by the configured owner, the bot:
 5. Requires exactly one such agent author in the thread.
 6. Does nothing if another human, a second agent, or an unverified process has
    authored a thread message.
-7. Does nothing if the owner's new message already `p`-tags that agent.
+7. Does nothing if the owner's new message already `p`-tags anyone.
 8. Does nothing if it already routed that exact message.
 9. Otherwise posts a sibling kind `9` reply in the existing thread with the
    agent's real `p` tag and friendly `@name`.

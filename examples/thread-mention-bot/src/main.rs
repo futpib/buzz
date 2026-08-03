@@ -897,7 +897,7 @@ fn route_target(
     }
     let mut agents = agents.into_iter();
     let agent = agents.next()?;
-    if agents.next().is_some() || event_mentions(candidate, &agent) {
+    if agents.next().is_some() || event_has_mention(candidate) {
         return None;
     }
     if thread.iter().any(|event| {
@@ -937,6 +937,13 @@ fn event_mentions(event: &Event, pubkey: &PublicKey) -> bool {
         parts.first().map(String::as_str) == Some("p")
             && parts.get(1).map(String::as_str) == Some(target.as_str())
     })
+}
+
+fn event_has_mention(event: &Event) -> bool {
+    event
+        .tags
+        .iter()
+        .any(|tag| tag.as_slice().first().map(String::as_str) == Some("p"))
 }
 
 fn event_channel(event: &Event) -> Option<&str> {
@@ -1124,6 +1131,20 @@ mod tests {
         let fixture = Fixture::new();
         let agent_hex = fixture.agent.public_key().to_hex();
         let candidate = fixture.candidate(&[&agent_hex]);
+        assert!(route_target(
+            &fixture.base_thread(&candidate),
+            &candidate,
+            &fixture.owner.public_key(),
+            &fixture.bot.public_key(),
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn skips_when_owner_tags_a_different_recipient() {
+        let fixture = Fixture::new();
+        let other = Keys::generate().public_key().to_hex();
+        let candidate = fixture.candidate(&[&other]);
         assert!(route_target(
             &fixture.base_thread(&candidate),
             &candidate,
