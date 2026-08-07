@@ -895,9 +895,22 @@ fn route_target(
         }
         agents.insert(event.pubkey);
     }
-    let mut agents = agents.into_iter();
-    let agent = agents.next()?;
-    if agents.next().is_some() || event_has_mention(candidate) {
+    let agent = match agents.len() {
+        0 => {
+            let root_id = parse_thread_relation(candidate)?.root_event_id;
+            let root = thread.iter().find(|event| {
+                event.id == root_id && event.kind == Kind::Custom(9) && event.pubkey == *owner
+            })?;
+            let target = PublicKey::parse(unique_event_tag_value(root, "p")?).ok()?;
+            if target == *owner || target == *bot {
+                return None;
+            }
+            target
+        }
+        1 => agents.into_iter().next()?,
+        _ => return None,
+    };
+    if event_has_mention(candidate) {
         return None;
     }
     if thread.iter().any(|event| {
@@ -1085,6 +1098,65 @@ mod tests {
             ),
             Some(fixture.agent.public_key())
         );
+    }
+
+    #[test]
+    fn routes_untagged_first_reply_from_root_mention() {
+        let fixture = Fixture::new();
+        let agent_hex = fixture.agent.public_key().to_hex();
+        let root = message(&fixture.owner, None, fixture.channel, None, &[&agent_hex]);
+        let candidate = message(
+            &fixture.owner,
+            None,
+            fixture.channel,
+            Some(&ThreadRef {
+                root_event_id: root.id,
+                parent_event_id: root.id,
+            }),
+            &[],
+        );
+
+        assert_eq!(
+            route_target(
+                &[root, candidate.clone()],
+                &candidate,
+                &fixture.owner.public_key(),
+                &fixture.bot.public_key(),
+            ),
+            Some(fixture.agent.public_key())
+        );
+    }
+
+    #[test]
+    fn skips_untagged_first_reply_without_unique_root_mention() {
+        let fixture = Fixture::new();
+        let other = Keys::generate().public_key().to_hex();
+        let agent_hex = fixture.agent.public_key().to_hex();
+        let root = message(
+            &fixture.owner,
+            None,
+            fixture.channel,
+            None,
+            &[&agent_hex, &other],
+        );
+        let candidate = message(
+            &fixture.owner,
+            None,
+            fixture.channel,
+            Some(&ThreadRef {
+                root_event_id: root.id,
+                parent_event_id: root.id,
+            }),
+            &[],
+        );
+
+        assert!(route_target(
+            &[root, candidate.clone()],
+            &candidate,
+            &fixture.owner.public_key(),
+            &fixture.bot.public_key(),
+        )
+        .is_none());
     }
 
     #[test]
