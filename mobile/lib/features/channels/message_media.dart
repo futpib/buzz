@@ -20,7 +20,7 @@ class ImetaEntry {
     this.alt,
   });
 
-  bool get isVideo => mimeType == 'video/mp4';
+  bool get isVideo => mimeType?.startsWith('video/') == true;
 
   String? get posterUrl => image ?? thumb;
 
@@ -85,11 +85,11 @@ Map<String, ImetaEntry> parseImetaTags(List<List<String>> tags) {
 MessageMediaKind? classifyMediaUrl(String url, {ImetaEntry? imeta}) {
   final mimeType = imeta?.mimeType;
   if (mimeType != null) {
-    if (mimeType == 'video/mp4') return MessageMediaKind.video;
-    if (_inlineImageMimeTypes.contains(mimeType)) {
-      return MessageMediaKind.image;
-    }
-    return null;
+    // An imeta MIME type is authoritative. The native video player chooses
+    // whether the device can decode the specific codec/container; rejecting
+    // every non-MP4 video here prevents it from even trying.
+    if (mimeType.startsWith('video/')) return MessageMediaKind.video;
+    if (mimeType.startsWith('image/')) return MessageMediaKind.image;
   }
 
   final path = (Uri.tryParse(url)?.path ?? url).toLowerCase();
@@ -111,13 +111,6 @@ const _imageExtensions = {
   '.heic',
   '.heif',
   '.avif',
-};
-
-const _inlineImageMimeTypes = {
-  'image/jpeg',
-  'image/png',
-  'image/gif',
-  'image/webp',
 };
 
 const _mp4Extension = '.mp4';
