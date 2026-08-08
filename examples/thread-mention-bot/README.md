@@ -23,7 +23,7 @@ For each new kind `9` message authored by the configured owner, the bot:
 7. Does nothing if the owner's new message already `p`-tags anyone.
 8. Does nothing if it already routed that exact message.
 9. Otherwise posts a sibling kind `9` reply in the existing thread with the
-   agent's real `p` tag and friendly `@name`.
+   agent's real `p` tag, friendly `@name`, and the owner's message text.
 
 The original user event remains unchanged because Nostr events are signed and
 immutable. Once the target agent reacts to the routed mention, the bot removes
@@ -34,8 +34,9 @@ visible mention cannot make the owner message eligible again after a reconnect.
 ## Configuration
 
 The bot has its own key. It can run either as a standalone identity configured
-with `BUZZ_OWNER_PUBKEY`, or with an unrestricted `BUZZ_AUTH_TAG` signed by the
-owner for that bot key. An owner-attested bot works with the default
+with `BUZZ_OWNER_PUBKEY` or comma-separated `BUZZ_OWNER_PUBKEYS`, or with an
+unrestricted `BUZZ_AUTH_TAG` signed by an owner for that bot key. Configured
+owner keys are additive when an attestation is present. An owner-attested bot works with the default
 `buzz-acp --respond-to=owner-only` gate. A standalone bot must be explicitly
 included in each target agent's `--respond-to=allowlist`; the private-host
 installer configures that exact-key allowlist automatically.
@@ -44,6 +45,8 @@ installer configures that exact-key allowlist automatically.
 export BUZZ_RELAY_URL=wss://buzz.example.com
 export BUZZ_BOT_PRIVATE_KEY=<bot-nsec-or-hex-secret>
 export BUZZ_OWNER_PUBKEY=<owner-npub-or-hex-public-key>
+# Optional: authorize additional owner identities.
+export BUZZ_OWNER_PUBKEYS=<owner-public-key>[,<owner-public-key>...]
 # Optional: restrict routing to specific channels.
 export BUZZ_CHANNEL_IDS=<channel-uuid>[,<channel-uuid>...]
 # Optional: publish a profile avatar.
@@ -57,8 +60,8 @@ The channel list is refreshed every five minutes.
 `BUZZ_CHANNEL_ID` is accepted as a single-channel compatibility alias.
 
 To upgrade from standalone mode, generate the bot-specific attestation once
-and save its output as `BUZZ_AUTH_TAG`. When present, the verified attestation
-defines the owner and `BUZZ_OWNER_PUBKEY` is ignored:
+and save its output as `BUZZ_AUTH_TAG`. The verified attestation adds its signer
+to the configured owners:
 
 ```bash
 printf '%s\n' '<owner-nsec-or-hex-secret>' | \
@@ -97,7 +100,8 @@ the owner key, writes only the resulting attestation, and adds the bot to that
 private channel. The owner key is passed to the signer over stdin and is not
 written to disk or placed in a process argument or environment variable.
 Subsequent code updates need only `--restart`; the stable identity remains in
-the mode-0600 files under `~/.config/buzz-thread-mention-bot/`.
+the mode-0600 files under `~/.config/buzz-thread-mention-bot/`. When present,
+the shared `buzz-machine` identity is added to the owner allowlist automatically.
 
 ## Generic systemd
 

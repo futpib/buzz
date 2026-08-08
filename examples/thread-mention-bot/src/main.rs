@@ -61,8 +61,13 @@ async fn main() -> Result<()> {
             .join(",")
     };
     eprintln!(
-        "owner: {}; channels: {channels}",
-        config.owner_pubkey.to_hex()
+        "owners: {}; channels: {channels}",
+        config
+            .owner_pubkeys
+            .iter()
+            .map(PublicKey::to_hex)
+            .collect::<Vec<_>>()
+            .join(",")
     );
 
     let shutdown = tokio::signal::ctrl_c();
@@ -103,7 +108,7 @@ struct Config {
     channel_ids: Vec<Uuid>,
     bot_keys: Keys,
     owner_auth_tag: Option<Tag>,
-    owner_pubkey: PublicKey,
+    owner_pubkeys: Vec<PublicKey>,
     picture_url: Option<String>,
 }
 
@@ -128,20 +133,17 @@ impl Config {
             .unwrap_or_else(|_| DEFAULT_RELAY_URL.to_string());
         let bot_keys = Keys::parse(&required_env("BUZZ_BOT_PRIVATE_KEY")?)
             .context("BUZZ_BOT_PRIVATE_KEY must be an nsec or hex private key")?;
-        let (owner_pubkey, owner_auth_tag) = match std::env::var("BUZZ_AUTH_TAG") {
+        let (attested_owner, owner_auth_tag) = match std::env::var("BUZZ_AUTH_TAG") {
             Ok(auth_tag_json) if !auth_tag_json.trim().is_empty() => {
                 let owner_pubkey =
                     buzz_sdk::nip_oa::verify_auth_tag(&auth_tag_json, &bot_keys.public_key())
                         .context("BUZZ_AUTH_TAG is not valid for BUZZ_BOT_PRIVATE_KEY")?;
                 let owner_auth_tag = buzz_sdk::nip_oa::parse_auth_tag(&auth_tag_json)?;
-                (owner_pubkey, Some(owner_auth_tag))
+                (Some(owner_pubkey), Some(owner_auth_tag))
             }
-            _ => {
-                let owner_pubkey = PublicKey::parse(&required_env("BUZZ_OWNER_PUBKEY")?)
-                    .context("BUZZ_OWNER_PUBKEY must be an npub or hex public key")?;
-                (owner_pubkey, None)
-            }
+            _ => (None, None),
         };
+        let owner_pubkeys = parse_owner_pubkeys(attested_owner)?;
 
         let channel_ids_raw = std::env::var("BUZZ_CHANNEL_IDS")
             .or_else(|_| std::env::var("BUZZ_CHANNEL_ID"))
@@ -164,7 +166,7 @@ impl Config {
             channel_ids,
             bot_keys,
             owner_auth_tag,
-            owner_pubkey,
+            owner_pubkeys,
             picture_url: std::env::var("BUZZ_BOT_PICTURE_URL")
                 .ok()
                 .filter(|value| !value.trim().is_empty()),
@@ -182,6 +184,31 @@ impl Config {
         };
         Ok(builder.sign_with_keys(&self.bot_keys)?)
     }
+}
+
+fn parse_owner_pubkeys(attested_owner: Option<PublicKey>) -> Result<Vec<PublicKey>> {
+    let mut owners = attested_owner.into_iter().collect::<Vec<_>>();
+    let mut seen = owners.iter().copied().collect::<HashSet<_>>();
+    for name in ["BUZZ_OWNER_PUBKEY", "BUZZ_OWNER_PUBKEYS"] {
+        let Ok(value) = std::env::var(name) else {
+            continue;
+        };
+        for raw in value
+            .split(',')
+            .map(str::trim)
+            .filter(|raw| !raw.is_empty())
+        {
+            let owner = PublicKey::parse(raw)
+                .with_context(|| format!("{name} contains an invalid public key"))?;
+            if seen.insert(owner) {
+                owners.push(owner);
+            }
+        }
+    }
+    if owners.is_empty() {
+        bail!("BUZZ_OWNER_PUBKEY or BUZZ_OWNER_PUBKEYS is required");
+    }
+    Ok(owners)
 }
 
 fn print_auth_tag() -> Result<()> {
@@ -287,7 +314,7 @@ async fn listen_once(config: &Config) -> Result<()> {
         let channel = channel_id.to_string();
         let owner_messages = Filter::new()
             .kind(Kind::Custom(9))
-            .author(config.owner_pubkey)
+            .authors(config.owner_pubkeys.clone())
             .since(Timestamp::from_secs(
                 now.saturating_sub(LIVE_REPLAY_WINDOW_SECS),
             ))
@@ -415,7 +442,7 @@ async fn maybe_route(
     candidate: &Event,
     routes: &mut RouteState,
 ) -> Result<()> {
-    if candidate.kind != Kind::Custom(9) || candidate.pubkey != config.owner_pubkey {
+    if candidate.kind != Kind::Custom(9) || !config.owner_pubkeys.contains(&candidate.pubkey) {
         return Ok(());
     }
     let Some(relation) = parse_thread_relation(candidate) else {
@@ -432,7 +459,7 @@ async fn maybe_route(
     let Some(agent) = route_target(
         &thread,
         candidate,
-        &config.owner_pubkey,
+        &config.owner_pubkeys,
         &config.bot_keys.public_key(),
     ) else {
         return Ok(());
@@ -448,7 +475,7 @@ async fn maybe_route(
     let event = config.sign(build_routed_message(
         channel_id,
         relation.root_event_id,
-        candidate.id,
+        candidate,
         &agent_hex,
         &label,
     )?)?;
@@ -544,7 +571,7 @@ fn routed_source_event_id(event: &Event, bot: &PublicKey) -> Option<EventId> {
 fn build_routed_message(
     channel_id: Uuid,
     root_event_id: EventId,
-    candidate_id: EventId,
+    candidate: &Event,
     agent_hex: &str,
     agent_label: &str,
 ) -> Result<EventBuilder> {
@@ -552,9 +579,14 @@ fn build_routed_message(
         root_event_id,
         parent_event_id: root_event_id,
     };
+    let content = format!(
+        "@{}\n\n{}",
+        agent_label.trim().trim_start_matches('@'),
+        candidate.content
+    );
     Ok(buzz_sdk::build_message(
         channel_id,
-        &format!("@{}", agent_label.trim().trim_start_matches('@')),
+        &content,
         Some(&thread_ref),
         &[agent_hex],
         false,
@@ -562,7 +594,7 @@ fn build_routed_message(
     )?
     .tag(Tag::parse([
         ROUTED_SOURCE_TAG,
-        candidate_id.to_hex().as_str(),
+        candidate.id.to_hex().as_str(),
     ])?))
 }
 
@@ -878,19 +910,19 @@ fn parse_thread_relation(event: &Event) -> Option<ThreadRelation> {
 fn route_target(
     thread: &[Event],
     candidate: &Event,
-    owner: &PublicKey,
+    owners: &[PublicKey],
     bot: &PublicKey,
 ) -> Option<PublicKey> {
-    if candidate.pubkey != *owner || parse_thread_relation(candidate).is_none() {
+    if !owners.contains(&candidate.pubkey) || parse_thread_relation(candidate).is_none() {
         return None;
     }
 
     let mut agents = HashSet::new();
     for event in thread {
-        if event.kind != Kind::Custom(9) || event.pubkey == *owner || event.pubkey == *bot {
+        if event.kind != Kind::Custom(9) || owners.contains(&event.pubkey) || event.pubkey == *bot {
             continue;
         }
-        if !is_same_owner_agent(event, owner) {
+        if !owners.iter().any(|owner| is_same_owner_agent(event, owner)) {
             return None;
         }
         agents.insert(event.pubkey);
@@ -899,10 +931,12 @@ fn route_target(
         0 => {
             let root_id = parse_thread_relation(candidate)?.root_event_id;
             let root = thread.iter().find(|event| {
-                event.id == root_id && event.kind == Kind::Custom(9) && event.pubkey == *owner
+                event.id == root_id
+                    && event.kind == Kind::Custom(9)
+                    && owners.contains(&event.pubkey)
             })?;
             let target = PublicKey::parse(unique_event_tag_value(root, "p")?).ok()?;
-            if target == *owner || target == *bot {
+            if owners.contains(&target) || target == *bot {
                 return None;
             }
             target
@@ -1093,7 +1127,32 @@ mod tests {
             route_target(
                 &fixture.base_thread(&candidate),
                 &candidate,
-                &fixture.owner.public_key(),
+                &[fixture.owner.public_key()],
+                &fixture.bot.public_key(),
+            ),
+            Some(fixture.agent.public_key())
+        );
+    }
+
+    #[test]
+    fn routes_for_either_configured_owner() {
+        let fixture = Fixture::new();
+        let other_owner = Keys::generate();
+        let candidate = message(
+            &other_owner,
+            None,
+            fixture.channel,
+            Some(&ThreadRef {
+                root_event_id: fixture.root.id,
+                parent_event_id: fixture.agent_reply.id,
+            }),
+            &[],
+        );
+        assert_eq!(
+            route_target(
+                &[fixture.root, fixture.agent_reply, candidate.clone()],
+                &candidate,
+                &[fixture.owner.public_key(), other_owner.public_key()],
                 &fixture.bot.public_key(),
             ),
             Some(fixture.agent.public_key())
@@ -1120,7 +1179,7 @@ mod tests {
             route_target(
                 &[root, candidate.clone()],
                 &candidate,
-                &fixture.owner.public_key(),
+                &[fixture.owner.public_key()],
                 &fixture.bot.public_key(),
             ),
             Some(fixture.agent.public_key())
@@ -1153,7 +1212,7 @@ mod tests {
         assert!(route_target(
             &[root, candidate.clone()],
             &candidate,
-            &fixture.owner.public_key(),
+            &[fixture.owner.public_key()],
             &fixture.bot.public_key(),
         )
         .is_none());
@@ -1180,7 +1239,7 @@ mod tests {
             channel_ids: Vec::new(),
             bot_keys: fixture.bot,
             owner_auth_tag: None,
-            owner_pubkey: fixture.owner.public_key(),
+            owner_pubkeys: vec![fixture.owner.public_key()],
             picture_url: None,
         };
         let event = config
@@ -1206,7 +1265,7 @@ mod tests {
         assert!(route_target(
             &fixture.base_thread(&candidate),
             &candidate,
-            &fixture.owner.public_key(),
+            &[fixture.owner.public_key()],
             &fixture.bot.public_key(),
         )
         .is_none());
@@ -1220,7 +1279,7 @@ mod tests {
         assert!(route_target(
             &fixture.base_thread(&candidate),
             &candidate,
-            &fixture.owner.public_key(),
+            &[fixture.owner.public_key()],
             &fixture.bot.public_key(),
         )
         .is_none());
@@ -1246,7 +1305,7 @@ mod tests {
         assert!(route_target(
             &thread,
             &candidate,
-            &fixture.owner.public_key(),
+            &[fixture.owner.public_key()],
             &fixture.bot.public_key(),
         )
         .is_none());
@@ -1273,7 +1332,7 @@ mod tests {
         assert!(route_target(
             &thread,
             &candidate,
-            &fixture.owner.public_key(),
+            &[fixture.owner.public_key()],
             &fixture.bot.public_key(),
         )
         .is_none());
@@ -1300,21 +1359,21 @@ mod tests {
         assert!(route_target(
             &thread,
             &candidate,
-            &fixture.owner.public_key(),
+            &[fixture.owner.public_key()],
             &fixture.bot.public_key(),
         )
         .is_none());
     }
 
     #[test]
-    fn routed_message_is_a_sibling_with_a_friendly_label_and_source_marker() {
+    fn routed_message_forwards_source_content_with_label_and_marker() {
         let fixture = Fixture::new();
         let candidate = fixture.candidate(&[]);
         let agent_hex = fixture.agent.public_key().to_hex();
         let routed = build_routed_message(
             fixture.channel,
             fixture.root.id,
-            candidate.id,
+            &candidate,
             &agent_hex,
             "slopd-codex",
         )
@@ -1324,7 +1383,7 @@ mod tests {
         let relation = parse_thread_relation(&routed).unwrap();
         assert_eq!(relation.root_event_id, fixture.root.id);
         assert_eq!(relation.parent_event_id, fixture.root.id);
-        assert_eq!(routed.content, "@slopd-codex");
+        assert_eq!(routed.content, "@slopd-codex\n\nmessage");
         assert_eq!(
             event_tag_value(&routed, ROUTED_SOURCE_TAG),
             Some(candidate.id.to_hex().as_str())
@@ -1336,7 +1395,7 @@ mod tests {
         assert!(route_target(
             &thread,
             &candidate,
-            &fixture.owner.public_key(),
+            &[fixture.owner.public_key()],
             &fixture.bot.public_key(),
         )
         .is_none());
@@ -1349,7 +1408,7 @@ mod tests {
         let routed = build_routed_message(
             fixture.channel,
             fixture.root.id,
-            candidate.id,
+            &candidate,
             &fixture.agent.public_key().to_hex(),
             "agent",
         )
@@ -1385,7 +1444,7 @@ mod tests {
         let routed = build_routed_message(
             fixture.channel,
             fixture.root.id,
-            candidate.id,
+            &candidate,
             &fixture.agent.public_key().to_hex(),
             "agent",
         )
@@ -1411,7 +1470,7 @@ mod tests {
         let routed = build_routed_message(
             fixture.channel,
             fixture.root.id,
-            candidate.id,
+            &candidate,
             &fixture.agent.public_key().to_hex(),
             "agent",
         )
@@ -1458,7 +1517,7 @@ mod tests {
         assert!(route_target(
             &[candidate.clone(), fixture.agent_reply],
             &candidate,
-            &fixture.owner.public_key(),
+            &[fixture.owner.public_key()],
             &fixture.bot.public_key(),
         )
         .is_none());

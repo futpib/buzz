@@ -4,6 +4,7 @@ set -euo pipefail
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "${script_dir}/../.." && pwd)"
 bridge_config="${BUZZ_AGENT_BRIDGE_CONFIG:-${HOME}/.config/buzz-slopd-agent/bridge.env}"
+machine_public="${BUZZ_MACHINE_PUBLIC_CONFIG:-${HOME}/.config/buzz-machine/public.env}"
 config_dir="${HOME}/.config/buzz-thread-mention-bot"
 identity_file="${config_dir}/identity.env"
 auth_file="${config_dir}/auth.env"
@@ -121,10 +122,27 @@ if [[ ! "${expected_owner}" =~ ^[0-9a-f]{64}$ || -z "${bot_secret}" ]]; then
   echo "Bridge owner or bot identity is invalid" >&2
   exit 1
 fi
+machine_owner="$(
+  if [[ -r "${machine_public}" ]]; then
+    unset BUZZ_AGENT_OWNER
+    # shellcheck source=/dev/null
+    source "${machine_public}"
+    printf '%s' "${BUZZ_AGENT_OWNER:-}"
+  fi
+)"
+if [[ -n "${machine_owner}" && ! "${machine_owner}" =~ ^[0-9a-f]{64}$ ]]; then
+  echo "Machine owner identity is invalid" >&2
+  exit 1
+fi
+owner_pubkeys="${expected_owner}"
+if [[ -n "${machine_owner}" && "${machine_owner}" != "${expected_owner}" ]]; then
+  owner_pubkeys+=",${machine_owner}"
+fi
 bot_public_key="$(BUZZ_BOT_PRIVATE_KEY="${bot_secret}" "${binary}" public-key)"
 temporary_public="$(mktemp "${config_dir}/.public.env.XXXXXX")"
 printf '%s\n' \
   "BUZZ_OWNER_PUBKEY=${expected_owner}" \
+  "BUZZ_OWNER_PUBKEYS=${owner_pubkeys}" \
   "BUZZ_THREAD_MENTION_BOT_PUBKEY=${bot_public_key}" \
   >"${temporary_public}"
 chmod 600 "${temporary_public}"
