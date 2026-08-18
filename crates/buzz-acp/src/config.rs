@@ -119,6 +119,7 @@ impl std::fmt::Display for RespondTo {
 ///
 /// - `default` — agent's built-in behaviour (permission requests per tool call).
 /// - `acceptEdits` — auto-approve file edits, still ask for other tools.
+/// - `bypassPermissions` — skip the permission flow entirely.
 /// - `dontAsk` — never prompt; reject anything that would require permission.
 /// - `plan` — planning-only mode (no tool execution).
 #[derive(Debug, Clone, Copy, PartialEq, clap::ValueEnum)]
@@ -126,9 +127,17 @@ pub enum PermissionMode {
     /// Agent default — permission requests per tool call.
     #[value(alias = "default")]
     Default,
+    /// Auto mode — fully autonomous execution; model-gated (requires a model
+    /// that supports `supportsAutoMode`).  Degrades gracefully to `default`
+    /// when the session's active model does not support it.
+    #[value(alias = "auto")]
+    Auto,
     /// Auto-approve file edits, still ask for other tools.
     #[value(alias = "acceptEdits")]
     AcceptEdits,
+    /// Skip the permission flow entirely.
+    #[value(alias = "bypassPermissions")]
+    BypassPermissions,
     /// Never prompt; reject anything that would require permission.
     #[value(alias = "dontAsk")]
     DontAsk,
@@ -143,7 +152,9 @@ impl PermissionMode {
     pub fn as_wire_str(&self) -> &'static str {
         match self {
             Self::Default => "default",
+            Self::Auto => "auto",
             Self::AcceptEdits => "acceptEdits",
+            Self::BypassPermissions => "bypassPermissions",
             Self::DontAsk => "dontAsk",
             Self::Plan => "plan",
         }
@@ -426,6 +437,14 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_ACP_MODEL")]
     pub model: Option<String>,
 
+    /// Persisted effort level value (e.g. "high", "medium", "low") to apply via
+    /// `session/set_config_option` at the first session creation. The configId is
+    /// resolved from the adapter's advertised `thought_level` capability — not
+    /// hardcoded. Non-fatal: if the adapter does not advertise `thought_level`,
+    /// the value is silently ignored and the persisted effort is not overwritten.
+    #[arg(long, env = "BUZZ_ACP_EFFORT_LEVEL")]
+    pub effort_level: Option<String>,
+
     /// Title for the agent's ACP sessions, passed out-of-band in `session/new`
     /// `_meta`. Adapters that recognize it name the session after this value;
     /// others ignore it. Never enters the prompt.
@@ -435,12 +454,13 @@ pub struct CliArgs {
     /// Permission mode for agents that support `session/set_config_option`
     /// with `configId: "mode"` (e.g. `claude-agent-acp`).
     ///
-    /// Defaults to `dontAsk`, which rejects operations that need interactive
-    /// approval because Buzz does not expose a human permission prompt.
+    /// Defaults to `bypassPermissions` which skips the per-tool-call
+    /// permission flow. Set to `default` to restore the agent's built-in
+    /// behaviour.
     #[arg(
         long,
         env = "BUZZ_ACP_PERMISSION_MODE",
-        default_value = "dont-ask",
+        default_value = "bypass-permissions",
         value_enum
     )]
     pub permission_mode: PermissionMode,
@@ -484,6 +504,13 @@ pub struct CliArgs {
     /// Connect and subscribe before starting the ACP/LLM subprocess pool.
     #[arg(long, env = "BUZZ_ACP_LAZY_POOL", default_value_t = false)]
     pub lazy_pool: bool,
+
+    /// Tear the woken pool back down to the lazy empty-slot state after this
+    /// many seconds with no dispatched turn in flight and an empty queue,
+    /// releasing worker subprocesses until the next accepted event re-wakes.
+    /// Requires `--lazy-pool`; ignored otherwise. 0 disables idle re-sleep.
+    #[arg(long, env = "BUZZ_ACP_IDLE_POOL_SLEEP", default_value_t = 0)]
+    pub idle_pool_sleep: u64,
 }
 
 /// Merged NIP-01 subscription filter for a single channel.
@@ -536,6 +563,12 @@ pub struct Config {
     pub memory_enabled: bool,
     /// Desired LLM model ID. Applied after every `session_new_full()`.
     pub model: Option<String>,
+    /// Persisted effort level value (e.g. "high", "medium", "low"). Held as a
+    /// per-worker spawn-scoped value and applied at the first session creation
+    /// by pairing with the adapter's advertised `thought_level` configId.
+    /// Non-fatal when absent or when the adapter does not advertise
+    /// `thought_level`.
+    pub effort_level: Option<String>,
     /// Sanitized session title, sent as `_meta.sessionTitle` on `session/new`.
     /// `None` when unset or when the configured value sanitized to empty.
     pub session_title: Option<String>,
@@ -562,6 +595,10 @@ pub struct Config {
     pub exit_after_inactivity_secs: u64,
     /// Whether ACP/LLM subprocess initialization is deferred until accepted work arrives.
     pub lazy_pool: bool,
+    /// Seconds with no dispatched turn in flight and an empty queue before a
+    /// woken lazy pool is torn back down to the empty-slot state. 0 = disabled.
+    /// Only meaningful when `lazy_pool` is true.
+    pub idle_pool_sleep_secs: u64,
     /// Agent owner pubkey (hex). Used for `--respond-to=owner-only` gate.
     /// Replaces the old REST-based owner lookup.
     pub agent_owner: Option<String>,
@@ -1098,6 +1135,7 @@ impl Config {
             typing_enabled: !args.no_typing,
             memory_enabled: args.memory && !args.no_memory,
             model,
+            effort_level: args.effort_level,
             session_title: args
                 .session_title
                 .as_deref()
@@ -1111,6 +1149,7 @@ impl Config {
             relay_observer: args.relay_observer,
             exit_after_inactivity_secs: args.exit_after_inactivity,
             lazy_pool: args.lazy_pool,
+            idle_pool_sleep_secs: args.idle_pool_sleep,
             agent_owner: args.agent_owner.map(|s| s.trim().to_ascii_lowercase()),
             no_base_prompt: args.no_base_prompt,
             base_prompt_content,
@@ -1474,8 +1513,9 @@ mod tests {
             typing_enabled: true,
             memory_enabled: true,
             model: None,
+            effort_level: None,
             session_title: None,
-            permission_mode: PermissionMode::DontAsk,
+            permission_mode: PermissionMode::BypassPermissions,
             respond_to: RespondTo::Anyone,
             respond_to_allowlist: HashSet::new(),
             allowed_respond_to: Vec::new(),
@@ -1484,6 +1524,7 @@ mod tests {
             relay_observer: false,
             exit_after_inactivity_secs: 0,
             lazy_pool: false,
+            idle_pool_sleep_secs: 0,
             agent_owner: None,
             no_base_prompt: false,
             base_prompt_content: None,
@@ -2220,6 +2261,22 @@ channels = "ALL"
     }
 
     #[test]
+    fn idle_pool_sleep_defaults_disabled_and_accepts_cli_value() {
+        let key = "0".repeat(64);
+        let default = CliArgs::parse_from(["buzz-acp", "--private-key", &key]);
+        assert_eq!(default.idle_pool_sleep, 0);
+
+        let configured = CliArgs::parse_from([
+            "buzz-acp",
+            "--private-key",
+            &key,
+            "--idle-pool-sleep",
+            "300",
+        ]);
+        assert_eq!(configured.idle_pool_sleep, 300);
+    }
+
+    #[test]
     fn lazy_pool_cli_flag_enables_deferred_startup() {
         let key = "0".repeat(64);
         let args = CliArgs::try_parse_from(["buzz-acp", "--private-key", &key, "--lazy-pool=true"]);
@@ -2290,7 +2347,12 @@ channels = "ALL"
     #[test]
     fn test_permission_mode_wire_strings() {
         assert_eq!(PermissionMode::Default.as_wire_str(), "default");
+        assert_eq!(PermissionMode::Auto.as_wire_str(), "auto");
         assert_eq!(PermissionMode::AcceptEdits.as_wire_str(), "acceptEdits");
+        assert_eq!(
+            PermissionMode::BypassPermissions.as_wire_str(),
+            "bypassPermissions"
+        );
         assert_eq!(PermissionMode::DontAsk.as_wire_str(), "dontAsk");
         assert_eq!(PermissionMode::Plan.as_wire_str(), "plan");
     }
@@ -2298,24 +2360,41 @@ channels = "ALL"
     #[test]
     fn test_permission_mode_is_default() {
         assert!(PermissionMode::Default.is_default());
+        assert!(!PermissionMode::Auto.is_default());
+        assert!(!PermissionMode::BypassPermissions.is_default());
         assert!(!PermissionMode::AcceptEdits.is_default());
         assert!(!PermissionMode::DontAsk.is_default());
         assert!(!PermissionMode::Plan.is_default());
     }
 
     #[test]
+    fn test_permission_mode_auto_degrades_to_default_when_unsupported() {
+        // The wire string is "auto" — the adapter handles graceful downgrade
+        // to "default" when the active model does not support Auto mode.
+        // Verify only that the wire string is correct and distinct from "default".
+        let auto = PermissionMode::Auto;
+        assert_eq!(auto.as_wire_str(), "auto");
+        assert_ne!(auto.as_wire_str(), "default");
+        assert!(!auto.is_default());
+    }
+
+    #[test]
     fn test_permission_mode_display() {
-        assert_eq!(format!("{}", PermissionMode::DontAsk), "dontAsk");
+        assert_eq!(
+            format!("{}", PermissionMode::BypassPermissions),
+            "bypassPermissions"
+        );
         assert_eq!(format!("{}", PermissionMode::Default), "default");
+        assert_eq!(format!("{}", PermissionMode::Auto), "auto");
     }
 
     #[test]
     fn test_summary_includes_permission_mode() {
         let mut config = test_config(SubscribeMode::Mentions);
-        config.permission_mode = PermissionMode::DontAsk;
+        config.permission_mode = PermissionMode::BypassPermissions;
         let s = config.summary();
         assert!(
-            s.contains("permission_mode=dontAsk"),
+            s.contains("permission_mode=bypassPermissions"),
             "summary should include permission_mode, got: {s}"
         );
     }
@@ -2332,9 +2411,9 @@ channels = "ALL"
     }
 
     #[test]
-    fn test_default_config_rejects_interactive_permissions() {
+    fn test_default_config_uses_bypass_permissions() {
         let config = test_config(SubscribeMode::Mentions);
-        assert_eq!(config.permission_mode, PermissionMode::DontAsk);
+        assert_eq!(config.permission_mode, PermissionMode::BypassPermissions);
     }
 
     #[test]
@@ -2344,7 +2423,9 @@ channels = "ALL"
         use clap::ValueEnum;
         let cases = [
             ("default", PermissionMode::Default),
+            ("auto", PermissionMode::Auto),
             ("accept-edits", PermissionMode::AcceptEdits),
+            ("bypass-permissions", PermissionMode::BypassPermissions),
             ("dont-ask", PermissionMode::DontAsk),
             ("plan", PermissionMode::Plan),
         ];
@@ -2359,12 +2440,15 @@ channels = "ALL"
 
     #[test]
     fn test_permission_mode_value_enum_camel_case_aliases() {
-        // Operators may set env vars using the camelCase wire-format strings.
-        // The #[value(alias)] attributes ensure these parse correctly.
+        // Operators may set env vars using the camelCase wire-format strings
+        // (e.g. BUZZ_ACP_PERMISSION_MODE=bypassPermissions). The #[value(alias)]
+        // attributes ensure these parse correctly.
         use clap::ValueEnum;
         let cases = [
             ("default", PermissionMode::Default),
+            ("auto", PermissionMode::Auto),
             ("acceptEdits", PermissionMode::AcceptEdits),
+            ("bypassPermissions", PermissionMode::BypassPermissions),
             ("dontAsk", PermissionMode::DontAsk),
             ("plan", PermissionMode::Plan),
         ];
@@ -2373,18 +2457,6 @@ channels = "ALL"
                 PermissionMode::from_str(input, true).unwrap(),
                 *expected,
                 "camelCase alias {input:?} should parse"
-            );
-        }
-    }
-
-    #[test]
-    fn test_permission_mode_rejects_unattended_bypass() {
-        use clap::ValueEnum;
-
-        for input in ["bypass-permissions", "bypassPermissions"] {
-            assert!(
-                PermissionMode::from_str(input, true).is_err(),
-                "{input:?} must not disable the ACP permission boundary"
             );
         }
     }

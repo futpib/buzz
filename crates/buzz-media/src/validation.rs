@@ -104,6 +104,7 @@ fn file_mime_to_ext(mime: &str) -> Option<&'static str> {
         // Data / text
         "application/json" => "json",
         "text/csv" => "csv",
+        "text/html" => "html",
         "text/plain" => "txt",
         _ => return None,
     };
