@@ -1,12 +1,14 @@
 # Thread Mention Bot
 
-A tiny deterministic Buzz bot for one narrow job: when the owner writes an
-untagged reply in a thread containing only that owner and one of their agents,
-the bot tags the agent for them.
+A small Buzz automation bot. Its default deterministic rule tags the sole agent
+when the owner writes an untagged reply in an otherwise two-party thread.
 
-It does not call an LLM, run ACP, choose a default agent, route top-level
-messages, or react to emoji. It connects directly to the Buzz relay using the
-same Nostr and NIP-OA primitives as other Buzz participants.
+An optional judge runs one persistent ACP session for every agent-authored
+message. The ACP session returns a structured verdict; the bot applies it
+deterministically. A pass gets a `👍`. A failure gets a `👎` and a threaded reply
+that tags the author agent and lists the failed rules. The initial rule checks
+only whether the delivered message appears complete, not whether it is correct
+or whether the task itself is finished.
 
 ## Exact routing rule
 
@@ -51,6 +53,14 @@ export BUZZ_OWNER_PUBKEYS=<owner-public-key>[,<owner-public-key>...]
 export BUZZ_CHANNEL_IDS=<channel-uuid>[,<channel-uuid>...]
 # Optional: publish a profile avatar.
 export BUZZ_BOT_PICTURE_URL=https://buzz.example.com/media/avatar.png
+# Optional: enable one vendor-independent ACP judge session.
+export BUZZ_JUDGE_ENABLED=true
+export BUZZ_JUDGE_AGENT_COMMAND=/opt/bin/acp-agent
+export BUZZ_JUDGE_AGENT_ARGS=--flag,value
+# Optional: defaults to $HOME, 120 seconds idle, and 600 seconds total.
+export BUZZ_JUDGE_CWD=/workspace
+export BUZZ_JUDGE_IDLE_TIMEOUT=120
+export BUZZ_JUDGE_MAX_DURATION=600
 
 cargo run -p thread-mention-bot
 ```
@@ -90,7 +100,7 @@ uploads the tracked bot avatar with that identity, and adds only that public
 key to each installed ACP agent's response allowlist:
 
 ```bash
-./deploy/private-host/install-thread-mention-bot.sh --restart
+./deploy/private-host/install-thread-mention-bot.sh --judge --restart
 ```
 
 This standalone path needs no owner secret. Open channels require no
@@ -99,7 +109,10 @@ member. If desired, `--sign --channel UUID --restart` prompts without echo for
 the owner key, writes only the resulting attestation, and adds the bot to that
 private channel. The owner key is passed to the signer over stdin and is not
 written to disk or placed in a process argument or environment variable.
-Subsequent code updates need only `--restart`; the stable identity remains in
+`--judge` writes a separate non-secret `judge.env` for a single slopd Codex ACP
+session. `BUZZ_JUDGE_AGENT_ACCOUNT` and `BUZZ_JUDGE_AGENT_BACKEND` can override
+the install-time `codex` defaults. Subsequent code updates need only `--restart`;
+the stable identity and judge configuration remain in
 the mode-0600 files under `~/.config/buzz-thread-mention-bot/`. When present,
 the shared `buzz-machine` identity is added to the owner allowlist automatically.
 

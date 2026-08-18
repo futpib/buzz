@@ -2,9 +2,11 @@
 
 use std::collections::{HashMap, HashSet};
 use std::io;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
+use buzz_acp::persistent_session::PersistentAcpSession;
 use buzz_sdk::{MemberRole, ThreadRef};
 use buzz_ws_client::{NostrWsConnection, RelayMessage, WsClientError};
 use nostr::{
@@ -12,6 +14,7 @@ use nostr::{
     Timestamp, ToBech32,
 };
 use serde_json::json;
+use tokio::sync::{mpsc, Mutex};
 use uuid::Uuid;
 
 const DEFAULT_RELAY_URL: &str = "ws://localhost:3000";
@@ -22,10 +25,12 @@ const REACTION_SUBSCRIPTION_ID: &str = "thread-mention-reaction";
 const CHANNEL_SUBSCRIPTION_ID: &str = "thread-mention-channels";
 const PROFILE_SUBSCRIPTION_ID: &str = "thread-mention-profile";
 const ROUTED_SOURCE_TAG: &str = "thread-mention-for";
+const JUDGED_SOURCE_TAG: &str = "message-judge-for";
+const JUDGE_RESULT_TAG: &str = "message-judge-result";
+const COMPLETE_MESSAGE_RULE: &str = "complete_message";
 const BOT_NAME: &str = "thread-mention-bot";
 const BOT_DISPLAY_NAME: &str = "Thread Mention Bot";
-const BOT_ABOUT: &str =
-    "Deterministically tags the sole same-owner agent in an otherwise two-party thread.";
+const BOT_ABOUT: &str = "Routes two-party thread replies and applies ACP message-quality verdicts.";
 const RECONNECT_DELAY: Duration = Duration::from_secs(3);
 const REACTION_POLL_INTERVAL: Duration = Duration::from_secs(2);
 const CHANNEL_REFRESH_INTERVAL: Duration = Duration::from_secs(300);
@@ -35,6 +40,8 @@ const RECEIVE_TIMEOUT: Duration = Duration::from_secs(60);
 const THREAD_QUERY_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_THREAD_EVENTS: usize = 1_000;
 const MAX_CHANNELS: usize = 500;
+const JUDGE_QUEUE_SIZE: usize = 256;
+const JUDGE_RETRY_LIMIT: usize = 2;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -69,6 +76,14 @@ async fn main() -> Result<()> {
             .collect::<Vec<_>>()
             .join(",")
     );
+    eprintln!(
+        "message judge: {}",
+        if config.judge.is_some() {
+            "enabled"
+        } else {
+            "disabled"
+        }
+    );
 
     let shutdown = tokio::signal::ctrl_c();
     tokio::pin!(shutdown);
@@ -88,10 +103,21 @@ async fn main() -> Result<()> {
         }
     }
 
+    let judge_tracker = Arc::new(Mutex::new(JudgeTracker::default()));
+    let judge_tx = config.judge.as_ref().map(|_| {
+        let (tx, rx) = mpsc::channel(JUDGE_QUEUE_SIZE);
+        drop(tokio::spawn(run_judge_worker(
+            config.clone(),
+            Arc::clone(&judge_tracker),
+            rx,
+        )));
+        tx
+    });
+
     loop {
         let result = tokio::select! {
             _ = &mut shutdown => return Ok(()),
-            result = listen_once(&config) => result,
+            result = listen_once(&config, judge_tx.as_ref(), Arc::clone(&judge_tracker)) => result,
         };
         if let Err(error) = result {
             eprintln!("relay listener stopped: {error:#}; reconnecting");
@@ -103,6 +129,7 @@ async fn main() -> Result<()> {
     }
 }
 
+#[derive(Clone)]
 struct Config {
     relay_url: String,
     channel_ids: Vec<Uuid>,
@@ -110,6 +137,16 @@ struct Config {
     owner_auth_tag: Option<Tag>,
     owner_pubkeys: Vec<PublicKey>,
     picture_url: Option<String>,
+    judge: Option<JudgeConfig>,
+}
+
+#[derive(Clone)]
+struct JudgeConfig {
+    command: String,
+    args: Vec<String>,
+    cwd: String,
+    idle_timeout: Duration,
+    max_duration: Duration,
 }
 
 #[derive(Clone, Copy)]
@@ -124,6 +161,46 @@ struct PendingRoute {
 struct RouteState {
     pending: HashMap<EventId, PendingRoute>,
     handled_sources: HashSet<EventId>,
+    judge_deliveries: HashMap<EventId, JudgeDelivery>,
+}
+
+#[derive(Clone, Default)]
+struct JudgeDelivery {
+    verdict: Option<JudgeVerdict>,
+    reacted: bool,
+    critiqued: bool,
+}
+
+impl JudgeDelivery {
+    fn complete(&self) -> bool {
+        self.verdict
+            .as_ref()
+            .is_some_and(|verdict| self.reacted && (verdict.pass || self.critiqued))
+    }
+}
+
+#[derive(Default)]
+struct JudgeTracker {
+    deliveries: HashMap<EventId, JudgeDelivery>,
+    queued: HashSet<EventId>,
+}
+
+#[derive(Clone)]
+struct JudgeJob {
+    event: Event,
+    channel_id: Uuid,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct JudgeVerdict {
+    pass: bool,
+    failures: Vec<JudgeFailure>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct JudgeFailure {
+    rule: String,
+    issue: String,
 }
 
 impl Config {
@@ -161,6 +238,7 @@ impl Config {
                 channel_ids.push(channel_id);
             }
         }
+        let judge = JudgeConfig::from_env()?;
         Ok(Self {
             relay_url,
             channel_ids,
@@ -170,6 +248,7 @@ impl Config {
             picture_url: std::env::var("BUZZ_BOT_PICTURE_URL")
                 .ok()
                 .filter(|value| !value.trim().is_empty()),
+            judge,
         })
     }
 
@@ -183,6 +262,32 @@ impl Config {
             None => builder,
         };
         Ok(builder.sign_with_keys(&self.bot_keys)?)
+    }
+}
+
+impl JudgeConfig {
+    fn from_env() -> Result<Option<Self>> {
+        if !env_bool("BUZZ_JUDGE_ENABLED", false)? {
+            return Ok(None);
+        }
+        let command = required_env("BUZZ_JUDGE_AGENT_COMMAND")?;
+        let args = std::env::var("BUZZ_JUDGE_AGENT_ARGS")
+            .unwrap_or_default()
+            .split(',')
+            .map(str::trim)
+            .filter(|arg| !arg.is_empty())
+            .map(str::to_string)
+            .collect();
+        let cwd = std::env::var("BUZZ_JUDGE_CWD")
+            .or_else(|_| std::env::var("HOME"))
+            .unwrap_or_else(|_| ".".to_string());
+        Ok(Some(Self {
+            command,
+            args,
+            cwd,
+            idle_timeout: Duration::from_secs(env_u64("BUZZ_JUDGE_IDLE_TIMEOUT", 120)?),
+            max_duration: Duration::from_secs(env_u64("BUZZ_JUDGE_MAX_DURATION", 600)?),
+        }))
     }
 }
 
@@ -300,9 +405,19 @@ async fn publish_required(
     Ok(())
 }
 
-async fn listen_once(config: &Config) -> Result<()> {
+async fn listen_once(
+    config: &Config,
+    judge_tx: Option<&mpsc::Sender<JudgeJob>>,
+    judge_tracker: Arc<Mutex<JudgeTracker>>,
+) -> Result<()> {
     let channel_ids = discover_channels(config).await?;
     let mut routes = load_route_state(config, &channel_ids).await?;
+    if config.judge.is_some() {
+        let mut tracker = judge_tracker.lock().await;
+        for (source, delivery) in routes.judge_deliveries.drain() {
+            tracker.deliveries.entry(source).or_insert(delivery);
+        }
+    }
     let mut connection = NostrWsConnection::connect_authenticated(
         &config.relay_url,
         &config.bot_keys,
@@ -312,9 +427,8 @@ async fn listen_once(config: &Config) -> Result<()> {
     let now = Timestamp::now().as_secs();
     for channel_id in &channel_ids {
         let channel = channel_id.to_string();
-        let owner_messages = Filter::new()
+        let messages = Filter::new()
             .kind(Kind::Custom(9))
-            .authors(config.owner_pubkeys.clone())
             .since(Timestamp::from_secs(
                 now.saturating_sub(LIVE_REPLAY_WINDOW_SECS),
             ))
@@ -323,12 +437,12 @@ async fn listen_once(config: &Config) -> Result<()> {
             .send_raw(&json!([
                 "REQ",
                 format!("{LIVE_SUBSCRIPTION_ID}:{channel_id}"),
-                owner_messages
+                messages
             ]))
             .await?;
     }
     eprintln!(
-        "listening for owner-authored thread replies in {} channel(s); tracking {} pending route(s), {} handled source(s)",
+        "listening in {} channel(s); tracking {} pending route(s), {} handled source(s)",
         channel_ids.len(),
         routes.pending.len(),
         routes.handled_sources.len()
@@ -356,6 +470,16 @@ async fn listen_once(config: &Config) -> Result<()> {
                     subscription_id,
                     event,
                 }) if subscription_id.starts_with(LIVE_SUBSCRIPTION_ID) => {
+                    if let Some(judge_tx) = judge_tx {
+                        if let Err(error) = maybe_enqueue_judge(
+                            config,
+                            judge_tx,
+                            &judge_tracker,
+                            &event,
+                        ).await {
+                            eprintln!("failed to enqueue judge job for {}: {error:#}", event.id.to_hex());
+                        }
+                    }
                     let result = maybe_route(
                         config,
                         &mut connection,
@@ -501,6 +625,369 @@ async fn maybe_route(
         },
     );
     Ok(())
+}
+
+async fn maybe_enqueue_judge(
+    config: &Config,
+    judge_tx: &mpsc::Sender<JudgeJob>,
+    tracker: &Arc<Mutex<JudgeTracker>>,
+    candidate: &Event,
+) -> Result<()> {
+    if candidate.kind != Kind::Custom(9)
+        || candidate.pubkey == config.bot_keys.public_key()
+        || !config
+            .owner_pubkeys
+            .iter()
+            .any(|owner| is_same_owner_agent(candidate, owner))
+    {
+        return Ok(());
+    }
+    candidate.verify().context("invalid candidate signature")?;
+    let channel_id = event_channel(candidate)
+        .and_then(|value| Uuid::parse_str(value).ok())
+        .filter(|channel| config.channel_ids.is_empty() || config.channel_ids.contains(channel))
+        .ok_or_else(|| anyhow!("candidate has no eligible channel tag"))?;
+    {
+        let mut tracker = tracker.lock().await;
+        if tracker
+            .deliveries
+            .get(&candidate.id)
+            .is_some_and(JudgeDelivery::complete)
+            || !tracker.queued.insert(candidate.id)
+        {
+            return Ok(());
+        }
+    }
+    if let Err(error) = judge_tx
+        .send(JudgeJob {
+            event: candidate.clone(),
+            channel_id,
+        })
+        .await
+    {
+        tracker.lock().await.queued.remove(&candidate.id);
+        return Err(anyhow!("judge worker stopped: {error}"));
+    }
+    Ok(())
+}
+
+async fn run_judge_worker(
+    config: Config,
+    tracker: Arc<Mutex<JudgeTracker>>,
+    mut jobs: mpsc::Receiver<JudgeJob>,
+) {
+    let Some(judge_config) = config.judge.clone() else {
+        return;
+    };
+    let mut session = None;
+    while let Some(job) = jobs.recv().await {
+        let result = process_judge_job(&config, &judge_config, &tracker, &mut session, &job).await;
+        tracker.lock().await.queued.remove(&job.event.id);
+        match result {
+            Ok(verdict) => eprintln!(
+                "judged {}: {}",
+                job.event.id.to_hex(),
+                if verdict.pass { "pass" } else { "fail" }
+            ),
+            Err(error) => eprintln!("failed to judge {}: {error:#}", job.event.id.to_hex()),
+        }
+    }
+    if let Some(mut session) = session {
+        session.shutdown().await;
+    }
+}
+
+async fn process_judge_job(
+    config: &Config,
+    judge_config: &JudgeConfig,
+    tracker: &Arc<Mutex<JudgeTracker>>,
+    session: &mut Option<PersistentAcpSession>,
+    job: &JudgeJob,
+) -> Result<JudgeVerdict> {
+    let delivery = tracker
+        .lock()
+        .await
+        .deliveries
+        .get(&job.event.id)
+        .cloned()
+        .unwrap_or_default();
+    let verdict = match delivery.verdict {
+        Some(verdict) => verdict,
+        None => request_judge_verdict(judge_config, session, &job.event).await?,
+    };
+    apply_judge_verdict(config, tracker, job, &verdict).await?;
+    Ok(verdict)
+}
+
+async fn request_judge_verdict(
+    config: &JudgeConfig,
+    session: &mut Option<PersistentAcpSession>,
+    event: &Event,
+) -> Result<JudgeVerdict> {
+    let base_prompt = judge_prompt(event);
+    let mut invalid_output = None;
+    for attempt in 0..JUDGE_RETRY_LIMIT {
+        if session.is_none() {
+            let spawned = tokio::time::timeout(
+                Duration::from_secs(60),
+                PersistentAcpSession::spawn(
+                    &config.command,
+                    &config.args,
+                    &config.cwd,
+                    Some("Buzz message judge"),
+                ),
+            )
+            .await
+            .context("judge ACP startup timed out")??;
+            *session = Some(spawned);
+        }
+        let prompt = match invalid_output.as_deref() {
+            Some(output) => format!(
+                "{base_prompt}\n\nYour previous output was invalid: {}\nReturn only the required JSON object.",
+                compact_text(output, 500)
+            ),
+            None => base_prompt.clone(),
+        };
+        let Some(active_session) = session.as_mut() else {
+            bail!("judge ACP session was not initialized");
+        };
+        let response = active_session
+            .prompt(&prompt, config.idle_timeout, config.max_duration)
+            .await;
+        match response {
+            Ok(text) => match parse_judge_verdict(&text) {
+                Ok(verdict) => return Ok(verdict),
+                Err(error) if attempt + 1 < JUDGE_RETRY_LIMIT => {
+                    invalid_output = Some(format!("{error}; output={text:?}"));
+                }
+                Err(error) => return Err(error),
+            },
+            Err(error) => {
+                if let Some(mut failed) = session.take() {
+                    failed.shutdown().await;
+                }
+                if attempt + 1 == JUDGE_RETRY_LIMIT {
+                    return Err(error.into());
+                }
+            }
+        }
+    }
+    bail!("judge produced no verdict")
+}
+
+async fn apply_judge_verdict(
+    config: &Config,
+    tracker: &Arc<Mutex<JudgeTracker>>,
+    job: &JudgeJob,
+    verdict: &JudgeVerdict,
+) -> Result<()> {
+    let mut connection = NostrWsConnection::connect_authenticated(
+        &config.relay_url,
+        &config.bot_keys,
+        config.owner_auth_tag.as_ref(),
+    )
+    .await?;
+    let current = tracker
+        .lock()
+        .await
+        .deliveries
+        .get(&job.event.id)
+        .cloned()
+        .unwrap_or_default();
+    if !current.reacted {
+        let reaction = config.sign(build_judge_reaction(job.channel_id, &job.event, verdict)?)?;
+        publish_required(&mut connection, reaction, "judge reaction").await?;
+        let mut tracker = tracker.lock().await;
+        let delivery = tracker.deliveries.entry(job.event.id).or_default();
+        delivery.verdict = Some(verdict.clone());
+        delivery.reacted = true;
+    }
+    if !verdict.pass {
+        let critiqued = tracker
+            .lock()
+            .await
+            .deliveries
+            .get(&job.event.id)
+            .is_some_and(|delivery| delivery.critiqued);
+        if !critiqued {
+            let agent_hex = job.event.pubkey.to_hex();
+            let label = load_agent_label(config, &job.event.pubkey)
+                .await
+                .unwrap_or_else(|_| format!("agent-{}", &agent_hex[..8]));
+            let critique = config.sign(build_judge_critique(
+                job.channel_id,
+                &job.event,
+                verdict,
+                &agent_hex,
+                &label,
+            )?)?;
+            publish_required(&mut connection, critique, "judge critique").await?;
+            let mut tracker = tracker.lock().await;
+            let delivery = tracker.deliveries.entry(job.event.id).or_default();
+            delivery.verdict = Some(verdict.clone());
+            delivery.critiqued = true;
+        }
+    }
+    let _ = connection.disconnect().await;
+    Ok(())
+}
+
+fn judge_prompt(event: &Event) -> String {
+    let content = serde_json::to_string(&event.content).unwrap_or_else(|_| "\"\"".to_string());
+    format!(
+        "You are a delivery-completeness judge. Evaluate only whether the message appears fully delivered. Do not judge correctness, usefulness, task completion, style, or brevity. Fail rule `{COMPLETE_MESSAGE_RULE}` only for evidence of truncation, such as an abrupt mid-sentence or mid-token ending, a dangling colon that clearly introduces missing content, an unfinished list item, or an unmatched code fence or delimiter. Questions, intentional fragments, terse progress updates, and references to prior context may pass. Return exactly one JSON object and no prose: {{\"pass\":true,\"failures\":[]}} or {{\"pass\":false,\"failures\":[{{\"rule\":\"{COMPLETE_MESSAGE_RULE}\",\"issue\":\"concise concrete reason\"}}]}}.\n\nMessage event id: {}\nMessage content: {content}",
+        event.id.to_hex()
+    )
+}
+
+fn parse_judge_verdict(text: &str) -> Result<JudgeVerdict> {
+    let value: serde_json::Value =
+        serde_json::from_str(text.trim()).context("judge response is not a JSON object")?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| anyhow!("judge response is not a JSON object"))?;
+    let pass = object
+        .get("pass")
+        .and_then(serde_json::Value::as_bool)
+        .ok_or_else(|| anyhow!("judge response has no boolean pass field"))?;
+    let failures = object
+        .get("failures")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| anyhow!("judge response has no failures array"))?
+        .iter()
+        .map(|failure| {
+            let rule = failure
+                .get("rule")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| anyhow!("judge failure has no rule"))?;
+            let issue = failure
+                .get("issue")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| anyhow!("judge failure has no issue"))?;
+            Ok(JudgeFailure {
+                rule: compact_text(rule, 80),
+                issue: compact_text(issue, 500),
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    if pass == failures.is_empty() {
+        Ok(JudgeVerdict { pass, failures })
+    } else {
+        bail!("judge pass and failures fields disagree")
+    }
+}
+
+fn build_judge_reaction(
+    channel_id: Uuid,
+    source: &Event,
+    verdict: &JudgeVerdict,
+) -> Result<EventBuilder> {
+    Ok(
+        buzz_sdk::build_reaction(source.id, if verdict.pass { "👍" } else { "👎" })?
+            .tag(Tag::parse(["h", channel_id.to_string().as_str()])?)
+            .tag(Tag::parse([
+                JUDGED_SOURCE_TAG,
+                source.id.to_hex().as_str(),
+            ])?)
+            .tag(Tag::parse([
+                JUDGE_RESULT_TAG,
+                judge_verdict_json(verdict).as_str(),
+            ])?),
+    )
+}
+
+fn build_judge_critique(
+    channel_id: Uuid,
+    source: &Event,
+    verdict: &JudgeVerdict,
+    agent_hex: &str,
+    agent_label: &str,
+) -> Result<EventBuilder> {
+    let relation = parse_thread_relation(source);
+    let thread_ref = ThreadRef {
+        root_event_id: relation
+            .map(|relation| relation.root_event_id)
+            .unwrap_or(source.id),
+        parent_event_id: source.id,
+    };
+    let issues = verdict
+        .failures
+        .iter()
+        .map(|failure| format!("{}: {}", failure.rule, failure.issue))
+        .collect::<Vec<_>>()
+        .join("\n");
+    Ok(buzz_sdk::build_message(
+        channel_id,
+        &format!("@{agent_label}\n\n👎 {issues}"),
+        Some(&thread_ref),
+        &[agent_hex],
+        false,
+        &[],
+    )?
+    .tag(Tag::parse([
+        JUDGED_SOURCE_TAG,
+        source.id.to_hex().as_str(),
+    ])?)
+    .tag(Tag::parse([
+        JUDGE_RESULT_TAG,
+        judge_verdict_json(verdict).as_str(),
+    ])?))
+}
+
+fn judge_verdict_json(verdict: &JudgeVerdict) -> String {
+    json!({
+        "pass": verdict.pass,
+        "failures": verdict
+            .failures
+            .iter()
+            .map(|failure| json!({ "rule": failure.rule, "issue": failure.issue }))
+            .collect::<Vec<_>>()
+    })
+    .to_string()
+}
+
+fn record_judge_event(
+    deliveries: &mut HashMap<EventId, JudgeDelivery>,
+    event: &Event,
+    bot: &PublicKey,
+) {
+    if event.pubkey != *bot || (event.kind != Kind::Reaction && event.kind != Kind::Custom(9)) {
+        return;
+    }
+    let Some(source) = unique_event_tag_value(event, JUDGED_SOURCE_TAG)
+        .and_then(|value| EventId::from_hex(value).ok())
+    else {
+        return;
+    };
+    let Some(result) = unique_event_tag_value(event, JUDGE_RESULT_TAG) else {
+        return;
+    };
+    let Ok(verdict) = parse_judge_verdict(result) else {
+        return;
+    };
+    let expected_reaction = if verdict.pass { "👍" } else { "👎" };
+    let delivery = deliveries.entry(source).or_default();
+    if delivery
+        .verdict
+        .as_ref()
+        .is_some_and(|existing| existing != &verdict)
+    {
+        return;
+    }
+    delivery.verdict = Some(verdict);
+    if event.kind == Kind::Reaction && event.content == expected_reaction {
+        delivery.reacted = true;
+    } else if event.kind == Kind::Custom(9) {
+        delivery.critiqued = true;
+    }
+}
+
+fn compact_text(value: &str, max_chars: usize) -> String {
+    value.chars().take(max_chars).collect()
 }
 
 async fn poll_acknowledged_routes(
@@ -668,6 +1155,9 @@ async fn load_route_state(config: &Config, channel_ids: &[Uuid]) -> Result<Route
         let channel_state = load_channel_route_state(config, *channel_id).await?;
         state.pending.extend(channel_state.pending);
         state.handled_sources.extend(channel_state.handled_sources);
+        state
+            .judge_deliveries
+            .extend(channel_state.judge_deliveries);
     }
     Ok(state)
 }
@@ -690,7 +1180,12 @@ async fn load_channel_route_state(config: &Config, channel_id: Uuid) -> Result<R
             "REQ",
             ROUTE_SUBSCRIPTION_ID,
             Filter::new()
-                .kinds([Kind::Custom(9), Kind::EventDeletion, Kind::Custom(9005),])
+                .kinds([
+                    Kind::Custom(9),
+                    Kind::Reaction,
+                    Kind::EventDeletion,
+                    Kind::Custom(9005),
+                ])
                 .author(config.bot_keys.public_key())
                 .since(since)
                 .custom_tags(SingleLetterTag::lowercase(Alphabet::H), [channel.as_str()])
@@ -731,6 +1226,7 @@ async fn load_channel_route_state(config: &Config, channel_id: Uuid) -> Result<R
 }
 
 fn record_route_event(state: &mut RouteState, channel_id: Uuid, event: &Event, bot: &PublicKey) {
+    record_judge_event(&mut state.judge_deliveries, event, bot);
     let Some(source_event_id) = routed_source_event_id(event, bot) else {
         return;
     };
@@ -1023,6 +1519,31 @@ fn required_env(name: &str) -> Result<String> {
     Ok(value)
 }
 
+fn env_bool(name: &str, default: bool) -> Result<bool> {
+    let Ok(value) = std::env::var(name) else {
+        return Ok(default);
+    };
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Ok(true),
+        "0" | "false" | "no" | "off" => Ok(false),
+        _ => bail!("{name} must be true or false"),
+    }
+}
+
+fn env_u64(name: &str, default: u64) -> Result<u64> {
+    let value = match std::env::var(name) {
+        Ok(value) => value
+            .parse::<u64>()
+            .with_context(|| format!("{name} must be an integer"))?,
+        Err(std::env::VarError::NotPresent) => default,
+        Err(error) => return Err(error).with_context(|| format!("{name} is invalid")),
+    };
+    if value == 0 {
+        bail!("{name} must be greater than zero");
+    }
+    Ok(value)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1241,6 +1762,7 @@ mod tests {
             owner_auth_tag: None,
             owner_pubkeys: vec![fixture.owner.public_key()],
             picture_url: None,
+            judge: None,
         };
         let event = config
             .sign(
@@ -1521,5 +2043,111 @@ mod tests {
             &fixture.bot.public_key(),
         )
         .is_none());
+    }
+
+    #[test]
+    fn judge_verdict_parser_accepts_consistent_pass_and_fail_results() {
+        assert_eq!(
+            parse_judge_verdict(r#"{"pass":true,"failures":[]}"#).unwrap(),
+            JudgeVerdict {
+                pass: true,
+                failures: vec![],
+            }
+        );
+        assert_eq!(
+            parse_judge_verdict(
+                r#"{"pass":false,"failures":[{"rule":"complete_message","issue":"ends after a colon"}]}"#,
+            )
+            .unwrap(),
+            JudgeVerdict {
+                pass: false,
+                failures: vec![JudgeFailure {
+                    rule: COMPLETE_MESSAGE_RULE.to_string(),
+                    issue: "ends after a colon".to_string(),
+                }],
+            }
+        );
+    }
+
+    #[test]
+    fn judge_verdict_parser_rejects_prose_and_inconsistent_results() {
+        assert!(parse_judge_verdict("Looks good").is_err());
+        assert!(parse_judge_verdict(
+            r#"{"pass":true,"failures":[{"rule":"complete_message","issue":"cut off"}]}"#,
+        )
+        .is_err());
+        assert!(parse_judge_verdict(r#"{"pass":false,"failures":[]}"#).is_err());
+    }
+
+    #[test]
+    fn fail_delivery_is_complete_only_after_reaction_and_critique() {
+        let fixture = Fixture::new();
+        let verdict = JudgeVerdict {
+            pass: false,
+            failures: vec![JudgeFailure {
+                rule: COMPLETE_MESSAGE_RULE.to_string(),
+                issue: "ends abruptly".to_string(),
+            }],
+        };
+        let reaction = build_judge_reaction(fixture.channel, &fixture.agent_reply, &verdict)
+            .unwrap()
+            .sign_with_keys(&fixture.bot)
+            .unwrap();
+        let critique = build_judge_critique(
+            fixture.channel,
+            &fixture.agent_reply,
+            &verdict,
+            &fixture.agent.public_key().to_hex(),
+            "slopd-codex",
+        )
+        .unwrap()
+        .sign_with_keys(&fixture.bot)
+        .unwrap();
+        let mut deliveries = HashMap::new();
+
+        assert_eq!(reaction.kind, Kind::Reaction);
+        assert_eq!(
+            unique_event_tag_value(&reaction, JUDGED_SOURCE_TAG),
+            Some(fixture.agent_reply.id.to_hex().as_str())
+        );
+        assert!(unique_event_tag_value(&reaction, JUDGE_RESULT_TAG)
+            .and_then(|value| parse_judge_verdict(value).ok())
+            .is_some());
+        record_judge_event(&mut deliveries, &reaction, &fixture.bot.public_key());
+        assert!(!deliveries[&fixture.agent_reply.id].complete());
+        record_judge_event(&mut deliveries, &critique, &fixture.bot.public_key());
+        assert!(deliveries[&fixture.agent_reply.id].complete());
+        assert_eq!(reaction.content, "👎");
+        assert!(event_mentions(&critique, &fixture.agent.public_key()));
+        let relation = parse_thread_relation(&critique).unwrap();
+        assert_eq!(relation.parent_event_id, fixture.agent_reply.id);
+    }
+
+    #[test]
+    fn pass_delivery_needs_only_the_thumbs_up_reaction() {
+        let fixture = Fixture::new();
+        let verdict = JudgeVerdict {
+            pass: true,
+            failures: vec![],
+        };
+        let reaction = build_judge_reaction(fixture.channel, &fixture.agent_reply, &verdict)
+            .unwrap()
+            .sign_with_keys(&fixture.bot)
+            .unwrap();
+        let mut deliveries = HashMap::new();
+
+        assert_eq!(reaction.kind, Kind::Reaction);
+        assert_eq!(reaction.pubkey, fixture.bot.public_key());
+        assert_eq!(
+            unique_event_tag_value(&reaction, JUDGED_SOURCE_TAG)
+                .and_then(|value| EventId::from_hex(value).ok()),
+            Some(fixture.agent_reply.id)
+        );
+        assert!(unique_event_tag_value(&reaction, JUDGE_RESULT_TAG)
+            .and_then(|value| parse_judge_verdict(value).ok())
+            .is_some());
+        record_judge_event(&mut deliveries, &reaction, &fixture.bot.public_key());
+        assert!(deliveries[&fixture.agent_reply.id].complete());
+        assert_eq!(reaction.content, "👍");
     }
 }

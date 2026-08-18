@@ -203,6 +203,7 @@ pub struct AcpClient {
     /// deltas. Both goose and buzz-agent emit this notification; goose gates
     /// on client capability advertisement, buzz-agent emits unconditionally.
     usage_session: Option<String>,
+    captured_agent_message: Option<(String, String)>,
 }
 
 #[derive(Clone, Debug)]
@@ -242,6 +243,7 @@ impl Clone for AcpClient {
             active_run_id: None,
             steer_rx: None,
             usage_session: None,
+            captured_agent_message: None,
         }
     }
 }
@@ -816,6 +818,7 @@ impl AcpClient {
             active_run_id: None,
             steer_rx: None,
             usage_session: None,
+            captured_agent_message: None,
         })
     }
 
@@ -1106,6 +1109,25 @@ impl AcpClient {
             }
         }
         self.parse_stop_reason(&result?)
+    }
+
+    pub(crate) async fn session_prompt_capture_with_idle_timeout(
+        &mut self,
+        session_id: &str,
+        prompt: &str,
+        idle_timeout: std::time::Duration,
+        max_duration: std::time::Duration,
+    ) -> Result<(StopReason, String), AcpError> {
+        self.captured_agent_message = Some((session_id.to_string(), String::new()));
+        let result = self
+            .session_prompt_with_idle_timeout(session_id, prompt, idle_timeout, max_duration)
+            .await;
+        let text = self
+            .captured_agent_message
+            .take()
+            .map(|(_, text)| text)
+            .unwrap_or_default();
+        result.map(|reason| (reason, text))
     }
 
     /// Send a `session/cancel` **notification** (no `id` field, no response expected).
@@ -1952,6 +1974,14 @@ impl AcpClient {
         match update_type {
             "agent_message_chunk" => {
                 if let Some(text) = update["content"]["text"].as_str() {
+                    if let (Some(session_id), Some((captured_session, captured))) = (
+                        msg["params"]["sessionId"].as_str(),
+                        self.captured_agent_message.as_mut(),
+                    ) {
+                        if session_id == captured_session {
+                            captured.push_str(text);
+                        }
+                    }
                     tracing::info!(target: "acp::stream", "{text}");
                 }
                 false
@@ -3399,6 +3429,26 @@ mod tests {
             .await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap()["stopReason"].as_str(), Some("end_turn"));
+    }
+
+    #[tokio::test]
+    async fn prompt_capture_collects_only_the_target_sessions_message_chunks() {
+        let script = r#"
+            IFS= read -r _prompt
+            printf '%s\n' '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"session-a","update":{"sessionUpdate":"agent_message_chunk","content":{"text":"hello "}}}}'
+            printf '%s\n' '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"session-b","update":{"sessionUpdate":"agent_message_chunk","content":{"text":"noise"}}}}'
+            printf '%s\n' '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"session-a","update":{"sessionUpdate":"agent_message_chunk","content":{"text":"world"}}}}'
+            printf '%s\n' '{"jsonrpc":"2.0","id":0,"result":{"stopReason":"end_turn"}}'
+        "#;
+        let mut client = spawn_script(script).await;
+        let timeout = std::time::Duration::from_secs(2);
+        let (reason, text) = client
+            .session_prompt_capture_with_idle_timeout("session-a", "judge", timeout, timeout)
+            .await
+            .expect("captured prompt should complete");
+
+        assert_eq!(reason, StopReason::EndTurn);
+        assert_eq!(text, "hello world");
     }
 
     #[tokio::test]

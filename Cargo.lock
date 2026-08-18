@@ -9609,6 +9609,7 @@ name = "thread-mention-bot"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "buzz-acp",
  "buzz-sdk",
  "buzz-ws-client",
  "nostr",

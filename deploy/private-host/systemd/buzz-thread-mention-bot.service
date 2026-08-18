@@ -14,6 +14,7 @@ EnvironmentFile=%h/.config/buzz-thread-mention-bot/public.env
 EnvironmentFile=-%h/.config/buzz-thread-mention-bot/auth.env
 EnvironmentFile=-%h/.config/buzz-thread-mention-bot/avatar.env
 EnvironmentFile=-%h/.config/buzz-thread-mention-bot/config.env
+EnvironmentFile=-%h/.config/buzz-thread-mention-bot/judge.env
 ExecStart=%h/.local/libexec/buzz-thread-mention-bot
 Restart=always
 RestartSec=3

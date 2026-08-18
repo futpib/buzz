@@ -10,6 +10,7 @@ identity_file="${config_dir}/identity.env"
 auth_file="${config_dir}/auth.env"
 public_file="${config_dir}/public.env"
 avatar_file="${config_dir}/avatar.env"
+judge_file="${config_dir}/judge.env"
 unit_dir="${HOME}/.config/systemd/user"
 libexec_dir="${HOME}/.local/libexec"
 binary="${libexec_dir}/buzz-thread-mention-bot"
@@ -17,6 +18,7 @@ avatar_source="${script_dir}/agent-avatars/thread-mention-bot.png"
 unit="buzz-thread-mention-bot.service"
 sign=false
 restart=false
+judge=false
 declare -a channels=()
 
 usage() {
@@ -31,6 +33,7 @@ ACP agent services. Optional --sign upgrades the bot to a same-owner identity.
   --channel UUID Add the bot to a private channel while the owner key is loaded.
                  May be repeated and requires --sign.
   --restart      Enable and restart the installed user service.
+  --judge        Enable the single-session ACP message judge.
   -h, --help     Show this help.
 EOF
 }
@@ -50,6 +53,9 @@ while (($# > 0)); do
       ;;
     --restart)
       restart=true
+      ;;
+    --judge)
+      judge=true
       ;;
     -h | --help)
       usage
@@ -147,6 +153,28 @@ printf '%s\n' \
   >"${temporary_public}"
 chmod 600 "${temporary_public}"
 mv -f "${temporary_public}" "${public_file}"
+
+if [[ "${judge}" == true ]]; then
+  : "${SLOPD_ACP_BIN:?SLOPD_ACP_BIN is required for --judge}"
+  slopd_socket="${SLOPD_SOCKET:-${XDG_RUNTIME_DIR:?XDG_RUNTIME_DIR is required}/slopd-buzz-agent/slopd.sock}"
+  judge_account="${BUZZ_JUDGE_AGENT_ACCOUNT:-codex}"
+  judge_backend="${BUZZ_JUDGE_AGENT_BACKEND:-codex}"
+  for value in "${SLOPD_ACP_BIN}" "${slopd_socket}" "${judge_account}" "${judge_backend}"; do
+    if [[ "${value}" == *","* || "${value}" == *"'"* || "${value}" == *$'\n'* ]]; then
+      echo "Judge configuration values must not contain commas, quotes, or newlines" >&2
+      exit 1
+    fi
+  done
+  temporary_judge="$(mktemp "${config_dir}/.judge.env.XXXXXX")"
+  printf '%s\n' \
+    'BUZZ_JUDGE_ENABLED=true' \
+    "BUZZ_JUDGE_AGENT_COMMAND='${SLOPD_ACP_BIN}'" \
+    "BUZZ_JUDGE_AGENT_ARGS='--socket,${slopd_socket},--account,${judge_account},--backend,${judge_backend}'" \
+    >"${temporary_judge}"
+  chmod 600 "${temporary_judge}"
+  mv -f "${temporary_judge}" "${judge_file}"
+  echo "Enabled the ACP message judge with ${judge_backend}/${judge_account}"
+fi
 
 relay_url="${BUZZ_RELAY_URL:-}"
 buzz_cli="${BUZZ_CLI_BIN:-}"

@@ -5,6 +5,7 @@ mod config;
 mod engram_fetch;
 mod filter;
 mod observer;
+pub mod persistent_session;
 mod pool;
 mod pool_lifecycle;
 mod queue;
@@ -12,6 +13,7 @@ mod relay;
 mod setup_mode;
 mod usage;
 
+pub use acp::AcpError;
 pub use usage::TurnUsage;
 
 use std::collections::{HashMap, HashSet, VecDeque};
