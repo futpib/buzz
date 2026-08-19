@@ -34,7 +34,7 @@ const BOT_ABOUT: &str = "Routes two-party thread replies and applies ACP message
 const RECONNECT_DELAY: Duration = Duration::from_secs(3);
 const REACTION_POLL_INTERVAL: Duration = Duration::from_secs(2);
 const CHANNEL_REFRESH_INTERVAL: Duration = Duration::from_secs(300);
-const LIVE_REPLAY_WINDOW_SECS: u64 = 300;
+const LIVE_REPLAY_WINDOW_SECS: u64 = 600;
 const ROUTE_ACK_WINDOW_SECS: u64 = 3_600;
 const RECEIVE_TIMEOUT: Duration = Duration::from_secs(60);
 const THREAD_QUERY_TIMEOUT: Duration = Duration::from_secs(15);
@@ -157,11 +157,19 @@ struct PendingRoute {
     created_at: u64,
 }
 
+#[derive(Clone)]
+struct LastAgent {
+    pubkey: PublicKey,
+    created_at: u64,
+    event_id: EventId,
+}
+
 #[derive(Default)]
 struct RouteState {
     pending: HashMap<EventId, PendingRoute>,
     handled_sources: HashSet<EventId>,
     judge_deliveries: HashMap<EventId, JudgeDelivery>,
+    last_agents: HashMap<Uuid, LastAgent>,
 }
 
 #[derive(Clone, Default)]
@@ -470,6 +478,12 @@ async fn listen_once(
                     subscription_id,
                     event,
                 }) if subscription_id.starts_with(LIVE_SUBSCRIPTION_ID) => {
+                    record_last_agent(
+                        &mut routes,
+                        &event,
+                        &config.owner_pubkeys,
+                        &config.bot_keys.public_key(),
+                    );
                     if let Some(judge_tx) = judge_tx {
                         if let Err(error) = maybe_enqueue_judge(
                             config,
@@ -569,9 +583,6 @@ async fn maybe_route(
     if candidate.kind != Kind::Custom(9) || !config.owner_pubkeys.contains(&candidate.pubkey) {
         return Ok(());
     }
-    let Some(relation) = parse_thread_relation(candidate) else {
-        return Ok(());
-    };
     if routes.handled_sources.contains(&candidate.id) {
         return Ok(());
     }
@@ -579,14 +590,29 @@ async fn maybe_route(
         .and_then(|value| Uuid::parse_str(value).ok())
         .filter(|channel| config.channel_ids.is_empty() || config.channel_ids.contains(channel))
         .ok_or_else(|| anyhow!("candidate has no eligible channel tag"))?;
-    let thread = load_thread(config, channel_id, relation.root_event_id).await?;
-    let Some(agent) = route_target(
-        &thread,
-        candidate,
-        &config.owner_pubkeys,
-        &config.bot_keys.public_key(),
-    ) else {
-        return Ok(());
+    let relation = parse_thread_relation(candidate);
+    let root_event_id = relation.map_or(candidate.id, |relation| relation.root_event_id);
+    let agent = if let Some(relation) = relation {
+        let thread = load_thread(config, channel_id, relation.root_event_id).await?;
+        let Some(agent) = route_target(
+            &thread,
+            candidate,
+            &config.owner_pubkeys,
+            &config.bot_keys.public_key(),
+        ) else {
+            return Ok(());
+        };
+        agent
+    } else {
+        let Some(agent) = top_level_route_target(
+            candidate,
+            &config.owner_pubkeys,
+            &config.bot_keys.public_key(),
+            routes.last_agents.get(&channel_id),
+        ) else {
+            return Ok(());
+        };
+        agent
     };
 
     let agent_hex = agent.to_hex();
@@ -598,7 +624,7 @@ async fn maybe_route(
         });
     let event = config.sign(build_routed_message(
         channel_id,
-        relation.root_event_id,
+        root_event_id,
         candidate,
         &agent_hex,
         &label,
@@ -1158,6 +1184,7 @@ async fn load_route_state(config: &Config, channel_ids: &[Uuid]) -> Result<Route
         state
             .judge_deliveries
             .extend(channel_state.judge_deliveries);
+        state.last_agents.extend(channel_state.last_agents);
     }
     Ok(state)
 }
@@ -1189,6 +1216,10 @@ async fn load_channel_route_state(config: &Config, channel_id: Uuid) -> Result<R
                 .author(config.bot_keys.public_key())
                 .since(since)
                 .custom_tags(SingleLetterTag::lowercase(Alphabet::H), [channel.as_str()])
+                .limit(MAX_THREAD_EVENTS),
+            Filter::new()
+                .kind(Kind::Custom(9))
+                .custom_tags(SingleLetterTag::lowercase(Alphabet::H), [channel.as_str()])
                 .limit(MAX_THREAD_EVENTS)
         ]))
         .await?;
@@ -1201,6 +1232,12 @@ async fn load_channel_route_state(config: &Config, channel_id: Uuid) -> Result<R
             } if subscription_id == ROUTE_SUBSCRIPTION_ID => {
                 event.verify().context("invalid routed message signature")?;
                 if event_channel(&event) == Some(channel.as_str()) {
+                    record_last_agent(
+                        &mut state,
+                        &event,
+                        &config.owner_pubkeys,
+                        &config.bot_keys.public_key(),
+                    );
                     record_route_event(
                         &mut state,
                         channel_id,
@@ -1242,6 +1279,33 @@ fn record_route_event(state: &mut RouteState, channel_id: Uuid, event: &Event, b
             },
         );
     }
+}
+
+fn record_last_agent(state: &mut RouteState, event: &Event, owners: &[PublicKey], bot: &PublicKey) {
+    if event.kind != Kind::Custom(9)
+        || event.pubkey == *bot
+        || !owners.iter().any(|owner| is_same_owner_agent(event, owner))
+    {
+        return;
+    }
+    let Some(channel_id) = event_channel(event).and_then(|value| Uuid::parse_str(value).ok())
+    else {
+        return;
+    };
+    let created_at = event.created_at.as_secs();
+    if state.last_agents.get(&channel_id).is_some_and(|last| {
+        (last.created_at, last.event_id.to_hex()) >= (created_at, event.id.to_hex())
+    }) {
+        return;
+    }
+    state.last_agents.insert(
+        channel_id,
+        LastAgent {
+            pubkey: event.pubkey,
+            created_at,
+            event_id: event.id,
+        },
+    );
 }
 
 async fn load_reaction(
@@ -1453,6 +1517,23 @@ fn route_target(
         return None;
     }
     Some(agent)
+}
+
+fn top_level_route_target(
+    candidate: &Event,
+    owners: &[PublicKey],
+    bot: &PublicKey,
+    last_agent: Option<&LastAgent>,
+) -> Option<PublicKey> {
+    if candidate.kind != Kind::Custom(9)
+        || !owners.contains(&candidate.pubkey)
+        || parse_thread_relation(candidate).is_some()
+        || event_has_mention(candidate)
+    {
+        return None;
+    }
+    let agent = last_agent?.pubkey;
+    (!owners.contains(&agent) && agent != *bot).then_some(agent)
 }
 
 fn is_same_owner_agent(event: &Event, owner: &PublicKey) -> bool {
@@ -2033,16 +2114,88 @@ mod tests {
     }
 
     #[test]
-    fn skips_top_level_owner_message() {
+    fn routes_top_level_owner_message_to_last_agent() {
         let fixture = Fixture::new();
         let candidate = message(&fixture.owner, None, fixture.channel, None, &[]);
-        assert!(route_target(
-            &[candidate.clone(), fixture.agent_reply],
+        let last_agent = LastAgent {
+            pubkey: fixture.agent.public_key(),
+            created_at: fixture.agent_reply.created_at.as_secs(),
+            event_id: fixture.agent_reply.id,
+        };
+        assert_eq!(
+            top_level_route_target(
+                &candidate,
+                &[fixture.owner.public_key()],
+                &fixture.bot.public_key(),
+                Some(&last_agent),
+            ),
+            Some(fixture.agent.public_key())
+        );
+    }
+
+    #[test]
+    fn skips_top_level_owner_message_without_last_agent_or_with_mention() {
+        let fixture = Fixture::new();
+        let candidate = message(&fixture.owner, None, fixture.channel, None, &[]);
+        assert!(top_level_route_target(
             &candidate,
             &[fixture.owner.public_key()],
             &fixture.bot.public_key(),
+            None,
         )
         .is_none());
+        let agent_hex = fixture.agent.public_key().to_hex();
+        let mentioned = message(&fixture.owner, None, fixture.channel, None, &[&agent_hex]);
+        let last_agent = LastAgent {
+            pubkey: fixture.agent.public_key(),
+            created_at: fixture.agent_reply.created_at.as_secs(),
+            event_id: fixture.agent_reply.id,
+        };
+        assert!(top_level_route_target(
+            &mentioned,
+            &[fixture.owner.public_key()],
+            &fixture.bot.public_key(),
+            Some(&last_agent),
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn remembers_newest_authenticated_agent_per_channel() {
+        let fixture = Fixture::new();
+        let second_agent = Keys::generate();
+        let second_auth = auth_tag(&fixture.owner, &second_agent);
+        let older = buzz_sdk::build_message(fixture.channel, "older", None, &[], false, &[])
+            .unwrap()
+            .tag(second_auth)
+            .custom_created_at(Timestamp::from_secs(10))
+            .sign_with_keys(&second_agent)
+            .unwrap();
+        let newer = buzz_sdk::build_message(fixture.channel, "newer", None, &[], false, &[])
+            .unwrap()
+            .tag(auth_tag(&fixture.owner, &fixture.agent))
+            .custom_created_at(Timestamp::from_secs(20))
+            .sign_with_keys(&fixture.agent)
+            .unwrap();
+        let mut state = RouteState::default();
+
+        record_last_agent(
+            &mut state,
+            &newer,
+            &[fixture.owner.public_key()],
+            &fixture.bot.public_key(),
+        );
+        record_last_agent(
+            &mut state,
+            &older,
+            &[fixture.owner.public_key()],
+            &fixture.bot.public_key(),
+        );
+
+        assert_eq!(
+            state.last_agents[&fixture.channel].pubkey,
+            fixture.agent.public_key()
+        );
     }
 
     #[test]
