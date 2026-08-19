@@ -107,6 +107,7 @@ agent_units=(
   buzz-slopd-agent.service
   buzz-slopd-opencode-agent.service
   buzz-slopd-claude-agent.service
+  buzz-slopd-grok-agent.service
   buzz-zai-agent.service
 )
 for agent_unit in "${agent_units[@]}"; do
