@@ -61,7 +61,7 @@ into logs.
 
 ## Always-on agents
 
-The three Buzz ACP bridges are installed from the tracked launcher and systemd
+The four Buzz ACP bridges are installed from the tracked launcher and systemd
 units in this directory. Their shared host-specific settings live outside Git
 at `~/.config/buzz-slopd-agent/bridge.env`; agent identities remain in their
 respective `~/.config/buzz-slopd*-agent/` directories.
@@ -82,7 +82,7 @@ The bridges intentionally use the normal Buzz base prompt and NIP-AE memory.
 Do not add `--no-base-prompt` or `--no-memory`; those switches are for isolated
 diagnostics, not the permanent agents.
 
-To authorize the three remote agents with the human Buzz owner key, run:
+To authorize the four remote agents with the human Buzz owner key, run:
 
 ```bash
 ~/.local/libexec/sign-slopd-agents --restart
@@ -97,7 +97,7 @@ When `--channel` is used, it is briefly passed to the Buzz CLI in the child
 process environment so the owner can sign the membership event; it is still
 never written to disk or put in a process argument.
 
-The agents' and routing bot's 512px profile images are kept in
+Available agent and routing bot 512px profile images are kept in
 `agent-avatars/`. The agent images are the unmodified official Codex and Claude
 Code Marketplace icons and OpenCode's production desktop icon, resized to a
 common canvas. The thread mention bot uses original artwork. Their published
@@ -105,11 +105,12 @@ kind-0 profiles point at authenticated Blossom copies on this Buzz relay.
 
 ## Deterministic thread mention bot
 
-The tracked thread mention bot handles one non-AI routing rule: in a thread
+The tracked thread mention bot handles deterministic routing: in a thread
 authored only by the human owner and one owner-attested agent, an untagged owner
 reply gets a sibling bot reply carrying the agent's real `p` tag and friendly
-`@name`. It ignores top-level messages and fails closed for any additional or
-unverified author.
+`@name`. An untagged top-level owner message targets the last owner-attested
+agent active in that channel. It fails closed for explicit recipients,
+additional thread authors, and unverified agents.
 
 Install it with a dedicated identity. The installer adds that exact identity
 to the existing ACP agents' response allowlists, keeping the human owner

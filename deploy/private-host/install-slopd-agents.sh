@@ -4,6 +4,7 @@ set -euo pipefail
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "${script_dir}/../.." && pwd)"
 config_dir="${HOME}/.config/buzz-slopd-agent"
+grok_config_dir="${HOME}/.config/buzz-slopd-grok-agent"
 machine_config_dir="${HOME}/.config/buzz-machine"
 zai_config_dir="${HOME}/.config/buzz-zai-agent"
 unit_dir="${HOME}/.config/systemd/user"
@@ -41,6 +42,17 @@ if [[ ! -f "${machine_config_dir}/identity.pem" ]]; then
   mv "${temporary_identity}" "${machine_config_dir}/identity.pem"
   echo "Created ${machine_config_dir}/identity.pem"
 fi
+install -d -m 700 "${grok_config_dir}"
+if [[ ! -f "${grok_config_dir}/identity.pem" ]]; then
+  temporary_identity="$(mktemp "${grok_config_dir}/.identity.pem.XXXXXX")"
+  openssl genpkey -algorithm EC \
+    -pkeyopt ec_paramgen_curve:secp256k1 \
+    -out "${temporary_identity}" \
+    2>/dev/null
+  chmod 600 "${temporary_identity}"
+  mv "${temporary_identity}" "${grok_config_dir}/identity.pem"
+  echo "Created ${grok_config_dir}/identity.pem"
+fi
 machine_public_key="$(
   BUZZ_SLOPD_AGENT_IDENTITY_FORMAT=pem \
     BUZZ_SLOPD_AGENT_IDENTITY_FILE="${machine_config_dir}/identity.pem" \
@@ -70,6 +82,7 @@ for unit in \
   buzz-slopd-agent.service \
   buzz-slopd-opencode-agent.service \
   buzz-slopd-claude-agent.service \
+  buzz-slopd-grok-agent.service \
   buzz-zai-agent.service
 do
   install -Dm644 "${script_dir}/systemd/${unit}" "${unit_dir}/${unit}"
@@ -82,6 +95,7 @@ if [[ "${1:-}" == "--restart" ]]; then
     buzz-slopd-agent.service \
     buzz-slopd-opencode-agent.service \
     buzz-slopd-claude-agent.service \
+    buzz-slopd-grok-agent.service \
     buzz-zai-agent.service
 elif [[ "${1:-}" == "--restart-zai" ]]; then
   systemctl --user restart buzz-zai-agent.service

@@ -9,6 +9,7 @@ for unit in \
   buzz-slopd-agent.service \
   buzz-slopd-opencode-agent.service \
   buzz-slopd-claude-agent.service \
+  buzz-slopd-grok-agent.service \
   buzz-zai-agent.service
 do
   unit_path="${deployment_dir}/systemd/${unit}"
@@ -42,6 +43,7 @@ declare -A expected_auth_files=(
   [buzz-slopd-agent.service]=auth-codex.env
   [buzz-slopd-opencode-agent.service]=auth-opencode.env
   [buzz-slopd-claude-agent.service]=auth-claude.env
+  [buzz-slopd-grok-agent.service]=auth-grok.env
   [buzz-zai-agent.service]=auth-zai.env
 )
 for unit in "${!expected_auth_files[@]}"; do
@@ -211,9 +213,10 @@ printf '%s\n' "${test_owner_nsec}" |
     BUZZ_AGENT_CODEX_PUBKEY="${test_agent_pubkey}" \
     BUZZ_AGENT_OPENCODE_PUBKEY="${test_agent_pubkey}" \
     BUZZ_AGENT_CLAUDE_PUBKEY="${test_agent_pubkey}" \
+    BUZZ_AGENT_GROK_PUBKEY="${test_agent_pubkey}" \
     "${installed_libexec}/sign-slopd-agents" --nsec-stdin
 
-for account in codex opencode claude; do
+for account in codex opencode claude grok; do
   auth_file="${auth_config_dir}/auth-${account}.env"
   if [[ "$(stat -c '%a' "${auth_file}")" != 600 ]]; then
     echo "${auth_file} is not mode 0600" >&2
@@ -265,6 +268,7 @@ if printf '%064d\n' 2 |
     BUZZ_AGENT_CODEX_PUBKEY="${test_agent_pubkey}" \
     BUZZ_AGENT_OPENCODE_PUBKEY="${test_agent_pubkey}" \
     BUZZ_AGENT_CLAUDE_PUBKEY="${test_agent_pubkey}" \
+    BUZZ_AGENT_GROK_PUBKEY="${test_agent_pubkey}" \
     "${installed_libexec}/sign-slopd-agents" --nsec-stdin 2>/dev/null; then
   echo "signing accepted an nsec that does not match BUZZ_AGENT_OWNER" >&2
   exit 1

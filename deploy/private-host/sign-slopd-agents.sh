@@ -28,8 +28,8 @@ Prompts without echo for the Buzz owner's nsec, verifies that it matches
 BUZZ_AGENT_OWNER, and writes one NIP-OA auth-tag environment file per agent.
 The nsec is never written to disk or passed as a command-line argument.
 
-  --agent NAME    Sign only this agent (codex, opencode, claude, or zai).
-                  May be repeated. The default is the three slopd agents.
+  --agent NAME    Sign only this agent (codex, opencode, claude, grok, or zai).
+                  May be repeated. The default is the four slopd agents.
   --channel UUID  Add the selected agent to this channel with role bot.
                   May be repeated and requires exactly one --agent.
   --profile NAME  Publish this display name for the selected agent.
@@ -109,11 +109,11 @@ if [[ -n "${owner_pem}" && "${read_from_stdin}" == true ]]; then
 fi
 
 if ((${#requested_accounts[@]} == 0)); then
-  requested_accounts=(codex opencode claude)
+  requested_accounts=(codex opencode claude grok)
 fi
 for account in "${requested_accounts[@]}"; do
   case "${account}" in
-    codex | opencode | claude | zai) ;;
+    codex | opencode | claude | grok | zai) ;;
     *)
       echo "Unsupported agent: ${account}" >&2
       exit 2
@@ -179,7 +179,7 @@ agent_public_key() {
         BUZZ_SLOPD_AGENT_IDENTITY_FILE="${BUZZ_AGENT_CODEX_IDENTITY:-${HOME}/.config/buzz-slopd-agent/identity.txt}" \
         "${launcher}" --public-key
       ;;
-    opencode | claude)
+    opencode | claude | grok)
       local identity_override="BUZZ_AGENT_${account^^}_IDENTITY"
       BUZZ_SLOPD_AGENT_IDENTITY_FORMAT=pem \
         BUZZ_SLOPD_AGENT_IDENTITY_FILE="${!identity_override:-${HOME}/.config/buzz-slopd-${account}-agent/identity.pem}" \
@@ -311,6 +311,7 @@ if [[ "${restart}" == true ]]; then
       codex) services+=(buzz-slopd-agent.service) ;;
       opencode) services+=(buzz-slopd-opencode-agent.service) ;;
       claude) services+=(buzz-slopd-claude-agent.service) ;;
+      grok) services+=(buzz-slopd-grok-agent.service) ;;
       zai) services+=(buzz-zai-agent.service) ;;
     esac
   done

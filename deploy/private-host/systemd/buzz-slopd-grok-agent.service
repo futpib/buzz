@@ -1,0 +1,28 @@
+[Unit]
+Description=Always-on Buzz ACP bridge to the isolated slopd Grok account
+Documentation=https://github.com/block/buzz
+Wants=network-online.target
+After=network-online.target slopd-buzz-agent.service
+Requires=slopd-buzz-agent.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+WorkingDirectory=%h
+Environment=RUST_LOG=buzz_acp=info,info
+EnvironmentFile=%h/.config/buzz-slopd-agent/bridge.env
+EnvironmentFile=-%h/.config/buzz-slopd-agent/auth-grok.env
+EnvironmentFile=-%h/.config/buzz-thread-mention-bot/public.env
+Environment=BUZZ_SLOPD_AGENT_IDENTITY_FORMAT=pem
+Environment=BUZZ_SLOPD_AGENT_IDENTITY_FILE=%h/.config/buzz-slopd-grok-agent/identity.pem
+Environment=BUZZ_AGENT_ACCOUNT=grok
+Environment=BUZZ_AGENT_BACKEND=grok
+Environment="BUZZ_AGENT_SESSION_TITLE=slopd grok"
+ExecStart=%h/.local/libexec/buzz-slopd-agent
+Restart=always
+RestartSec=5
+KillMode=mixed
+TimeoutStopSec=30
+
+[Install]
+WantedBy=default.target
