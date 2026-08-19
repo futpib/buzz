@@ -99,8 +99,8 @@ never written to disk or put in a process argument.
 
 Available agent and routing bot 512px profile images are kept in
 `agent-avatars/`. They use the official Codex and Claude Code Marketplace
-icons, OpenCode's production desktop icon, and the official SpaceXAI symbol
-linked by Grok Build, resized on a common canvas. The thread mention bot uses
+icons, OpenCode's production desktop icon, and Grok's official product icon,
+resized on a common canvas. The thread mention bot uses
 original artwork. Their published kind-0 profiles point at authenticated
 Blossom copies on this Buzz relay.
 
