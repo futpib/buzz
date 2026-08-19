@@ -23,6 +23,12 @@ do
   fi
 done
 
+if ! rg -q -F 'EnvironmentFile=-%h/.config/buzz-thread-mention-bot/emoji-reactor.env' \
+  "${deployment_dir}/systemd/buzz-thread-mention-bot.service"; then
+  echo "thread mention bot service does not load emoji reactor configuration" >&2
+  exit 1
+fi
+
 if ! rg -q -F 'Environment=BUZZ_AGENT_COMMAND=/usr/bin/opencode' \
   "${deployment_dir}/systemd/buzz-zai-agent.service"; then
   echo "buzz-zai-agent.service does not use OpenCode directly" >&2

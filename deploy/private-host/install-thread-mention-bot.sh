@@ -11,6 +11,7 @@ auth_file="${config_dir}/auth.env"
 public_file="${config_dir}/public.env"
 avatar_file="${config_dir}/avatar.env"
 judge_file="${config_dir}/judge.env"
+emoji_file="${config_dir}/emoji-reactor.env"
 unit_dir="${HOME}/.config/systemd/user"
 libexec_dir="${HOME}/.local/libexec"
 binary="${libexec_dir}/buzz-thread-mention-bot"
@@ -19,13 +20,14 @@ unit="buzz-thread-mention-bot.service"
 sign=false
 restart=false
 judge=false
+emoji_reactor=false
 declare -a channels=()
 
 usage() {
   cat <<'EOF'
 Usage: install-thread-mention-bot.sh [OPTIONS]
 
-Build and install the deterministic two-party thread mention bot and its
+Build and install the thread routing and message-quality bot and its
 tracked systemd user service. Standalone mode is allowlisted in the installed
 ACP agent services. Optional --sign upgrades the bot to a same-owner identity.
 
@@ -34,6 +36,8 @@ ACP agent services. Optional --sign upgrades the bot to a same-owner identity.
                  May be repeated and requires --sign.
   --restart      Enable and restart the installed user service.
   --judge        Enable the single-session ACP message judge.
+  --emoji-reactor
+                 React to each new top-level thread with an ACP-selected emoji.
   -h, --help     Show this help.
 EOF
 }
@@ -57,6 +61,9 @@ while (($# > 0)); do
     --judge)
       judge=true
       ;;
+    --emoji-reactor)
+      emoji_reactor=true
+      ;;
     -h | --help)
       usage
       exit 0
@@ -69,6 +76,11 @@ while (($# > 0)); do
   esac
   shift
 done
+
+if [[ "${emoji_reactor}" == true && "${judge}" != true && ! -r "${judge_file}" ]]; then
+  echo "--emoji-reactor requires --judge on first install" >&2
+  exit 2
+fi
 
 if ((${#channels[@]} > 0)) && [[ "${sign}" != true ]]; then
   echo "--channel requires --sign so the owner can authorize membership" >&2
@@ -174,6 +186,14 @@ if [[ "${judge}" == true ]]; then
   chmod 600 "${temporary_judge}"
   mv -f "${temporary_judge}" "${judge_file}"
   echo "Enabled the ACP message judge with ${judge_backend}/${judge_account}"
+fi
+
+if [[ "${emoji_reactor}" == true ]]; then
+  temporary_emoji="$(mktemp "${config_dir}/.emoji-reactor.env.XXXXXX")"
+  printf '%s\n' 'BUZZ_EMOJI_REACTOR_ENABLED=true' >"${temporary_emoji}"
+  chmod 600 "${temporary_emoji}"
+  mv -f "${temporary_emoji}" "${emoji_file}"
+  echo "Enabled ACP-selected reactions for top-level threads"
 fi
 
 relay_url="${BUZZ_RELAY_URL:-}"

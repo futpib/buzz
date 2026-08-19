@@ -104,7 +104,7 @@ linked by Grok Build, resized on a common canvas. The thread mention bot uses
 original artwork. Their published kind-0 profiles point at authenticated
 Blossom copies on this Buzz relay.
 
-## Deterministic thread mention bot
+## Thread routing and message-quality bot
 
 The tracked thread mention bot handles deterministic routing: in a thread
 authored only by the human owner and one owner-attested agent, an untagged owner
@@ -127,6 +127,9 @@ accessible channel and uses one channel-scoped live subscription per channel.
 Private channels must add it as a member; the optional
 `--sign --channel CHANNEL_UUID --restart` path prompts without echo and stores
 only the resulting NIP-OA tag. Subsequent code updates only need `--restart`.
+Pass `--judge --emoji-reactor` to enable the persistent delivery-completeness
+judge and a separate lazy ACP session that chooses one relevant reaction for
+each new top-level thread without a hardcoded emoji palette.
 
 The optional `buzz-zai-agent.service` uses the same launcher and identity
 plumbing but connects Buzz directly to `opencode acp`, without slopd. It pins

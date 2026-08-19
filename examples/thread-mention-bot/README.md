@@ -10,6 +10,12 @@ that tags the author agent and lists the failed rules. The initial rule checks
 only whether the delivered message appears complete, not whether it is correct
 or whether the task itself is finished.
 
+An optional emoji reactor runs a separate persistent ACP session. For each new
+top-level kind `9` message, it chooses one relevant reaction from the message's
+topic, intent, and tone. The choice is not restricted to a hardcoded set: any
+reaction content accepted by Buzz's 64-character NIP-25 builder can be used.
+Replies and the bot's own messages are ignored.
+
 ## Exact routing rule
 
 For each new kind `9` message authored by the configured owner, the bot:
@@ -61,6 +67,8 @@ export BUZZ_JUDGE_AGENT_ARGS=--flag,value
 export BUZZ_JUDGE_CWD=/workspace
 export BUZZ_JUDGE_IDLE_TIMEOUT=120
 export BUZZ_JUDGE_MAX_DURATION=600
+# Optional: use the same ACP configuration for top-level emoji reactions.
+export BUZZ_EMOJI_REACTOR_ENABLED=true
 
 cargo run -p thread-mention-bot
 ```
@@ -100,7 +108,7 @@ uploads the tracked bot avatar with that identity, and adds only that public
 key to each installed ACP agent's response allowlist:
 
 ```bash
-./deploy/private-host/install-thread-mention-bot.sh --judge --restart
+./deploy/private-host/install-thread-mention-bot.sh --judge --emoji-reactor --restart
 ```
 
 This standalone path needs no owner secret. Open channels require no
@@ -111,8 +119,9 @@ private channel. The owner key is passed to the signer over stdin and is not
 written to disk or placed in a process argument or environment variable.
 `--judge` writes a separate non-secret `judge.env` for a single slopd Codex ACP
 session. `BUZZ_JUDGE_AGENT_ACCOUNT` and `BUZZ_JUDGE_AGENT_BACKEND` can override
-the install-time `codex` defaults. Subsequent code updates need only `--restart`;
-the stable identity and judge configuration remain in
+the install-time `codex` defaults. `--emoji-reactor` adds a second lazy ACP
+session using that same vendor-independent command. Subsequent code updates
+need only `--restart`; the stable identity and judge configuration remain in
 the mode-0600 files under `~/.config/buzz-thread-mention-bot/`. When present,
 the shared `buzz-machine` identity is added to the owner allowlist automatically.
 

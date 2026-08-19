@@ -1,4 +1,4 @@
-//! Deterministically re-mention the sole agent in an owner/agent Buzz thread.
+//! Route owner messages, judge agent delivery, and react to new Buzz threads.
 
 use std::collections::{HashMap, HashSet};
 use std::io;
@@ -27,10 +27,12 @@ const PROFILE_SUBSCRIPTION_ID: &str = "thread-mention-profile";
 const ROUTED_SOURCE_TAG: &str = "thread-mention-for";
 const JUDGED_SOURCE_TAG: &str = "message-judge-for";
 const JUDGE_RESULT_TAG: &str = "message-judge-result";
+const EMOJI_SOURCE_TAG: &str = "emoji-reaction-for";
 const COMPLETE_MESSAGE_RULE: &str = "complete_message";
 const BOT_NAME: &str = "thread-mention-bot";
 const BOT_DISPLAY_NAME: &str = "Thread Mention Bot";
-const BOT_ABOUT: &str = "Routes two-party thread replies and applies ACP message-quality verdicts.";
+const BOT_ABOUT: &str =
+    "Routes thread replies, judges delivery completeness, and reacts to new topics.";
 const RECONNECT_DELAY: Duration = Duration::from_secs(3);
 const REACTION_POLL_INTERVAL: Duration = Duration::from_secs(2);
 const CHANNEL_REFRESH_INTERVAL: Duration = Duration::from_secs(300);
@@ -84,6 +86,14 @@ async fn main() -> Result<()> {
             "disabled"
         }
     );
+    eprintln!(
+        "emoji reactor: {}",
+        if config.emoji_reactor {
+            "enabled"
+        } else {
+            "disabled"
+        }
+    );
 
     let shutdown = tokio::signal::ctrl_c();
     tokio::pin!(shutdown);
@@ -113,11 +123,27 @@ async fn main() -> Result<()> {
         )));
         tx
     });
+    let emoji_tracker = Arc::new(Mutex::new(EmojiTracker::default()));
+    let emoji_tx = config.emoji_reactor.then(|| {
+        let (tx, rx) = mpsc::channel(JUDGE_QUEUE_SIZE);
+        drop(tokio::spawn(run_emoji_worker(
+            config.clone(),
+            Arc::clone(&emoji_tracker),
+            rx,
+        )));
+        tx
+    });
 
     loop {
         let result = tokio::select! {
             _ = &mut shutdown => return Ok(()),
-            result = listen_once(&config, judge_tx.as_ref(), Arc::clone(&judge_tracker)) => result,
+            result = listen_once(
+                &config,
+                judge_tx.as_ref(),
+                Arc::clone(&judge_tracker),
+                emoji_tx.as_ref(),
+                Arc::clone(&emoji_tracker),
+            ) => result,
         };
         if let Err(error) = result {
             eprintln!("relay listener stopped: {error:#}; reconnecting");
@@ -138,6 +164,7 @@ struct Config {
     owner_pubkeys: Vec<PublicKey>,
     picture_url: Option<String>,
     judge: Option<JudgeConfig>,
+    emoji_reactor: bool,
 }
 
 #[derive(Clone)]
@@ -169,6 +196,7 @@ struct RouteState {
     pending: HashMap<EventId, PendingRoute>,
     handled_sources: HashSet<EventId>,
     judge_deliveries: HashMap<EventId, JudgeDelivery>,
+    emoji_reactions: HashSet<EventId>,
     last_agents: HashMap<Uuid, LastAgent>,
 }
 
@@ -195,6 +223,18 @@ struct JudgeTracker {
 
 #[derive(Clone)]
 struct JudgeJob {
+    event: Event,
+    channel_id: Uuid,
+}
+
+#[derive(Default)]
+struct EmojiTracker {
+    reacted: HashSet<EventId>,
+    queued: HashSet<EventId>,
+}
+
+#[derive(Clone)]
+struct EmojiJob {
     event: Event,
     channel_id: Uuid,
 }
@@ -247,6 +287,10 @@ impl Config {
             }
         }
         let judge = JudgeConfig::from_env()?;
+        let emoji_reactor = env_bool("BUZZ_EMOJI_REACTOR_ENABLED", false)?;
+        if emoji_reactor && judge.is_none() {
+            bail!("BUZZ_EMOJI_REACTOR_ENABLED requires BUZZ_JUDGE_ENABLED");
+        }
         Ok(Self {
             relay_url,
             channel_ids,
@@ -257,6 +301,7 @@ impl Config {
                 .ok()
                 .filter(|value| !value.trim().is_empty()),
             judge,
+            emoji_reactor,
         })
     }
 
@@ -417,6 +462,8 @@ async fn listen_once(
     config: &Config,
     judge_tx: Option<&mpsc::Sender<JudgeJob>>,
     judge_tracker: Arc<Mutex<JudgeTracker>>,
+    emoji_tx: Option<&mpsc::Sender<EmojiJob>>,
+    emoji_tracker: Arc<Mutex<EmojiTracker>>,
 ) -> Result<()> {
     let channel_ids = discover_channels(config).await?;
     let mut routes = load_route_state(config, &channel_ids).await?;
@@ -425,6 +472,13 @@ async fn listen_once(
         for (source, delivery) in routes.judge_deliveries.drain() {
             tracker.deliveries.entry(source).or_insert(delivery);
         }
+    }
+    if config.emoji_reactor {
+        emoji_tracker
+            .lock()
+            .await
+            .reacted
+            .extend(routes.emoji_reactions.drain());
     }
     let mut connection = NostrWsConnection::connect_authenticated(
         &config.relay_url,
@@ -492,6 +546,16 @@ async fn listen_once(
                             &event,
                         ).await {
                             eprintln!("failed to enqueue judge job for {}: {error:#}", event.id.to_hex());
+                        }
+                    }
+                    if let Some(emoji_tx) = emoji_tx {
+                        if let Err(error) = maybe_enqueue_emoji(
+                            config,
+                            emoji_tx,
+                            &emoji_tracker,
+                            &event,
+                        ).await {
+                            eprintln!("failed to enqueue emoji reaction for {}: {error:#}", event.id.to_hex());
                         }
                     }
                     let result = maybe_route(
@@ -721,6 +785,175 @@ async fn run_judge_worker(
     if let Some(mut session) = session {
         session.shutdown().await;
     }
+}
+
+async fn maybe_enqueue_emoji(
+    config: &Config,
+    emoji_tx: &mpsc::Sender<EmojiJob>,
+    tracker: &Arc<Mutex<EmojiTracker>>,
+    candidate: &Event,
+) -> Result<()> {
+    if candidate.kind != Kind::Custom(9)
+        || candidate.pubkey == config.bot_keys.public_key()
+        || parse_thread_relation(candidate).is_some()
+    {
+        return Ok(());
+    }
+    candidate.verify().context("invalid candidate signature")?;
+    let channel_id = event_channel(candidate)
+        .and_then(|value| Uuid::parse_str(value).ok())
+        .filter(|channel| config.channel_ids.is_empty() || config.channel_ids.contains(channel))
+        .ok_or_else(|| anyhow!("candidate has no eligible channel tag"))?;
+    {
+        let mut tracker = tracker.lock().await;
+        if tracker.reacted.contains(&candidate.id) || !tracker.queued.insert(candidate.id) {
+            return Ok(());
+        }
+    }
+    if let Err(error) = emoji_tx
+        .send(EmojiJob {
+            event: candidate.clone(),
+            channel_id,
+        })
+        .await
+    {
+        tracker.lock().await.queued.remove(&candidate.id);
+        return Err(anyhow!("emoji worker stopped: {error}"));
+    }
+    Ok(())
+}
+
+async fn run_emoji_worker(
+    config: Config,
+    tracker: Arc<Mutex<EmojiTracker>>,
+    mut jobs: mpsc::Receiver<EmojiJob>,
+) {
+    let Some(judge_config) = config.judge.clone() else {
+        return;
+    };
+    let mut session = None;
+    while let Some(job) = jobs.recv().await {
+        let result = process_emoji_job(&config, &judge_config, &tracker, &mut session, &job).await;
+        tracker.lock().await.queued.remove(&job.event.id);
+        match result {
+            Ok(emoji) => eprintln!("reacted {emoji} to {}", job.event.id.to_hex()),
+            Err(error) => eprintln!(
+                "failed to react to {} with a relevant emoji: {error:#}",
+                job.event.id.to_hex()
+            ),
+        }
+    }
+    if let Some(mut session) = session {
+        session.shutdown().await;
+    }
+}
+
+async fn process_emoji_job(
+    config: &Config,
+    judge_config: &JudgeConfig,
+    tracker: &Arc<Mutex<EmojiTracker>>,
+    session: &mut Option<PersistentAcpSession>,
+    job: &EmojiJob,
+) -> Result<String> {
+    if tracker.lock().await.reacted.contains(&job.event.id) {
+        return Ok("already-reacted".to_string());
+    }
+    let emoji = request_emoji(judge_config, session, &job.event).await?;
+    let mut connection = NostrWsConnection::connect_authenticated(
+        &config.relay_url,
+        &config.bot_keys,
+        config.owner_auth_tag.as_ref(),
+    )
+    .await?;
+    let reaction = config.sign(build_emoji_reaction(job.channel_id, &job.event, &emoji)?)?;
+    publish_required(&mut connection, reaction, "relevant emoji reaction").await?;
+    tracker.lock().await.reacted.insert(job.event.id);
+    let _ = connection.disconnect().await;
+    Ok(emoji)
+}
+
+async fn request_emoji(
+    config: &JudgeConfig,
+    session: &mut Option<PersistentAcpSession>,
+    event: &Event,
+) -> Result<String> {
+    let base_prompt = emoji_prompt(event);
+    let mut invalid_output = None;
+    for attempt in 0..JUDGE_RETRY_LIMIT {
+        if session.is_none() {
+            let spawned = tokio::time::timeout(
+                Duration::from_secs(60),
+                PersistentAcpSession::spawn(
+                    &config.command,
+                    &config.args,
+                    &config.cwd,
+                    Some("Buzz emoji reactor"),
+                ),
+            )
+            .await
+            .context("emoji reactor ACP startup timed out")??;
+            *session = Some(spawned);
+        }
+        let prompt = match invalid_output.as_deref() {
+            Some(output) => format!(
+                "{base_prompt}\n\nYour previous output was invalid: {}\nReturn exactly one emoji reaction.",
+                compact_text(output, 500)
+            ),
+            None => base_prompt.clone(),
+        };
+        let Some(active_session) = session.as_mut() else {
+            bail!("emoji reactor ACP session was not initialized");
+        };
+        let response = active_session
+            .prompt(&prompt, config.idle_timeout, config.max_duration)
+            .await;
+        match response {
+            Ok(text) => match parse_emoji(&text) {
+                Ok(emoji) => return Ok(emoji),
+                Err(error) if attempt + 1 < JUDGE_RETRY_LIMIT => {
+                    invalid_output = Some(format!("{error}; output={text:?}"));
+                }
+                Err(error) => return Err(error),
+            },
+            Err(error) => {
+                if let Some(mut failed) = session.take() {
+                    failed.shutdown().await;
+                }
+                if attempt + 1 == JUDGE_RETRY_LIMIT {
+                    return Err(error.into());
+                }
+            }
+        }
+    }
+    bail!("emoji reactor produced no selection")
+}
+
+fn emoji_prompt(event: &Event) -> String {
+    let content = serde_json::to_string(&event.content).unwrap_or_else(|_| "\"\"".to_string());
+    format!(
+        "Choose the single most relevant emoji reaction for this new top-level Buzz thread. Match its topic, intent, and tone; prefer a specific reaction over a generic one. Do not reply, explain, judge correctness, or summarize. If genuinely ambiguous, choose 👀. Buzz accepts any reaction up to 64 Unicode characters. Return exactly one emoji reaction and nothing else.\n\nMessage event id: {}\nMessage content: {content}",
+        event.id.to_hex()
+    )
+}
+
+fn parse_emoji(text: &str) -> Result<String> {
+    let emoji = text.trim();
+    if emoji.is_empty() {
+        bail!("emoji reactor response is empty");
+    }
+    if emoji.chars().count() > 64 {
+        bail!("emoji reactor response exceeds Buzz's 64-character reaction limit");
+    }
+    if emoji.chars().any(char::is_whitespace) {
+        bail!("emoji reactor response contains whitespace");
+    }
+    Ok(emoji.to_string())
+}
+
+fn build_emoji_reaction(channel_id: Uuid, source: &Event, emoji: &str) -> Result<EventBuilder> {
+    Ok(buzz_sdk::build_reaction(source.id, emoji)?
+        .tag(Tag::parse(["h", channel_id.to_string().as_str()])?)
+        .tag(Tag::parse([EMOJI_SOURCE_TAG, source.id.to_hex().as_str()])?))
 }
 
 async fn process_judge_job(
@@ -1184,6 +1417,7 @@ async fn load_route_state(config: &Config, channel_ids: &[Uuid]) -> Result<Route
         state
             .judge_deliveries
             .extend(channel_state.judge_deliveries);
+        state.emoji_reactions.extend(channel_state.emoji_reactions);
         state.last_agents.extend(channel_state.last_agents);
     }
     Ok(state)
@@ -1264,6 +1498,7 @@ async fn load_channel_route_state(config: &Config, channel_id: Uuid) -> Result<R
 
 fn record_route_event(state: &mut RouteState, channel_id: Uuid, event: &Event, bot: &PublicKey) {
     record_judge_event(&mut state.judge_deliveries, event, bot);
+    record_emoji_event(&mut state.emoji_reactions, event, bot);
     let Some(source_event_id) = routed_source_event_id(event, bot) else {
         return;
     };
@@ -1279,6 +1514,18 @@ fn record_route_event(state: &mut RouteState, channel_id: Uuid, event: &Event, b
             },
         );
     }
+}
+
+fn record_emoji_event(reactions: &mut HashSet<EventId>, event: &Event, bot: &PublicKey) {
+    if event.pubkey != *bot || event.kind != Kind::Reaction {
+        return;
+    }
+    let Some(source) = unique_event_tag_value(event, EMOJI_SOURCE_TAG)
+        .and_then(|value| EventId::from_hex(value).ok())
+    else {
+        return;
+    };
+    reactions.insert(source);
 }
 
 fn record_last_agent(state: &mut RouteState, event: &Event, owners: &[PublicKey], bot: &PublicKey) {
@@ -1844,6 +2091,7 @@ mod tests {
             owner_pubkeys: vec![fixture.owner.public_key()],
             picture_url: None,
             judge: None,
+            emoji_reactor: false,
         };
         let event = config
             .sign(
@@ -2195,6 +2443,41 @@ mod tests {
         assert_eq!(
             state.last_agents[&fixture.channel].pubkey,
             fixture.agent.public_key()
+        );
+    }
+
+    #[test]
+    fn emoji_parser_accepts_any_buzz_sized_reaction() {
+        assert_eq!(parse_emoji("🦤").unwrap(), "🦤");
+        assert_eq!(parse_emoji("👨‍👩‍👧‍👦").unwrap(), "👨‍👩‍👧‍👦");
+        assert_eq!(parse_emoji(":party_parrot:").unwrap(), ":party_parrot:");
+    }
+
+    #[test]
+    fn emoji_parser_rejects_non_reaction_output() {
+        assert!(parse_emoji("").is_err());
+        assert!(parse_emoji("🔥 looks good").is_err());
+        assert!(parse_emoji(&"x".repeat(65)).is_err());
+    }
+
+    #[test]
+    fn emoji_reaction_records_its_root_source() {
+        let fixture = Fixture::new();
+        let source = message(&fixture.owner, None, fixture.channel, None, &[]);
+        let reaction = build_emoji_reaction(fixture.channel, &source, "🦤")
+            .unwrap()
+            .sign_with_keys(&fixture.bot)
+            .unwrap();
+        let mut reactions = HashSet::new();
+
+        record_emoji_event(&mut reactions, &reaction, &fixture.bot.public_key());
+
+        assert_eq!(reaction.kind, Kind::Reaction);
+        assert_eq!(reaction.content, "🦤");
+        assert!(reactions.contains(&source.id));
+        assert_eq!(
+            unique_event_tag_value(&reaction, EMOJI_SOURCE_TAG),
+            Some(source.id.to_hex()).as_deref()
         );
     }
 
