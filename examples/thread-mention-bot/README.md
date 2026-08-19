@@ -16,6 +16,11 @@ topic, intent, and tone. The choice is not restricted to a hardcoded set: any
 reaction content accepted by Buzz's 64-character NIP-25 builder can be used.
 Replies and the bot's own messages are ignored.
 
+Run `buzz-thread-mention-bot backfill-emoji` with the same environment to react
+to every historical top-level thread missing the bot's tagged reaction. The
+paginated backfill is idempotent and rescans once it catches up, so threads
+created during the initial pass are included.
+
 ## Exact routing rule
 
 For each new kind `9` message authored by the configured owner, the bot:

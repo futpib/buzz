@@ -24,6 +24,8 @@ const ROUTE_SUBSCRIPTION_ID: &str = "thread-mention-routes";
 const REACTION_SUBSCRIPTION_ID: &str = "thread-mention-reaction";
 const CHANNEL_SUBSCRIPTION_ID: &str = "thread-mention-channels";
 const PROFILE_SUBSCRIPTION_ID: &str = "thread-mention-profile";
+const EMOJI_BACKFILL_MESSAGES_ID: &str = "thread-mention-emoji-backfill-messages";
+const EMOJI_BACKFILL_REACTIONS_ID: &str = "thread-mention-emoji-backfill-reactions";
 const ROUTED_SOURCE_TAG: &str = "thread-mention-for";
 const JUDGED_SOURCE_TAG: &str = "message-judge-for";
 const JUDGE_RESULT_TAG: &str = "message-judge-result";
@@ -42,6 +44,8 @@ const RECEIVE_TIMEOUT: Duration = Duration::from_secs(60);
 const THREAD_QUERY_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_THREAD_EVENTS: usize = 1_000;
 const MAX_CHANNELS: usize = 500;
+const EMOJI_BACKFILL_PAGE_SIZE: usize = 200;
+const EMOJI_BACKFILL_MAX_EVENTS: usize = 100_000;
 const JUDGE_QUEUE_SIZE: usize = 256;
 const JUDGE_RETRY_LIMIT: usize = 2;
 
@@ -49,15 +53,19 @@ const JUDGE_RETRY_LIMIT: usize = 2;
 async fn main() -> Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    match std::env::args().nth(1).as_deref() {
+    let command = std::env::args().nth(1);
+    match command.as_deref() {
         Some("auth-tag") => return print_auth_tag(),
         Some("generate-key") => return print_generated_key(),
         Some("public-key") => return print_public_key(),
+        Some("backfill-emoji") | None => {}
         Some(command) => bail!("unknown command {command:?}"),
-        None => {}
     }
 
     let config = Config::from_env()?;
+    if command.as_deref() == Some("backfill-emoji") {
+        return backfill_emoji_reactions(&config).await;
+    }
     eprintln!("thread-mention-bot pubkey: {}", config.bot_pubkey_hex());
     let channels = if config.channel_ids.is_empty() {
         "all accessible channels".to_string()
@@ -870,6 +878,188 @@ async fn process_emoji_job(
     tracker.lock().await.reacted.insert(job.event.id);
     let _ = connection.disconnect().await;
     Ok(emoji)
+}
+
+async fn backfill_emoji_reactions(config: &Config) -> Result<()> {
+    if !config.emoji_reactor {
+        bail!("backfill-emoji requires BUZZ_EMOJI_REACTOR_ENABLED");
+    }
+    let judge_config = config
+        .judge
+        .clone()
+        .context("backfill-emoji requires BUZZ_JUDGE_ENABLED")?;
+    let channels = discover_channels(config).await?;
+    let tracker = Arc::new(Mutex::new(EmojiTracker::default()));
+    let mut session = None;
+    let mut backfilled = 0usize;
+
+    loop {
+        let (jobs, reacted) = load_emoji_backfill_state(config, &channels).await?;
+        tracker.lock().await.reacted.extend(reacted);
+        let missing = {
+            let tracker = tracker.lock().await;
+            jobs.into_iter()
+                .filter(|job| !tracker.reacted.contains(&job.event.id))
+                .collect::<Vec<_>>()
+        };
+        if missing.is_empty() {
+            break;
+        }
+
+        eprintln!("backfilling {} top-level emoji reaction(s)", missing.len());
+        let mut failures = Vec::new();
+        for job in missing {
+            match process_emoji_job(config, &judge_config, &tracker, &mut session, &job).await {
+                Ok(emoji) => {
+                    backfilled += 1;
+                    eprintln!("reacted {emoji} to {}", job.event.id.to_hex());
+                }
+                Err(error) => {
+                    eprintln!(
+                        "failed to react to {} with a relevant emoji: {error:#}",
+                        job.event.id.to_hex()
+                    );
+                    failures.push(job.event.id);
+                }
+            }
+        }
+        if !failures.is_empty() {
+            if let Some(mut session) = session.take() {
+                session.shutdown().await;
+            }
+            bail!("emoji backfill failed for {} thread(s)", failures.len());
+        }
+    }
+
+    if let Some(mut session) = session {
+        session.shutdown().await;
+    }
+    println!("emoji backfill complete: added {backfilled} reaction(s)");
+    Ok(())
+}
+
+async fn load_emoji_backfill_state(
+    config: &Config,
+    channel_ids: &[Uuid],
+) -> Result<(Vec<EmojiJob>, HashSet<EventId>)> {
+    let mut jobs = Vec::new();
+    let mut reacted = HashSet::new();
+    for channel_id in channel_ids {
+        for event in load_channel_history(
+            config,
+            *channel_id,
+            Kind::Custom(9),
+            None,
+            EMOJI_BACKFILL_MESSAGES_ID,
+        )
+        .await?
+        {
+            if event.pubkey != config.bot_keys.public_key()
+                && parse_thread_relation(&event).is_none()
+            {
+                jobs.push(EmojiJob {
+                    event,
+                    channel_id: *channel_id,
+                });
+            }
+        }
+        for event in load_channel_history(
+            config,
+            *channel_id,
+            Kind::Reaction,
+            Some(config.bot_keys.public_key()),
+            EMOJI_BACKFILL_REACTIONS_ID,
+        )
+        .await?
+        {
+            record_emoji_event(&mut reacted, &event, &config.bot_keys.public_key());
+        }
+    }
+    jobs.sort_by(|left, right| {
+        (left.event.created_at.as_secs(), left.event.id.to_hex())
+            .cmp(&(right.event.created_at.as_secs(), right.event.id.to_hex()))
+    });
+    Ok((jobs, reacted))
+}
+
+async fn load_channel_history(
+    config: &Config,
+    channel_id: Uuid,
+    kind: Kind,
+    author: Option<PublicKey>,
+    subscription_id: &str,
+) -> Result<Vec<Event>> {
+    let mut connection = NostrWsConnection::connect_authenticated(
+        &config.relay_url,
+        &config.bot_keys,
+        config.owner_auth_tag.as_ref(),
+    )
+    .await?;
+    let channel = channel_id.to_string();
+    let mut events = HashMap::new();
+    let mut until = None;
+
+    loop {
+        let mut filter = Filter::new()
+            .kind(kind)
+            .custom_tags(SingleLetterTag::lowercase(Alphabet::H), [channel.as_str()])
+            .limit(EMOJI_BACKFILL_PAGE_SIZE);
+        if let Some(author) = author {
+            filter = filter.author(author);
+        }
+        if let Some(until) = until {
+            filter = filter.until(Timestamp::from_secs(until));
+        }
+        connection
+            .send_raw(&json!(["REQ", subscription_id, filter]))
+            .await?;
+
+        let mut page_size = 0usize;
+        let mut oldest = None;
+        loop {
+            match connection.next_event(THREAD_QUERY_TIMEOUT).await? {
+                RelayMessage::Event {
+                    subscription_id: current,
+                    event,
+                } if current == subscription_id => {
+                    event.verify().context("invalid emoji backfill event")?;
+                    if event_channel(&event) != Some(channel.as_str()) {
+                        continue;
+                    }
+                    page_size += 1;
+                    oldest = Some(oldest.map_or(event.created_at.as_secs(), |value: u64| {
+                        value.min(event.created_at.as_secs())
+                    }));
+                    events.insert(event.id, *event);
+                    if events.len() > EMOJI_BACKFILL_MAX_EVENTS {
+                        bail!(
+                            "channel {channel_id} has more than {EMOJI_BACKFILL_MAX_EVENTS} {kind} events"
+                        );
+                    }
+                }
+                RelayMessage::Eose {
+                    subscription_id: current,
+                } if current == subscription_id => break,
+                RelayMessage::Closed {
+                    subscription_id: current,
+                    message,
+                } if current == subscription_id => {
+                    bail!("relay closed emoji backfill query: {message}")
+                }
+                _ => {}
+            }
+        }
+        let Some(oldest) = oldest else {
+            break;
+        };
+        if page_size < EMOJI_BACKFILL_PAGE_SIZE || oldest == 0 {
+            break;
+        }
+        until = Some(oldest - 1);
+    }
+
+    let _ = connection.disconnect().await;
+    Ok(events.into_values().collect())
 }
 
 async fn request_emoji(
