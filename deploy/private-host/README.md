@@ -98,10 +98,11 @@ process environment so the owner can sign the membership event; it is still
 never written to disk or put in a process argument.
 
 Available agent and routing bot 512px profile images are kept in
-`agent-avatars/`. The agent images are the unmodified official Codex and Claude
-Code Marketplace icons and OpenCode's production desktop icon, resized to a
-common canvas. The thread mention bot uses original artwork. Their published
-kind-0 profiles point at authenticated Blossom copies on this Buzz relay.
+`agent-avatars/`. They use the official Codex and Claude Code Marketplace
+icons, OpenCode's production desktop icon, and Grok Build's Braille TUI mark,
+resized or rendered on a common canvas. The thread mention bot uses original
+artwork. Their published kind-0 profiles point at authenticated Blossom copies
+on this Buzz relay.
 
 ## Deterministic thread mention bot
 

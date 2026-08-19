@@ -18,6 +18,7 @@ declare -a requested_accounts=()
 declare -a channels=()
 profile_name=""
 profile_about=""
+profile_avatar=""
 owner_pem=""
 
 usage() {
@@ -34,6 +35,7 @@ The nsec is never written to disk or passed as a command-line argument.
                   May be repeated and requires exactly one --agent.
   --profile NAME  Publish this display name for the selected agent.
   --about TEXT    Profile description used with --profile.
+  --avatar URL    Profile avatar used with --profile.
   --owner-pem PATH
                   Read a host-owned owner key from a mode-0600 secp256k1 PEM
                   instead of prompting. Intended for durable machine users.
@@ -74,6 +76,14 @@ while (($# > 0)); do
         exit 2
       fi
       profile_about="$2"
+      shift
+      ;;
+    --avatar)
+      if (($# < 2)); then
+        echo "--avatar requires a value" >&2
+        exit 2
+      fi
+      profile_avatar="$2"
       shift
       ;;
     --owner-pem)
@@ -125,8 +135,14 @@ if ((${#channels[@]} > 0 || ${#profile_name} > 0)) &&
   echo "--channel and --profile require exactly one --agent" >&2
   exit 2
 fi
-if [[ -n "${profile_about}" && -z "${profile_name}" ]]; then
-  echo "--about requires --profile" >&2
+if [[ -z "${profile_name}" ]] &&
+  [[ -n "${profile_about}" || -n "${profile_avatar}" ]]; then
+  echo "--about and --avatar require --profile" >&2
+  exit 2
+fi
+if [[ -n "${profile_avatar}" ]] &&
+  { [[ ! "${profile_avatar}" =~ ^https?:// ]] || [[ "${profile_avatar}" == *[[:space:]]* ]]; }; then
+  echo "--avatar must be an HTTP(S) URL without whitespace" >&2
   exit 2
 fi
 for channel in "${channels[@]}"; do
@@ -294,6 +310,9 @@ if [[ -n "${profile_name}" ]]; then
   profile_args=(users set-profile --name "${profile_name}")
   if [[ -n "${profile_about}" ]]; then
     profile_args+=(--about "${profile_about}")
+  fi
+  if [[ -n "${profile_avatar}" ]]; then
+    profile_args+=(--avatar "${profile_avatar}")
   fi
   BUZZ_RELAY_URL="${relay_url}" \
     BUZZ_CLI_BIN="${buzz_cli}" \
