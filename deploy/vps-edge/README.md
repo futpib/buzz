@@ -37,6 +37,9 @@ required `shortlived` profile and last about six days. Certificate and ACME
 account state persist in the `caddy-data` Docker volume across container
 recreation and normal `docker compose down`/`up` cycles.
 
+The configuration directory is mounted instead of the individual Caddyfile so
+Git updates remain visible to the running container.
+
 After pulling a Caddyfile update, ensure Caddy is running, then validate and
 reload it:
 

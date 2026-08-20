@@ -2,7 +2,7 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-caddyfile="${repo_root}/deploy/vps-edge/Caddyfile"
+caddyfile="${repo_root}/deploy/vps-edge/caddy/Caddyfile"
 unit="${repo_root}/deploy/private-host/systemd/slopd-mcp.service"
 
 bash -n "${repo_root}/deploy/private-host/install-slopd-mcp.sh"
