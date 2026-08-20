@@ -2,7 +2,8 @@
 
 This Compose project terminates public IP-address TLS on the VPS and proxies
 Buzz over WireGuard to `10.77.77.2:3000`. Device-pairing WebSockets at
-`/pair` are routed to the stateless sidecar on `10.77.77.2:5000`.
+`/pair` are routed to the stateless sidecar on `10.77.77.2:5000`. MCP and OAuth
+paths are routed to the private host's `slopd-mcp` on `10.77.77.2:8780`.
 
 Prerequisites:
 
@@ -35,3 +36,14 @@ startup and renews it automatically. IP certificates use Let's Encrypt's
 required `shortlived` profile and last about six days. Certificate and ACME
 account state persist in the `caddy-data` Docker volume across container
 recreation and normal `docker compose down`/`up` cycles.
+
+After pulling a Caddyfile update, apply and validate it with:
+
+```bash
+docker compose up -d
+docker compose exec caddy caddy validate --config /etc/caddy/Caddyfile
+```
+
+In Grok, add a custom MCP connector at `https://<VPS_PUBLIC_IP>/mcp`. Use the
+private host's `~/.config/slopd-mcp/token` value as the OAuth password. The same
+value is a bearer token for MCP clients without OAuth support.

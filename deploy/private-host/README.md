@@ -160,3 +160,21 @@ mode-0600 machine identity at `~/.config/buzz-machine/identity.pem` and installs
 putting its secret in shell configuration. `buzz-zai-agent.service` uses the
 same machine identity as its NIP-OA owner and allowlists the human pubkey from
 `bridge.env`, so both the host and the human Buzz user can prompt it.
+
+## Grok MCP connector
+
+Once the slopd package provides `/usr/bin/slopd-mcp`, create the private
+deployment config and replace its two `CHANGE_ME` values with the VPS IP:
+
+```bash
+./deploy/private-host/install-slopd-mcp.sh
+$EDITOR ~/.config/slopd-mcp/service.env
+systemctl --user disable --now slopd-mcp-debug.service
+./deploy/private-host/install-slopd-mcp.sh --restart
+systemctl --user status slopd-mcp.service
+```
+
+The installer does not build or replace slopd. It creates a separate mode-0600
+bearer/OAuth password at `~/.config/slopd-mcp/token`, installs the tracked user
+unit, and runs the system `slopd-mcp` against the existing slopd socket. During
+slopd-mcp development, keep using the separately installed debug test unit.

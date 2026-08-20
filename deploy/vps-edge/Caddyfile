@@ -11,6 +11,16 @@
 		reverse_proxy 10.77.77.2:5000
 	}
 
+	@slopd_mcp {
+		path /mcp /mcp/*
+		path /.well-known/oauth-protected-resource /.well-known/oauth-protected-resource/*
+		path /.well-known/oauth-authorization-server /.well-known/oauth-authorization-server/*
+		path /oauth/register /oauth/authorize /oauth/token
+	}
+	handle @slopd_mcp {
+		reverse_proxy 10.77.77.2:8780
+	}
+
 	handle {
 		reverse_proxy 10.77.77.2:3000
 	}

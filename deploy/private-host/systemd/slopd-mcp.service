@@ -1,0 +1,17 @@
+[Unit]
+Description=slopd MCP server for the Buzz edge
+Documentation=https://github.com/futpib/slopd
+Wants=network-online.target
+After=network-online.target slopd.service
+Requires=slopd.service
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/slopd-mcp/service.env
+ExecStart=/usr/bin/slopd-mcp -v --socket %t/slopd/slopd.sock --bind ${SLOPD_MCP_BIND} --token-file %h/.config/slopd-mcp/token --public-url ${SLOPD_MCP_PUBLIC_URL} --allowed-host ${SLOPD_MCP_ALLOWED_HOST}
+Restart=on-failure
+RestartSec=2
+UMask=0077
+
+[Install]
+WantedBy=default.target
