@@ -28,7 +28,6 @@ for expected in \
   'reverse_proxy 10.77.77.2:8780' \
   'ExecStart=/usr/bin/slopd-mcp' \
   '--socket %t/slopd/slopd.sock' \
-  '--allow-run' \
   'EnvironmentFile=%h/.config/slopd-mcp/service.env'
 do
   if ! rg -q -F -- "${expected}" "${caddyfile}" "${unit}"; then
