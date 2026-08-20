@@ -177,4 +177,5 @@ systemctl --user status slopd-mcp.service
 The installer does not build or replace slopd. It creates a separate mode-0600
 bearer/OAuth password at `~/.config/slopd-mcp/token`, installs the tracked user
 unit, and runs the system `slopd-mcp` against the existing slopd socket. During
-slopd-mcp development, keep using the separately installed debug test unit.
+slopd-mcp development, keep using the separately installed debug test unit. The
+production unit enables the complete control surface, including pane creation.
