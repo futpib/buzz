@@ -37,11 +37,13 @@ required `shortlived` profile and last about six days. Certificate and ACME
 account state persist in the `caddy-data` Docker volume across container
 recreation and normal `docker compose down`/`up` cycles.
 
-After pulling a Caddyfile update, apply and validate it with:
+After pulling a Caddyfile update, ensure Caddy is running, then validate and
+reload it:
 
 ```bash
 docker compose up -d
 docker compose exec caddy caddy validate --config /etc/caddy/Caddyfile
+docker compose exec caddy caddy reload --config /etc/caddy/Caddyfile
 ```
 
 In Grok, add a custom MCP connector at `https://<VPS_PUBLIC_IP>/mcp`. Use the
