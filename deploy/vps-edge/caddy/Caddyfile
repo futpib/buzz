@@ -1,3 +1,25 @@
+(slopd_mcp) {
+	@slopd_mcp {
+		path /mcp /mcp/*
+		path /.well-known/oauth-protected-resource /.well-known/oauth-protected-resource/*
+		path /.well-known/oauth-authorization-server /.well-known/oauth-authorization-server/*
+		path /oauth/register /oauth/authorize /oauth/token
+	}
+	handle @slopd_mcp {
+		reverse_proxy 10.77.77.2:8780 {
+			flush_interval -1
+		}
+	}
+}
+
+{$MCP_PUBLIC_HOST} {
+	import slopd_mcp
+
+	handle {
+		respond 404
+	}
+}
+
 {$VPS_PUBLIC_IP} {
 	tls {
 		issuer acme {
@@ -11,15 +33,7 @@
 		reverse_proxy 10.77.77.2:5000
 	}
 
-	@slopd_mcp {
-		path /mcp /mcp/*
-		path /.well-known/oauth-protected-resource /.well-known/oauth-protected-resource/*
-		path /.well-known/oauth-authorization-server /.well-known/oauth-authorization-server/*
-		path /oauth/register /oauth/authorize /oauth/token
-	}
-	handle @slopd_mcp {
-		reverse_proxy 10.77.77.2:8780
-	}
+	import slopd_mcp
 
 	handle {
 		reverse_proxy 10.77.77.2:3000

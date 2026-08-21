@@ -6,6 +6,7 @@ services:
     network_mode: host
     restart: unless-stopped
     environment:
+      MCP_PUBLIC_HOST: ${MCP_PUBLIC_HOST:?set MCP_PUBLIC_HOST in .env}
       VPS_PUBLIC_IP: ${VPS_PUBLIC_IP:?set VPS_PUBLIC_IP in .env}
     volumes:
       - ./caddy:/etc/caddy:ro

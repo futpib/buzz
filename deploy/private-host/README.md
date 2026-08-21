@@ -164,7 +164,9 @@ same machine identity as its NIP-OA owner and allowlists the human pubkey from
 ## Grok MCP connector
 
 Once the slopd package provides `/usr/bin/slopd-mcp`, create the private
-deployment config and replace its two `CHANGE_ME` values with the VPS IP:
+deployment config. Set `SLOPD_MCP_PUBLIC_URL` to the edge's HTTPS MCP hostname
+and `SLOPD_MCP_ALLOWED_HOST` to the VPS IP so existing IP-address clients remain
+accepted:
 
 ```bash
 ./deploy/private-host/install-slopd-mcp.sh
