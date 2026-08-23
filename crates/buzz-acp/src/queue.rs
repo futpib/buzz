@@ -5293,12 +5293,12 @@ mod tests {
     // ── Per-thread routing: conversations in one channel are independent ────
 
     /// Build a QueuedEvent in `channel_id` replying into the thread rooted at
-    /// `root_hex` (NIP-10 marker-based root tag).
+    /// `root_hex` (NIP-10 direct-reply marker).
     fn make_queued_in_thread(channel_id: Uuid, content: &str, root_hex: &str) -> QueuedEvent {
         let keys = Keys::generate();
-        let root_tag = nostr::Tag::parse(["e", root_hex, "", "root"]).unwrap();
+        let reply_tag = nostr::Tag::parse(["e", root_hex, "", "reply"]).unwrap();
         let event = EventBuilder::new(Kind::Custom(9), content)
-            .tags([root_tag])
+            .tags([reply_tag])
             .sign_with_keys(&keys)
             .unwrap();
         QueuedEvent {
