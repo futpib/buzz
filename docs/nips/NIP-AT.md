@@ -59,12 +59,14 @@ all assigned agents completed successfully.
 
 The thread-mention coordinator uses one tagged reaction on the root:
 
-- `🤖` for `agent`;
-- `👤` for `human`;
+- `⏳` for `agent`;
+- `✅` for `human`;
 - `⚠️` for `failed`, stale, or unassigned work.
 
-It publishes the replacement before deleting its previous tagged reaction,
-so the thread never intentionally has a gap in ownership status.
+When the displayed emoji changes, it publishes the replacement before deleting
+its previous tagged reaction. A metadata-only refresh with the same emoji must
+delete the prior reaction first because relays reject duplicate reactions from
+the same author on the same event.
 
 ## Relay behavior
 

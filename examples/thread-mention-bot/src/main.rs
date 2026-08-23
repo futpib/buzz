@@ -233,9 +233,16 @@ struct AgentTurnRecord {
 struct StatusProjection {
     event_id: EventId,
     state: AgentThreadState,
+    emoji: String,
     expires_at: Option<u64>,
     created_at: u64,
     active_agents: HashSet<PublicKey>,
+}
+
+impl StatusProjection {
+    fn needs_emoji_refresh(&self) -> bool {
+        self.emoji != status_emoji(self.state)
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -255,6 +262,7 @@ struct RouteState {
     thread_agents: HashMap<ThreadKey, LastAgent>,
     agent_turns: HashMap<ThreadKey, HashMap<PublicKey, AgentTurnRecord>>,
     status: HashMap<ThreadKey, StatusProjection>,
+    obsolete_status_events: HashMap<ThreadKey, HashSet<EventId>>,
     historical_threads: HashMap<ThreadKey, HistoricalThreadState>,
     historical_roots: HashSet<ThreadKey>,
 }
@@ -1339,7 +1347,7 @@ async fn request_emoji(
 fn emoji_prompt(event: &Event) -> String {
     let content = serde_json::to_string(&event.content).unwrap_or_else(|_| "\"\"".to_string());
     format!(
-        "Choose the single most relevant emoji reaction for this new top-level Buzz thread. Match its topic, intent, and tone; prefer a specific reaction over a generic one. Do not reply, explain, judge correctness, or summarize. If genuinely ambiguous, choose 👀. Buzz accepts any reaction up to 64 Unicode characters. Return exactly one emoji reaction and nothing else.\n\nMessage event id: {}\nMessage content: {content}",
+        "Choose the single most relevant emoji reaction for this new top-level Buzz thread. Match its topic, intent, and tone; prefer a specific reaction over a generic one. Do not reply, explain, judge correctness, or summarize. Do not choose ⏳, ✅, or ⚠️; those are reserved for thread progress. If genuinely ambiguous, choose 👀. Buzz accepts any reaction up to 64 Unicode characters. Return exactly one emoji reaction and nothing else.\n\nMessage event id: {}\nMessage content: {content}",
         event.id.to_hex()
     )
 }
@@ -1354,6 +1362,9 @@ fn parse_emoji(text: &str) -> Result<String> {
     }
     if emoji.chars().any(char::is_whitespace) {
         bail!("emoji reactor response contains whitespace");
+    }
+    if matches!(emoji, "⏳" | "✅" | "⚠️") {
+        bail!("emoji reactor response uses a reserved thread progress reaction");
     }
     Ok(emoji.to_string())
 }
@@ -1830,6 +1841,9 @@ async fn load_route_state(config: &Config, channel_ids: &[Uuid]) -> Result<Route
         state.thread_agents.extend(channel_state.thread_agents);
         state.status.extend(channel_state.status);
         state
+            .obsolete_status_events
+            .extend(channel_state.obsolete_status_events);
+        state
             .historical_threads
             .extend(channel_state.historical_threads);
         state
@@ -1988,23 +2002,33 @@ async fn backfill_missing_thread_statuses(
     connection: &mut NostrWsConnection,
     state: &mut RouteState,
 ) -> Result<()> {
-    let missing = state
+    let mut pending = state
         .historical_threads
         .iter()
         .filter(|(key, _)| state.historical_roots.contains(key) && !state.status.contains_key(key))
-        .map(|(key, historical)| (*key, historical.state))
-        .collect::<Vec<_>>();
-    if !missing.is_empty() {
+        .map(|(key, historical)| (*key, (historical.state, None)))
+        .collect::<HashMap<_, _>>();
+    for (key, projection) in &state.status {
+        if projection.needs_emoji_refresh()
+            || state
+                .obsolete_status_events
+                .get(key)
+                .is_some_and(|events| !events.is_empty())
+        {
+            pending.insert(*key, (projection.state, projection.expires_at));
+        }
+    }
+    if !pending.is_empty() {
         eprintln!(
-            "backfilling {} missing thread status reaction(s)",
-            missing.len()
+            "backfilling or refreshing {} thread status reaction(s)",
+            pending.len()
         );
     }
-    for (index, (key, status)) in missing.into_iter().enumerate() {
+    for (index, (key, (status, expires_at))) in pending.into_iter().enumerate() {
         if index > 0 {
             tokio::time::sleep(Duration::from_millis(125)).await;
         }
-        set_thread_status(config, connection, state, key, status, None).await?;
+        set_thread_status(config, connection, state, key, status, expires_at).await?;
     }
     Ok(())
 }
@@ -2049,9 +2073,6 @@ fn recover_status_projections(
             Some("failed") => AgentThreadState::Failed,
             _ => continue,
         };
-        if event.content != status_emoji(state_value) {
-            continue;
-        }
         let key = ThreadKey {
             channel_id,
             root_event_id,
@@ -2060,21 +2081,35 @@ fn recover_status_projections(
         let projection = StatusProjection {
             event_id: event.id,
             state: state_value,
+            emoji: event.content.clone(),
             expires_at: unique_event_tag_value(event, STATUS_EXPIRES_TAG)
                 .and_then(|value| value.parse().ok()),
             created_at: event.created_at.as_secs(),
             active_agents: recovered_agents.keys().copied().collect(),
         };
-        if state.status.get(&key).is_none_or(|existing| {
+        let replaces_current = state.status.get(&key).is_none_or(|existing| {
             (existing.created_at, existing.event_id.to_hex())
                 < (projection.created_at, projection.event_id.to_hex())
-        }) {
+        });
+        if replaces_current {
+            if let Some(previous) = state.status.insert(key, projection) {
+                state
+                    .obsolete_status_events
+                    .entry(key)
+                    .or_default()
+                    .insert(previous.event_id);
+            }
             if recovered_agents.is_empty() {
                 state.agent_turns.remove(&key);
             } else {
                 state.agent_turns.insert(key, recovered_agents);
             }
-            state.status.insert(key, projection);
+        } else {
+            state
+                .obsolete_status_events
+                .entry(key)
+                .or_default()
+                .insert(event.id);
         }
     }
 }
@@ -2366,7 +2401,12 @@ async fn set_thread_status(
         .iter()
         .map(|(agent, _)| *agent)
         .collect::<HashSet<_>>();
-    if let Some(current) = state.status.get(&key) {
+    let obsolete = state
+        .obsolete_status_events
+        .get(&key)
+        .cloned()
+        .unwrap_or_default();
+    let needs_replacement = state.status.get(&key).is_none_or(|current| {
         let refresh_needed = status == AgentThreadState::Agent
             && expires_at.is_some_and(|next| {
                 next > current
@@ -2374,9 +2414,18 @@ async fn set_thread_status(
                     .unwrap_or_default()
                     .saturating_add(STATUS_PERSIST_REFRESH_SECS)
             });
-        if current.state == status && current.active_agents == active_agents && !refresh_needed {
-            return Ok(());
+        current.state != status
+            || current.active_agents != active_agents
+            || refresh_needed
+            || current.needs_emoji_refresh()
+    });
+    if !needs_replacement {
+        for event_id in &obsolete {
+            let deletion = config.sign(build_thread_status_deletion(key, *event_id)?)?;
+            publish_required(connection, deletion, "obsolete thread turn status deletion").await?;
         }
+        state.obsolete_status_events.remove(&key);
+        return Ok(());
     }
 
     let reaction = config.sign(build_thread_status_reaction(
@@ -2385,24 +2434,43 @@ async fn set_thread_status(
         expires_at,
         &active_records,
     )?)?;
-    publish_required(connection, reaction.clone(), "thread turn status reaction").await?;
-
-    if let Some(previous) = state.status.get(&key).cloned() {
-        let deletion = config.sign(build_thread_status_deletion(key, previous.event_id)?)?;
-        if let Err(error) =
-            publish_required(connection, deletion, "old thread turn status deletion").await
-        {
-            let rollback = config.sign(build_thread_status_deletion(key, reaction.id)?)?;
-            let _ = publish_required(connection, rollback, "thread turn status rollback").await;
-            return Err(error);
+    let mut replaced = obsolete;
+    if let Some(previous) = state.status.get(&key) {
+        replaced.insert(previous.event_id);
+    }
+    let same_reaction_content = state
+        .status
+        .get(&key)
+        .is_some_and(|current| current.emoji == reaction.content);
+    if same_reaction_content {
+        for event_id in &replaced {
+            let deletion = config.sign(build_thread_status_deletion(key, *event_id)?)?;
+            publish_required(connection, deletion, "old thread turn status deletion").await?;
+        }
+        state.status.remove(&key);
+        state.obsolete_status_events.remove(&key);
+        publish_required(connection, reaction.clone(), "thread turn status reaction").await?;
+    } else {
+        publish_required(connection, reaction.clone(), "thread turn status reaction").await?;
+        for event_id in replaced {
+            let deletion = config.sign(build_thread_status_deletion(key, event_id)?)?;
+            if let Err(error) =
+                publish_required(connection, deletion, "old thread turn status deletion").await
+            {
+                let rollback = config.sign(build_thread_status_deletion(key, reaction.id)?)?;
+                let _ = publish_required(connection, rollback, "thread turn status rollback").await;
+                return Err(error);
+            }
         }
     }
 
+    state.obsolete_status_events.remove(&key);
     state.status.insert(
         key,
         StatusProjection {
             event_id: reaction.id,
             state: status,
+            emoji: status_emoji(status).to_string(),
             expires_at,
             created_at: reaction.created_at.as_secs(),
             active_agents,
@@ -2461,8 +2529,8 @@ fn build_thread_status_deletion(key: ThreadKey, status_event_id: EventId) -> Res
 
 const fn status_emoji(status: AgentThreadState) -> &'static str {
     match status {
-        AgentThreadState::Agent => "🤖",
-        AgentThreadState::Human => "👤",
+        AgentThreadState::Agent => "⏳",
+        AgentThreadState::Human => "✅",
         AgentThreadState::Failed => "⚠️",
     }
 }
@@ -2910,6 +2978,26 @@ mod tests {
     fn reaction(keys: &Keys, target: EventId) -> Event {
         buzz_sdk::build_reaction(target, "👀")
             .unwrap()
+            .sign_with_keys(keys)
+            .unwrap()
+    }
+
+    fn thread_status_reaction(
+        keys: &Keys,
+        key: ThreadKey,
+        state: AgentThreadState,
+        emoji: &str,
+        created_at: u64,
+    ) -> Event {
+        let channel = key.channel_id.to_string();
+        let root = key.root_event_id.to_hex();
+        buzz_sdk::build_reaction(key.root_event_id, emoji)
+            .unwrap()
+            .tag(Tag::parse(["h", channel.as_str()]).unwrap())
+            .tag(Tag::parse(["t", STATUS_DISCOVERY_VALUE]).unwrap())
+            .tag(Tag::parse([STATUS_SOURCE_TAG, root.as_str()]).unwrap())
+            .tag(Tag::parse([STATUS_STATE_TAG, state.as_str()]).unwrap())
+            .custom_created_at(Timestamp::from_secs(created_at))
             .sign_with_keys(keys)
             .unwrap()
     }
@@ -3459,7 +3547,7 @@ mod tests {
     }
 
     #[test]
-    fn emoji_parser_accepts_any_buzz_sized_reaction() {
+    fn emoji_parser_accepts_supported_buzz_reactions() {
         assert_eq!(parse_emoji("🦤").unwrap(), "🦤");
         assert_eq!(parse_emoji("👨‍👩‍👧‍👦").unwrap(), "👨‍👩‍👧‍👦");
         assert_eq!(parse_emoji(":party_parrot:").unwrap(), ":party_parrot:");
@@ -3470,6 +3558,9 @@ mod tests {
         assert!(parse_emoji("").is_err());
         assert!(parse_emoji("🔥 looks good").is_err());
         assert!(parse_emoji(&"x".repeat(65)).is_err());
+        assert!(parse_emoji("⏳").is_err());
+        assert!(parse_emoji("✅").is_err());
+        assert!(parse_emoji("⚠️").is_err());
     }
 
     #[test]
@@ -3812,7 +3903,7 @@ mod tests {
             .sign_with_keys(&fixture.bot)
             .unwrap();
 
-        assert_eq!(reaction.content, "🤖");
+        assert_eq!(reaction.content, "⏳");
         assert_eq!(reaction_target(&reaction), Some(fixture.root.id));
         assert_eq!(
             unique_event_tag_value(&reaction, STATUS_SOURCE_TAG),
@@ -3825,6 +3916,58 @@ mod tests {
         assert_eq!(
             event_tag_value(&reaction, "t"),
             Some(STATUS_DISCOVERY_VALUE)
+        );
+    }
+
+    #[test]
+    fn status_emojis_describe_progress() {
+        assert_eq!(status_emoji(AgentThreadState::Agent), "⏳");
+        assert_eq!(status_emoji(AgentThreadState::Human), "✅");
+        assert_eq!(status_emoji(AgentThreadState::Failed), "⚠️");
+    }
+
+    #[test]
+    fn recovery_refreshes_legacy_status_emoji() {
+        let fixture = Fixture::new();
+        let key = ThreadKey {
+            channel_id: fixture.channel,
+            root_event_id: fixture.root.id,
+        };
+        let legacy = thread_status_reaction(&fixture.bot, key, AgentThreadState::Human, "👤", 10);
+        let mut state = RouteState::default();
+
+        recover_status_projections(
+            &mut state,
+            fixture.channel,
+            &[legacy],
+            &fixture.bot.public_key(),
+        );
+
+        assert!(state.status[&key].needs_emoji_refresh());
+    }
+
+    #[test]
+    fn recovery_tracks_superseded_status_reactions_for_deletion() {
+        let fixture = Fixture::new();
+        let key = ThreadKey {
+            channel_id: fixture.channel,
+            root_event_id: fixture.root.id,
+        };
+        let legacy = thread_status_reaction(&fixture.bot, key, AgentThreadState::Human, "👤", 10);
+        let current = thread_status_reaction(&fixture.bot, key, AgentThreadState::Human, "✅", 20);
+        let mut state = RouteState::default();
+
+        recover_status_projections(
+            &mut state,
+            fixture.channel,
+            &[legacy.clone(), current.clone()],
+            &fixture.bot.public_key(),
+        );
+
+        assert_eq!(state.status[&key].event_id, current.id);
+        assert_eq!(
+            state.obsolete_status_events[&key],
+            HashSet::from([legacy.id])
         );
     }
 

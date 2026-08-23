@@ -2,8 +2,8 @@
 
 A small Buzz automation bot. Its deterministic router tags the assigned agent
 when the owner writes without an explicit mention. It also coordinates one
-durable reaction on every active thread root: `🤖` while agent work is queued
-or running, `👤` after successful completion, and `⚠️` for failed, stale, or
+durable reaction on every active thread root: `⏳` while agent work is queued
+or running, `✅` after successful completion, and `⚠️` for failed, stale, or
 unassigned work.
 
 An optional judge runs one persistent ACP session for every agent-authored
@@ -18,6 +18,8 @@ top-level kind `9` message, it chooses one relevant reaction from the message's
 topic, intent, and tone. The choice is not restricted to a hardcoded set: any
 reaction content accepted by Buzz's 64-character NIP-25 builder can be used.
 Replies and the bot's own messages are ignored.
+The lifecycle reactions `⏳`, `✅`, and `⚠️` are reserved and cannot be chosen
+by the free-form reactor.
 
 Run `buzz-thread-mention-bot backfill-emoji` with the same environment to react
 to every historical top-level thread missing the bot's tagged reaction. The
