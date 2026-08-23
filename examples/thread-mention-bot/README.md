@@ -35,13 +35,17 @@ For each new kind `9` message authored by the configured owner, the bot:
 3. Ignores its own prior routing messages when counting participants.
 4. Requires every other author to have exactly one valid NIP-OA `auth` tag
    proving the configured owner.
-5. Reuses the thread's sticky agent assignment. Otherwise it requires exactly
-   one verified agent author in the thread.
+5. Reuses the thread's sticky agent assignment when that agent is still a
+   current channel member. Otherwise it requires exactly one verified current
+   member agent author in the thread.
 6. Uses a per-channel or global configured default for a new untagged root,
-   falling back to the most recent verified agent in that channel.
+   provided that agent is a current channel member, and otherwise falls back to
+   the most recent verified current member agent in that channel.
 7. Does nothing if the owner's new message already `p`-tags anyone.
-8. Does nothing if it already routed that exact message.
-9. Otherwise posts a sibling kind `9` reply in the thread with the
+8. Re-reads the thread before publishing and yields to an owner mention that
+   arrived while the route was being resolved.
+9. Does nothing if it already routed that exact message.
+10. Otherwise posts a sibling kind `9` reply in the thread with the
    agent's real `p` tag, friendly `@name`, and the owner's message text.
 
 The original user event remains unchanged because Nostr events are signed and

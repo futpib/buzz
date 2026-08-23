@@ -27,6 +27,7 @@ const THREAD_SUBSCRIPTION_ID: &str = "thread-mention-query";
 const ROUTE_SUBSCRIPTION_ID: &str = "thread-mention-routes";
 const REACTION_SUBSCRIPTION_ID: &str = "thread-mention-reaction";
 const CHANNEL_SUBSCRIPTION_ID: &str = "thread-mention-channels";
+const MEMBERS_SUBSCRIPTION_ID: &str = "thread-mention-members";
 const MEMBERSHIP_SUBSCRIPTION_ID: &str = "thread-mention-membership";
 const PROFILE_SUBSCRIPTION_ID: &str = "thread-mention-profile";
 const EMOJI_BACKFILL_MESSAGES_ID: &str = "thread-mention-emoji-backfill-messages";
@@ -829,6 +830,7 @@ async fn maybe_route(
     if event_has_mention(candidate) {
         return Ok(());
     }
+    let members = load_channel_members(config, channel_id).await?;
     let thread_key = ThreadKey {
         channel_id,
         root_event_id,
@@ -843,7 +845,8 @@ async fn maybe_route(
             routes
                 .thread_agents
                 .get(&thread_key)
-                .map(|agent| agent.pubkey),
+                .map(|agent| agent.pubkey)
+                .filter(|agent| members.contains(agent)),
         ) else {
             set_thread_status(
                 config,
@@ -856,6 +859,18 @@ async fn maybe_route(
             .await?;
             return Ok(());
         };
+        if !members.contains(&agent) {
+            set_thread_status(
+                config,
+                live_connection,
+                routes,
+                thread_key,
+                AgentThreadState::Failed,
+                None,
+            )
+            .await?;
+            return Ok(());
+        }
         agent
     } else {
         let configured_default = config
@@ -868,6 +883,7 @@ async fn maybe_route(
             &config.bot_keys.public_key(),
             routes.last_agents.get(&channel_id),
             configured_default,
+            &members,
         ) else {
             set_thread_status(
                 config,
@@ -890,6 +906,44 @@ async fn maybe_route(
             eprintln!("could not resolve agent profile {agent_hex}: {error:#}");
             "agent".to_string()
         });
+    let latest_thread = load_thread(config, channel_id, root_event_id).await?;
+    if let Some((explicit_agent, explicit_event)) = explicit_owner_mention_after(
+        &latest_thread,
+        candidate,
+        &config.owner_pubkeys,
+        &config.bot_keys.public_key(),
+        &members,
+    ) {
+        routes.handled_sources.insert(candidate.id);
+        record_thread_assignment(
+            routes,
+            thread_key,
+            explicit_agent,
+            explicit_event.created_at.as_secs(),
+            explicit_event.id,
+        );
+        eprintln!(
+            "skipped automatic route for {} because owner mention {} selected {}",
+            candidate.id.to_hex(),
+            explicit_event.id.to_hex(),
+            explicit_agent.to_hex(),
+        );
+        return Ok(());
+    }
+    let current_members = load_channel_members(config, channel_id).await?;
+    if !current_members.contains(&agent) {
+        routes.handled_sources.insert(candidate.id);
+        set_thread_status(
+            config,
+            live_connection,
+            routes,
+            thread_key,
+            AgentThreadState::Failed,
+            None,
+        )
+        .await?;
+        return Ok(());
+    }
     let event = config.sign(build_routed_message(
         channel_id,
         root_event_id,
@@ -949,6 +1003,72 @@ async fn maybe_route(
     );
     reconcile_thread_status(config, live_connection, routes, thread_key).await?;
     Ok(())
+}
+
+async fn load_channel_members(config: &Config, channel_id: Uuid) -> Result<HashSet<PublicKey>> {
+    let mut connection = NostrWsConnection::connect_authenticated(
+        &config.relay_url,
+        &config.bot_keys,
+        config.owner_auth_tag.as_ref(),
+    )
+    .await?;
+    let channel = channel_id.to_string();
+    connection
+        .send_raw(&json!([
+            "REQ",
+            MEMBERS_SUBSCRIPTION_ID,
+            Filter::new()
+                .kind(Kind::Custom(39002))
+                .custom_tags(SingleLetterTag::lowercase(Alphabet::D), [channel.as_str()])
+                .limit(1)
+        ]))
+        .await?;
+    let mut latest = None;
+    loop {
+        match connection.next_event(THREAD_QUERY_TIMEOUT).await? {
+            RelayMessage::Event {
+                subscription_id,
+                event,
+            } if subscription_id == MEMBERS_SUBSCRIPTION_ID => {
+                event
+                    .verify()
+                    .context("invalid channel membership signature")?;
+                if event_tag_value(&event, "d") == Some(channel.as_str())
+                    && latest.as_ref().is_none_or(|current: &Event| {
+                        (current.created_at.as_secs(), current.id.to_hex())
+                            < (event.created_at.as_secs(), event.id.to_hex())
+                    })
+                {
+                    latest = Some(*event);
+                }
+            }
+            RelayMessage::Eose { subscription_id }
+                if subscription_id == MEMBERS_SUBSCRIPTION_ID =>
+            {
+                break;
+            }
+            RelayMessage::Closed {
+                subscription_id,
+                message,
+            } if subscription_id == MEMBERS_SUBSCRIPTION_ID => {
+                bail!("relay closed channel membership query: {message}");
+            }
+            _ => {}
+        }
+    }
+    let _ = connection.disconnect().await;
+    let membership = latest.context("relay returned no channel membership snapshot")?;
+    Ok(membership
+        .tags
+        .iter()
+        .filter_map(|tag| {
+            let parts = tag.as_slice();
+            (parts.first().map(String::as_str) == Some("p"))
+                .then(|| parts.get(1))
+                .flatten()
+                .and_then(|value| PublicKey::parse(value).ok())
+        })
+        .collect())
 }
 
 async fn maybe_enqueue_judge(
@@ -2837,6 +2957,7 @@ fn top_level_route_target_with_default(
     bot: &PublicKey,
     last_agent: Option<&LastAgent>,
     configured_default: Option<&PublicKey>,
+    members: &HashSet<PublicKey>,
 ) -> Option<PublicKey> {
     if candidate.kind != Kind::Custom(9)
         || !owners.contains(&candidate.pubkey)
@@ -2847,7 +2968,12 @@ fn top_level_route_target_with_default(
     }
     let agent = configured_default
         .copied()
-        .or_else(|| last_agent.map(|last| last.pubkey))?;
+        .filter(|agent| members.contains(agent))
+        .or_else(|| {
+            last_agent
+                .map(|last| last.pubkey)
+                .filter(|agent| members.contains(agent))
+        })?;
     (!owners.contains(&agent) && agent != *bot).then_some(agent)
 }
 
@@ -2858,7 +2984,44 @@ fn top_level_route_target(
     bot: &PublicKey,
     last_agent: Option<&LastAgent>,
 ) -> Option<PublicKey> {
-    top_level_route_target_with_default(candidate, owners, bot, last_agent, None)
+    let members = last_agent
+        .map(|last| HashSet::from([last.pubkey]))
+        .unwrap_or_default();
+    top_level_route_target_with_default(candidate, owners, bot, last_agent, None, &members)
+}
+
+fn explicit_owner_mention_after<'a>(
+    thread: &'a [Event],
+    candidate: &Event,
+    owners: &[PublicKey],
+    bot: &PublicKey,
+    members: &HashSet<PublicKey>,
+) -> Option<(PublicKey, &'a Event)> {
+    thread
+        .iter()
+        .filter(|event| {
+            event.id != candidate.id
+                && event.kind == Kind::Custom(9)
+                && owners.contains(&event.pubkey)
+                && event.created_at >= candidate.created_at
+        })
+        .filter_map(|event| {
+            let mut mentions = event.tags.iter().filter_map(|tag| {
+                let parts = tag.as_slice();
+                (parts.first().map(String::as_str) == Some("p"))
+                    .then(|| parts.get(1))
+                    .flatten()
+                    .and_then(|value| PublicKey::parse(value).ok())
+                    .filter(|agent| members.contains(agent))
+                    .filter(|agent| !owners.contains(agent) && agent != bot)
+            });
+            let agent = mentions.next()?;
+            mentions.next().is_none().then_some((agent, event))
+        })
+        .max_by(|(_, left), (_, right)| {
+            (left.created_at.as_secs(), left.id.to_hex())
+                .cmp(&(right.created_at.as_secs(), right.id.to_hex()))
+        })
 }
 
 fn is_same_owner_agent(event: &Event, owner: &PublicKey) -> bool {
@@ -4082,6 +4245,7 @@ mod tests {
     fn configured_default_routes_an_untagged_new_root() {
         let fixture = Fixture::new();
         let candidate = message(&fixture.owner, None, fixture.channel, None, &[]);
+        let members = HashSet::from([fixture.agent.public_key()]);
 
         assert_eq!(
             top_level_route_target_with_default(
@@ -4090,8 +4254,76 @@ mod tests {
                 &fixture.bot.public_key(),
                 None,
                 Some(&fixture.agent.public_key()),
+                &members,
             ),
             Some(fixture.agent.public_key())
+        );
+    }
+
+    #[test]
+    fn nonmember_default_falls_back_to_the_last_member_agent() {
+        let fixture = Fixture::new();
+        let candidate = message(&fixture.owner, None, fixture.channel, None, &[]);
+        let nonmember = Keys::generate().public_key();
+        let last_agent = LastAgent {
+            pubkey: fixture.agent.public_key(),
+            created_at: fixture.agent_reply.created_at.as_secs(),
+            event_id: fixture.agent_reply.id,
+        };
+        let members = HashSet::from([fixture.agent.public_key()]);
+
+        assert_eq!(
+            top_level_route_target_with_default(
+                &candidate,
+                &[fixture.owner.public_key()],
+                &fixture.bot.public_key(),
+                Some(&last_agent),
+                Some(&nonmember),
+                &members,
+            ),
+            Some(fixture.agent.public_key())
+        );
+    }
+
+    #[test]
+    fn owner_mention_arriving_during_routing_wins_the_race() {
+        let fixture = Fixture::new();
+        let candidate =
+            buzz_sdk::build_message(fixture.channel, "untagged root", None, &[], false, &[])
+                .unwrap()
+                .custom_created_at(Timestamp::from_secs(10))
+                .sign_with_keys(&fixture.owner)
+                .unwrap();
+        let agent_hex = fixture.agent.public_key().to_hex();
+        let explicit = buzz_sdk::build_message(
+            fixture.channel,
+            "manual selection",
+            Some(&ThreadRef {
+                root_event_id: candidate.id,
+                parent_event_id: candidate.id,
+            }),
+            &[agent_hex.as_str()],
+            false,
+            &[],
+        )
+        .unwrap()
+        .custom_created_at(Timestamp::from_secs(11))
+        .sign_with_keys(&fixture.owner)
+        .unwrap();
+        let members = HashSet::from([fixture.agent.public_key()]);
+
+        let thread = [candidate.clone(), explicit.clone()];
+        let selected = explicit_owner_mention_after(
+            &thread,
+            &candidate,
+            &[fixture.owner.public_key()],
+            &fixture.bot.public_key(),
+            &members,
+        );
+
+        assert_eq!(
+            selected.map(|(agent, event)| (agent, event.id)),
+            Some((fixture.agent.public_key(), explicit.id))
         );
     }
 }

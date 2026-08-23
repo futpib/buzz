@@ -81,7 +81,8 @@ impl ThreadLifecycleReporter {
         state: AgentThreadState,
         phase: &str,
     ) {
-        let Some(event) = self.build(conversation, state, turn_id, phase, None) else {
+        let expiry = (state == AgentThreadState::Agent).then_some(QUEUED_EXPIRY);
+        let Some(event) = self.build(conversation, state, turn_id, phase, expiry) else {
             return;
         };
         let result = if let Some(rest_client) = &self.rest_client {
@@ -249,5 +250,25 @@ mod tests {
         reporter.try_agent_queued(&ConversationKey::channel(Uuid::new_v4()), "source-1");
 
         assert!(events.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn retrying_terminal_snapshot_has_an_expiry() {
+        let (publisher, mut events) = RelayEventPublisher::test_pair();
+        let reporter = ThreadLifecycleReporter::new(publisher, Keys::generate(), None);
+        let conversation = ConversationKey {
+            channel_id: Uuid::new_v4(),
+            thread_root: Some(nostr::EventId::all_zeros().to_hex()),
+        };
+
+        reporter
+            .publish_terminal(&conversation, "turn-1", AgentThreadState::Agent, "retrying")
+            .await;
+
+        let event = events.recv().await.unwrap();
+        let parsed = parse_agent_thread_lifecycle(&event).unwrap();
+        assert_eq!(parsed.lifecycle.state, AgentThreadState::Agent);
+        assert_eq!(parsed.lifecycle.phase, "retrying");
+        assert!(parsed.lifecycle.expires_at.is_some());
     }
 }
