@@ -11,6 +11,7 @@ mod pool_lifecycle;
 mod queue;
 mod relay;
 mod setup_mode;
+mod thread_lifecycle;
 mod usage;
 
 pub use acp::AcpError;
@@ -2043,10 +2044,14 @@ async fn tokio_main() -> Result<()> {
         .filter(|s| !s.is_empty())
         .and_then(|s| buzz_sdk::nip_oa::parse_auth_tag(&s).ok());
 
-    let mut relay =
-        HarnessRelay::connect(&config.relay_url, &config.keys, &pubkey_hex, relay_auth_tag)
-            .await
-            .map_err(|e| anyhow::anyhow!("relay connect error: {e}"))?;
+    let mut relay = HarnessRelay::connect(
+        &config.relay_url,
+        &config.keys,
+        &pubkey_hex,
+        relay_auth_tag.clone(),
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("relay connect error: {e}"))?;
 
     // Tell the relay background task the watermark so it can use
     // `since = watermark - 5s` on the first REQ instead of `since=now`.
@@ -2262,6 +2267,11 @@ async fn tokio_main() -> Result<()> {
         memory_enabled: config.memory_enabled,
         harness_name: crate::config::normalize_agent_command_identity(&config.agent_command),
         relay_url: config.relay_url.clone(),
+        thread_lifecycle: Some(thread_lifecycle::ThreadLifecycleReporter::new_rest(
+            relay.rest_client(),
+            config.keys.clone(),
+            relay_auth_tag,
+        )),
     });
 
     if !config.memory_enabled {
@@ -3006,6 +3016,9 @@ async fn tokio_main() -> Result<()> {
                             // guard's cleanup may race with this add, leaving a
                             // cosmetic stale 👀. Acceptable — see ReactionGuard docs.
                             if accepted {
+                                if let Some(reporter) = &ctx.thread_lifecycle {
+                                    reporter.try_agent_queued(&conversation, &event_id_hex);
+                                }
                                 let rc = ctx.rest_client.clone();
                                 let eid = event_id_hex.clone();
                                 tokio::spawn(async move {
@@ -3236,6 +3249,7 @@ async fn tokio_main() -> Result<()> {
                     &respawn_tx,
                     &mut respawn_tasks,
                     observer.clone(),
+                    ctx.thread_lifecycle.as_ref(),
                     Some(&ctx.rest_client),
                 )
                 .await;
@@ -3253,6 +3267,7 @@ async fn tokio_main() -> Result<()> {
                     &respawn_tx,
                     &mut respawn_tasks,
                     observer.clone(),
+                    ctx.thread_lifecycle.as_ref(),
                 ) == LoopAction::Exit
                 {
                     break;
@@ -3277,6 +3292,7 @@ async fn tokio_main() -> Result<()> {
                     &respawn_tx,
                     &mut respawn_tasks,
                     observer.clone(),
+                    ctx.thread_lifecycle.as_ref(),
                 );
                 if pool.live_count() == 0 && !any_respawn_in_flight(&crash_history) {
                     tracing::error!("all agents dead — exiting");
@@ -3977,6 +3993,7 @@ async fn handle_prompt_result(
     respawn_tx: &mpsc::Sender<RespawnResult>,
     respawn_tasks: &mut tokio::task::JoinSet<()>,
     observer: Option<observer::ObserverHandle>,
+    lifecycle_reporter: Option<&thread_lifecycle::ThreadLifecycleReporter>,
     rest_client: Option<&relay::RestClient>,
 ) -> LoopAction {
     let before = pool.task_map().len();
@@ -4003,6 +4020,16 @@ async fn handle_prompt_result(
     // branch below records what actually happened; only the hard-timeout
     // match arm in the death_message construction reads it.
     let mut hard_timeout_fate_suffix: Option<&'static str> = None;
+    let (mut lifecycle_state, mut lifecycle_phase) = match &result.outcome {
+        PromptOutcome::Ok(_) | PromptOutcome::Cancelled => (
+            buzz_core::agent_thread_lifecycle::AgentThreadState::Human,
+            "completed",
+        ),
+        _ => (
+            buzz_core::agent_thread_lifecycle::AgentThreadState::Failed,
+            "failed",
+        ),
+    };
 
     // Requeue BEFORE mark_complete: requeue() sets retry_after with a future
     // deadline, and mark_complete() checks for it to decide whether to preserve
@@ -4033,6 +4060,8 @@ async fn handle_prompt_result(
                 // accounting, same as a clean cancel.
                 let reason = batch.cancel_reason.unwrap_or(CancelReason::Steer);
                 queue.requeue_as_cancelled(batch, reason);
+                lifecycle_state = buzz_core::agent_thread_lifecycle::AgentThreadState::Agent;
+                lifecycle_phase = "retrying";
             } else if matches!(
                 result.outcome,
                 PromptOutcome::Timeout(TimeoutKind::Hard {
@@ -4071,6 +4100,8 @@ async fn handle_prompt_result(
                     hard_timeout_fate_suffix = Some(" — dead-lettered (retry budget exhausted)");
                 } else {
                     hard_timeout_fate_suffix = Some(" — requeued for retry (recently active)");
+                    lifecycle_state = buzz_core::agent_thread_lifecycle::AgentThreadState::Agent;
+                    lifecycle_phase = "retrying";
                 }
             } else if matches!(&result.outcome, PromptOutcome::Error(e) if is_auth_error(e)) {
                 // Auth errors are non-retryable: the token won't self-repair
@@ -4087,20 +4118,31 @@ async fn handle_prompt_result(
                     and then re-send."
                     .to_string();
                 spawn_failure_notice(rest_client, &batch, content);
-            } else if let Some(dead) = queue.requeue(batch) {
-                let reason = match &result.outcome {
-                    PromptOutcome::Timeout(TimeoutKind::Idle) => "the turn timed out".to_string(),
-                    PromptOutcome::Timeout(TimeoutKind::Hard { .. }) => {
-                        "the turn exceeded the maximum duration".to_string()
+            } else {
+                match queue.requeue(batch) {
+                    Some(dead) => {
+                        let reason = match &result.outcome {
+                            PromptOutcome::Timeout(TimeoutKind::Idle) => {
+                                "the turn timed out".to_string()
+                            }
+                            PromptOutcome::Timeout(TimeoutKind::Hard { .. }) => {
+                                "the turn exceeded the maximum duration".to_string()
+                            }
+                            PromptOutcome::AgentExited => "the agent process exited".to_string(),
+                            PromptOutcome::Error(e) => format!("{e}"),
+                            _ => "repeated failures".to_string(),
+                        };
+                        let content = format!(
+                            "⚠️ I couldn't process the last request after multiple retries ({reason}). Please re-send if it's still needed."
+                        );
+                        spawn_failure_notice(rest_client, &dead, content);
                     }
-                    PromptOutcome::AgentExited => "the agent process exited".to_string(),
-                    PromptOutcome::Error(e) => format!("{e}"),
-                    _ => "repeated failures".to_string(),
-                };
-                let content = format!(
-                    "⚠️ I couldn't process the last request after multiple retries ({reason}). Please re-send if it's still needed."
-                );
-                spawn_failure_notice(rest_client, &dead, content);
+                    None => {
+                        lifecycle_state =
+                            buzz_core::agent_thread_lifecycle::AgentThreadState::Agent;
+                        lifecycle_phase = "retrying";
+                    }
+                }
             }
         } else {
             tracing::debug!(
@@ -4115,6 +4157,12 @@ async fn handle_prompt_result(
     match &result.source {
         PromptSource::Channel(key) => queue.mark_complete(key),
         PromptSource::Heartbeat => *heartbeat_in_flight = false,
+    }
+
+    if let (PromptSource::Channel(key), Some(reporter)) = (&result.source, lifecycle_reporter) {
+        reporter
+            .publish_terminal(key, &result.turn_id, lifecycle_state, lifecycle_phase)
+            .await;
     }
 
     // Retire removed-channel sessions after their last in-flight turn.
@@ -4370,6 +4418,7 @@ fn recover_panicked_agent(
     respawn_tx: &mpsc::Sender<RespawnResult>,
     respawn_tasks: &mut tokio::task::JoinSet<()>,
     observer: Option<observer::ObserverHandle>,
+    lifecycle_reporter: Option<&thread_lifecycle::ThreadLifecycleReporter>,
 ) {
     let task_id = join_error.id();
     let Some(meta) = pool.task_map_mut().remove(&task_id) else {
@@ -4379,13 +4428,16 @@ fn recover_panicked_agent(
     let i = meta.agent_index;
 
     // Requeue BEFORE mark_complete (same rationale as handle_prompt_result).
+    let mut panic_requeued = false;
     if let Some(batch) = meta.recoverable_batch {
         if let Some(key) = &meta.conversation {
             if !removed_channels.contains(&key.channel_id) {
                 // Dead-letter on exhaustion is logged inside requeue(); a
                 // panic path has no outcome to report, so no notice here.
-                let _ = queue.requeue(batch);
-                tracing::warn!("requeued batch for panicked agent {i}");
+                panic_requeued = queue.requeue(batch).is_none();
+                if panic_requeued {
+                    tracing::warn!("requeued batch for panicked agent {i}");
+                }
             } else {
                 tracing::debug!(
                     conversation = %key,
@@ -4396,6 +4448,18 @@ fn recover_panicked_agent(
     }
 
     if let Some(key) = &meta.conversation {
+        if let Some(reporter) = lifecycle_reporter {
+            if panic_requeued {
+                reporter.try_agent_queued(key, &format!("panic:{}", meta.turn_id));
+            } else {
+                reporter.try_terminal(
+                    key,
+                    &meta.turn_id,
+                    buzz_core::agent_thread_lifecycle::AgentThreadState::Failed,
+                    "panicked",
+                );
+            }
+        }
         queue.mark_complete(key);
         typing_channels.remove(key);
         tracing::warn!("cleared wedged in-flight conversation {key} from panicked agent {i}");
@@ -4447,6 +4511,7 @@ fn drain_ready_join_results(
     respawn_tx: &mpsc::Sender<RespawnResult>,
     respawn_tasks: &mut tokio::task::JoinSet<()>,
     observer: Option<observer::ObserverHandle>,
+    lifecycle_reporter: Option<&thread_lifecycle::ThreadLifecycleReporter>,
 ) -> LoopAction {
     while let Some(Some(join_result)) = pool.join_set.join_next().now_or_never() {
         if let Err(join_error) = join_result {
@@ -4463,6 +4528,7 @@ fn drain_ready_join_results(
                 respawn_tx,
                 respawn_tasks,
                 observer.clone(),
+                lifecycle_reporter,
             );
             if pool.live_count() == 0 && !any_respawn_in_flight(crash_history) {
                 return LoopAction::Exit;
@@ -7188,7 +7254,10 @@ mod error_outcome_emission_tests {
     #[tokio::test]
     async fn successful_native_steer_is_transferred_to_live_session_delivery_state() {
         let channel_id = Uuid::new_v4();
-        let conversation = key(channel_id);
+        let conversation = ConversationKey {
+            channel_id,
+            thread_root: Some(nostr::EventId::all_zeros().to_hex()),
+        };
         let steer_event_id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         let agent = dummy_agent(0).await;
         agent.test_set_session(conversation.clone(), "live-session");
@@ -7224,6 +7293,9 @@ mod error_outcome_emission_tests {
         }];
         let (respawn_tx, _respawn_rx) = mpsc::channel(8);
         let mut respawn_tasks = tokio::task::JoinSet::new();
+        let (publisher, mut lifecycle_events) = RelayEventPublisher::test_pair();
+        let lifecycle_reporter =
+            thread_lifecycle::ThreadLifecycleReporter::new(publisher, Keys::generate(), None);
         let result = PromptResult {
             agent,
             source: PromptSource::Channel(conversation.clone()),
@@ -7243,12 +7315,22 @@ mod error_outcome_emission_tests {
             &respawn_tx,
             &mut respawn_tasks,
             None,
+            Some(&lifecycle_reporter),
             None,
         )
         .await;
 
         let returned = pool.agents_mut()[0].as_ref().expect("returned agent");
         assert!(returned.test_delivery_contains(&conversation, steer_event_id));
+        let lifecycle = buzz_core::agent_thread_lifecycle::parse_agent_thread_lifecycle(
+            &lifecycle_events.recv().await.unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            lifecycle.lifecycle.state,
+            buzz_core::agent_thread_lifecycle::AgentThreadState::Human
+        );
+        assert_eq!(lifecycle.lifecycle.phase, "completed");
     }
 
     #[tokio::test]
@@ -7307,6 +7389,7 @@ mod error_outcome_emission_tests {
             &mut crash_history,
             &respawn_tx,
             &mut respawn_tasks,
+            None,
             None,
             None,
         )
@@ -7407,6 +7490,7 @@ mod error_outcome_emission_tests {
             &mut respawn_tasks,
             None,
             None,
+            None,
         )
         .await;
 
@@ -7470,6 +7554,7 @@ mod error_outcome_emission_tests {
             &respawn_tx,
             &mut respawn_tasks,
             Some(observer.clone()),
+            None,
             None,
         )
         .await;
@@ -7545,6 +7630,7 @@ mod error_outcome_emission_tests {
             &respawn_tx,
             &mut respawn_tasks,
             Some(observer.clone()),
+            None,
         );
 
         let panic = observer
@@ -7639,6 +7725,7 @@ mod error_outcome_emission_tests {
                 &mut respawn_tasks,
                 Some(observer.clone()),
                 None,
+                None,
             )
             .await;
             let events = observer.snapshot();
@@ -7729,6 +7816,7 @@ mod error_outcome_emission_tests {
                 &mut crash_history,
                 &respawn_tx,
                 &mut respawn_tasks,
+                None,
                 None,
                 None,
             )
@@ -7838,6 +7926,7 @@ mod error_outcome_emission_tests {
                 &mut respawn_tasks,
                 None,
                 None,
+                None,
             )
             .await;
             (
@@ -7930,6 +8019,7 @@ mod error_outcome_emission_tests {
             &respawn_tx,
             &mut respawn_tasks,
             Some(observer.clone()),
+            None,
             None,
         )
         .await;
@@ -8025,6 +8115,7 @@ mod error_outcome_emission_tests {
             &respawn_tx,
             &mut respawn_tasks,
             Some(observer.clone()),
+            None,
             None,
         )
         .await;
@@ -8142,6 +8233,7 @@ mod error_outcome_emission_tests {
             &respawn_tx,
             &mut respawn_tasks,
             Some(observer.clone()),
+            None,
             None,
         )
         .await;
@@ -8276,6 +8368,7 @@ mod error_outcome_emission_tests {
             &respawn_tx,
             &mut respawn_tasks,
             Some(observer.clone()),
+            None,
             None,
         )
         .await;
@@ -8461,6 +8554,7 @@ mod error_outcome_emission_tests {
             &mut respawn_tasks,
             None,
             None,
+            None,
         )
         .await;
 
@@ -8546,6 +8640,7 @@ mod error_outcome_emission_tests {
             &mut crash_history,
             &respawn_tx,
             &mut respawn_tasks,
+            None,
             None,
             None,
         )

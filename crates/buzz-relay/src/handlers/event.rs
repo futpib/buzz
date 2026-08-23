@@ -705,37 +705,12 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
             ));
             return;
         }
-        match buzz_deletion::store(&state.db)
-            .is_serving_active(conn.tenant.community())
-            .await
-        {
-            Ok(true) => {}
-            Ok(false) => {
-                reject("restricted");
-                conn.send(RelayMessage::ok(
-                    &event_id_hex,
-                    false,
-                    "restricted: community writes are fenced",
-                ));
-                return;
-            }
-            Err(error) => {
-                reject("error");
-                tracing::warn!(%error, event_id = %event_id_hex, "failed to check ephemeral-event community lifecycle");
-                conn.send(RelayMessage::ok(
-                    &event_id_hex,
-                    false,
-                    "error: internal server error",
-                ));
-                return;
-            }
-        }
         match handle_ephemeral_event(
             event,
-            conn_id,
+            Some(conn_id),
             pubkey_bytes,
             auth_pubkey,
-            Arc::clone(&conn),
+            &conn.tenant,
             state,
         )
         .await
@@ -792,14 +767,29 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
 }
 
 /// Handle ephemeral events (kind 20000–29999) — WS-only, never stored.
-async fn handle_ephemeral_event(
+pub(crate) async fn handle_ephemeral_event(
     event: Event,
-    conn_id: uuid::Uuid,
+    conn_id: Option<uuid::Uuid>,
     pubkey_bytes: Vec<u8>,
     auth_pubkey: nostr::PublicKey,
-    conn: Arc<ConnectionState>,
+    tenant: &TenantContext,
     state: Arc<AppState>,
 ) -> Result<(), String> {
+    if event.pubkey != auth_pubkey {
+        return Err("invalid: event pubkey does not match authenticated identity".into());
+    }
+    match buzz_deletion::store(&state.db)
+        .is_serving_active(tenant.community())
+        .await
+    {
+        Ok(true) => {}
+        Ok(false) => return Err("restricted: community writes are fenced".into()),
+        Err(error) => {
+            warn!(%error, event_id = %event.id.to_hex(), "failed to check ephemeral-event community lifecycle");
+            return Err("error: internal server error".into());
+        }
+    }
+
     let event_clone = event.clone();
     let event_id = event.id.to_hex();
     let verify_result = tokio::task::spawn_blocking(move || verify_event(&event_clone)).await;
@@ -830,14 +820,11 @@ async fn handle_ephemeral_event(
         };
 
         if status == "offline" {
-            let _ = state
-                .pubsub
-                .clear_presence(&conn.tenant, &auth_pubkey)
-                .await;
+            let _ = state.pubsub.clear_presence(tenant, &auth_pubkey).await;
         } else {
             let _ = state
                 .pubsub
-                .set_presence(&conn.tenant, &auth_pubkey, &status)
+                .set_presence(tenant, &auth_pubkey, &status)
                 .await;
         }
 
@@ -848,22 +835,21 @@ async fn handle_ephemeral_event(
 
     // Check channel membership before publishing other ephemeral events.
     if let Some(ch_id) = super::ingest::extract_channel_id(&event) {
-        super::ingest::check_channel_membership(&conn.tenant, &state, ch_id, &pubkey_bytes, None)
-            .await?;
+        super::ingest::check_channel_membership(tenant, &state, ch_id, &pubkey_bytes, None).await?;
 
         // Mark as local before Redis publish to prevent double-delivery when
         // the event comes back through the Redis subscriber loop.
-        state.mark_local_event(conn.tenant.community(), &event.id);
+        state.mark_local_event(tenant.community(), &event.id);
 
         if let Err(e) = state
             .pubsub
-            .publish_event(&conn.tenant, EventTopic::Channel(ch_id), &event)
+            .publish_event(tenant, EventTopic::Channel(ch_id), &event)
             .await
         {
             state
                 .local_event_ids
-                .invalidate(&(conn.tenant.community(), event.id.to_bytes()));
-            warn!(conn_id = %conn_id, event_id = %event_id, "Ephemeral publish failed: {e}");
+                .invalidate(&(tenant.community(), event.id.to_bytes()));
+            warn!(?conn_id, event_id = %event_id, "Ephemeral publish failed: {e}");
         }
 
         // Direct fan-out to local WS subscribers, through the guarded send path
@@ -871,7 +857,7 @@ async fn handle_ephemeral_event(
         // receive this private-channel ephemeral event.
         // Pass the channel_id so fan_out() uses the channel-kind index.
         let stored_event = StoredEvent::new(event.clone(), Some(ch_id));
-        fan_out_event_to_local_subscribers(&state, conn.tenant.community(), &stored_event).await;
+        fan_out_event_to_local_subscribers(&state, tenant.community(), &stored_event).await;
     } else {
         // Channel-less ephemeral events (e.g., NIP-AB pairing kind:24134).
         //
@@ -881,17 +867,17 @@ async fn handle_ephemeral_event(
         // The nil UUID is ONLY a Redis routing key — it never reaches the DB.
         // On the receiving end (main.rs subscriber loop), `is_nil()` is checked
         // and converted back to `None` so `fan_out()` uses the global index.
-        state.mark_local_event(conn.tenant.community(), &event.id);
+        state.mark_local_event(tenant.community(), &event.id);
 
         if let Err(e) = state
             .pubsub
-            .publish_event(&conn.tenant, EventTopic::Global, &event)
+            .publish_event(tenant, EventTopic::Global, &event)
             .await
         {
             state
                 .local_event_ids
-                .invalidate(&(conn.tenant.community(), event.id.to_bytes()));
-            warn!(conn_id = %conn_id, event_id = %event_id, "Ephemeral global publish failed: {e}");
+                .invalidate(&(tenant.community(), event.id.to_bytes()));
+            warn!(?conn_id, event_id = %event_id, "Ephemeral global publish failed: {e}");
         }
 
         // Direct fan-out to local WS subscribers through the guarded send path.
@@ -899,7 +885,7 @@ async fn handle_ephemeral_event(
         // filter_fanout_by_access no-ops for channel-less events except the
         // author-only-kind gate.
         let stored_event = StoredEvent::new(event.clone(), None);
-        fan_out_event_to_local_subscribers(&state, conn.tenant.community(), &stored_event).await;
+        fan_out_event_to_local_subscribers(&state, tenant.community(), &stored_event).await;
     }
 
     Ok(())

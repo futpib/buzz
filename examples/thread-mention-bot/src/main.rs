@@ -7,6 +7,10 @@ use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
 use buzz_acp::persistent_session::PersistentAcpSession;
+use buzz_core::agent_thread_lifecycle::{parse_agent_thread_lifecycle, AgentThreadState};
+use buzz_core::kind::{
+    KIND_AGENT_THREAD_LIFECYCLE, KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION,
+};
 use buzz_sdk::{MemberRole, ThreadRef};
 use buzz_ws_client::{NostrWsConnection, RelayMessage, WsClientError};
 use nostr::{
@@ -23,6 +27,7 @@ const THREAD_SUBSCRIPTION_ID: &str = "thread-mention-query";
 const ROUTE_SUBSCRIPTION_ID: &str = "thread-mention-routes";
 const REACTION_SUBSCRIPTION_ID: &str = "thread-mention-reaction";
 const CHANNEL_SUBSCRIPTION_ID: &str = "thread-mention-channels";
+const MEMBERSHIP_SUBSCRIPTION_ID: &str = "thread-mention-membership";
 const PROFILE_SUBSCRIPTION_ID: &str = "thread-mention-profile";
 const EMOJI_BACKFILL_MESSAGES_ID: &str = "thread-mention-emoji-backfill-messages";
 const EMOJI_BACKFILL_REACTIONS_ID: &str = "thread-mention-emoji-backfill-reactions";
@@ -30,6 +35,11 @@ const ROUTED_SOURCE_TAG: &str = "thread-mention-for";
 const JUDGED_SOURCE_TAG: &str = "message-judge-for";
 const JUDGE_RESULT_TAG: &str = "message-judge-result";
 const EMOJI_SOURCE_TAG: &str = "emoji-reaction-for";
+const STATUS_SOURCE_TAG: &str = "thread-turn-state-for";
+const STATUS_STATE_TAG: &str = "thread-turn-state";
+const STATUS_EXPIRES_TAG: &str = "thread-turn-expires-at";
+const STATUS_AGENT_TAG: &str = "thread-turn-agent";
+const STATUS_DISCOVERY_VALUE: &str = "buzz-thread-turn-status";
 const COMPLETE_MESSAGE_RULE: &str = "complete_message";
 const BOT_NAME: &str = "thread-mention-bot";
 const BOT_DISPLAY_NAME: &str = "Thread Mention Bot";
@@ -37,6 +47,8 @@ const BOT_ABOUT: &str =
     "Routes thread replies, judges delivery completeness, and reacts to new topics.";
 const RECONNECT_DELAY: Duration = Duration::from_secs(3);
 const REACTION_POLL_INTERVAL: Duration = Duration::from_secs(2);
+const STATUS_PERSIST_REFRESH_SECS: u64 = 30;
+const ROUTED_STATUS_EXPIRY_SECS: u64 = 600;
 const CHANNEL_REFRESH_INTERVAL: Duration = Duration::from_secs(300);
 const LIVE_REPLAY_WINDOW_SECS: u64 = 600;
 const ROUTE_ACK_WINDOW_SECS: u64 = 3_600;
@@ -173,6 +185,8 @@ struct Config {
     picture_url: Option<String>,
     judge: Option<JudgeConfig>,
     emoji_reactor: bool,
+    default_agent: Option<PublicKey>,
+    channel_default_agents: HashMap<Uuid, PublicKey>,
 }
 
 #[derive(Clone)]
@@ -199,6 +213,38 @@ struct LastAgent {
     event_id: EventId,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct ThreadKey {
+    channel_id: Uuid,
+    root_event_id: EventId,
+}
+
+#[derive(Clone)]
+struct AgentTurnRecord {
+    state: AgentThreadState,
+    revision: u64,
+    event_id: EventId,
+    turn_id: String,
+    expires_at: Option<u64>,
+    authoritative: bool,
+}
+
+#[derive(Clone)]
+struct StatusProjection {
+    event_id: EventId,
+    state: AgentThreadState,
+    expires_at: Option<u64>,
+    created_at: u64,
+    active_agents: HashSet<PublicKey>,
+}
+
+#[derive(Clone, Copy)]
+struct HistoricalThreadState {
+    state: AgentThreadState,
+    created_at: u64,
+    event_id: EventId,
+}
+
 #[derive(Default)]
 struct RouteState {
     pending: HashMap<EventId, PendingRoute>,
@@ -206,6 +252,11 @@ struct RouteState {
     judge_deliveries: HashMap<EventId, JudgeDelivery>,
     emoji_reactions: HashSet<EventId>,
     last_agents: HashMap<Uuid, LastAgent>,
+    thread_agents: HashMap<ThreadKey, LastAgent>,
+    agent_turns: HashMap<ThreadKey, HashMap<PublicKey, AgentTurnRecord>>,
+    status: HashMap<ThreadKey, StatusProjection>,
+    historical_threads: HashMap<ThreadKey, HistoricalThreadState>,
+    historical_roots: HashSet<ThreadKey>,
 }
 
 #[derive(Clone, Default)]
@@ -299,6 +350,20 @@ impl Config {
         if emoji_reactor && judge.is_none() {
             bail!("BUZZ_EMOJI_REACTOR_ENABLED requires BUZZ_JUDGE_ENABLED");
         }
+        let default_agent = std::env::var("BUZZ_DEFAULT_AGENT_PUBKEY")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| {
+                PublicKey::parse(value.trim())
+                    .context("BUZZ_DEFAULT_AGENT_PUBKEY is not a valid public key")
+            })
+            .transpose()?;
+        let channel_default_agents = parse_channel_default_agents()?;
+        for agent in default_agent.iter().chain(channel_default_agents.values()) {
+            if owner_pubkeys.contains(agent) || *agent == bot_keys.public_key() {
+                bail!("default agent must not be an owner or the coordinator bot");
+            }
+        }
         Ok(Self {
             relay_url,
             channel_ids,
@@ -310,6 +375,8 @@ impl Config {
                 .filter(|value| !value.trim().is_empty()),
             judge,
             emoji_reactor,
+            default_agent,
+            channel_default_agents,
         })
     }
 
@@ -324,6 +391,29 @@ impl Config {
         };
         Ok(builder.sign_with_keys(&self.bot_keys)?)
     }
+}
+
+fn parse_channel_default_agents() -> Result<HashMap<Uuid, PublicKey>> {
+    let mut defaults = HashMap::new();
+    let raw = std::env::var("BUZZ_CHANNEL_AGENT_DEFAULTS").unwrap_or_default();
+    for entry in raw
+        .split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+    {
+        let (channel, agent) = entry.split_once('=').ok_or_else(|| {
+            anyhow!("BUZZ_CHANNEL_AGENT_DEFAULTS entries must be CHANNEL_UUID=AGENT_PUBKEY")
+        })?;
+        let channel = Uuid::parse_str(channel.trim()).with_context(|| {
+            format!("BUZZ_CHANNEL_AGENT_DEFAULTS contains invalid channel {channel:?}")
+        })?;
+        let agent = PublicKey::parse(agent.trim())
+            .context("BUZZ_CHANNEL_AGENT_DEFAULTS contains an invalid agent public key")?;
+        if defaults.insert(channel, agent).is_some() {
+            bail!("BUZZ_CHANNEL_AGENT_DEFAULTS contains duplicate channel {channel}");
+        }
+    }
+    Ok(defaults)
 }
 
 impl JudgeConfig {
@@ -473,6 +563,7 @@ async fn listen_once(
     emoji_tx: Option<&mpsc::Sender<EmojiJob>>,
     emoji_tracker: Arc<Mutex<EmojiTracker>>,
 ) -> Result<()> {
+    let membership_since = Timestamp::now().as_secs();
     let channel_ids = discover_channels(config).await?;
     let mut routes = load_route_state(config, &channel_ids).await?;
     if config.judge.is_some() {
@@ -494,11 +585,15 @@ async fn listen_once(
         config.owner_auth_tag.as_ref(),
     )
     .await?;
+    backfill_missing_thread_statuses(config, &mut connection, &mut routes).await?;
     let now = Timestamp::now().as_secs();
     for channel_id in &channel_ids {
         let channel = channel_id.to_string();
         let messages = Filter::new()
-            .kind(Kind::Custom(9))
+            .kinds([
+                Kind::Custom(9),
+                Kind::Custom(KIND_AGENT_THREAD_LIFECYCLE as u16),
+            ])
             .since(Timestamp::from_secs(
                 now.saturating_sub(LIVE_REPLAY_WINDOW_SECS),
             ))
@@ -511,6 +606,24 @@ async fn listen_once(
             ]))
             .await?;
     }
+    let bot_pubkey = config.bot_pubkey_hex();
+    let membership_notifications = Filter::new()
+        .kinds([
+            Kind::Custom(KIND_MEMBER_ADDED_NOTIFICATION as u16),
+            Kind::Custom(KIND_MEMBER_REMOVED_NOTIFICATION as u16),
+        ])
+        .since(Timestamp::from_secs(membership_since))
+        .custom_tags(
+            SingleLetterTag::lowercase(Alphabet::P),
+            [bot_pubkey.as_str()],
+        );
+    connection
+        .send_raw(&json!([
+            "REQ",
+            MEMBERSHIP_SUBSCRIPTION_ID,
+            membership_notifications
+        ]))
+        .await?;
     eprintln!(
         "listening in {} channel(s); tracking {} pending route(s), {} handled source(s)",
         channel_ids.len(),
@@ -522,6 +635,8 @@ async fn listen_once(
     tokio::pin!(refresh);
     let mut reaction_poll = tokio::time::interval(REACTION_POLL_INTERVAL);
     reaction_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut status_poll = tokio::time::interval(REACTION_POLL_INTERVAL);
+    status_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
         tokio::select! {
@@ -535,12 +650,51 @@ async fn listen_once(
                     eprintln!("failed to poll routed mentions: {error:#}");
                 }
             }
+            _ = status_poll.tick() => {
+                if let Err(error) = expire_thread_statuses(
+                    config,
+                    &mut connection,
+                    &mut routes,
+                ).await {
+                    eprintln!("failed to expire stale thread status: {error:#}");
+                }
+            }
             message = connection.next_event(RECEIVE_TIMEOUT) => match message {
                 Ok(RelayMessage::Event {
                     subscription_id,
                     event,
+                }) if subscription_id == MEMBERSHIP_SUBSCRIPTION_ID => {
+                    event.verify().context("invalid membership notification signature")?;
+                    bail!("membership changed; refreshing channel subscriptions");
+                }
+                Ok(RelayMessage::Closed {
+                    subscription_id,
+                    message,
+                }) if subscription_id == MEMBERSHIP_SUBSCRIPTION_ID => {
+                    bail!("relay closed membership subscription: {message}");
+                }
+                Ok(RelayMessage::Event {
+                    subscription_id,
+                    event,
                 }) if subscription_id.starts_with(LIVE_SUBSCRIPTION_ID) => {
+                    if event.kind == Kind::Custom(KIND_AGENT_THREAD_LIFECYCLE as u16) {
+                        if let Err(error) = handle_thread_lifecycle(
+                            config,
+                            &mut connection,
+                            &event,
+                            &mut routes,
+                        ).await {
+                            eprintln!("rejected thread lifecycle {}: {error:#}", event.id.to_hex());
+                        }
+                        continue;
+                    }
                     record_last_agent(
+                        &mut routes,
+                        &event,
+                        &config.owner_pubkeys,
+                        &config.bot_keys.public_key(),
+                    );
+                    record_thread_agent(
                         &mut routes,
                         &event,
                         &config.owner_pubkeys,
@@ -664,24 +818,58 @@ async fn maybe_route(
         .ok_or_else(|| anyhow!("candidate has no eligible channel tag"))?;
     let relation = parse_thread_relation(candidate);
     let root_event_id = relation.map_or(candidate.id, |relation| relation.root_event_id);
+    if event_has_mention(candidate) {
+        return Ok(());
+    }
+    let thread_key = ThreadKey {
+        channel_id,
+        root_event_id,
+    };
     let agent = if let Some(relation) = relation {
         let thread = load_thread(config, channel_id, relation.root_event_id).await?;
-        let Some(agent) = route_target(
+        let Some(agent) = route_target_with_assignment(
             &thread,
             candidate,
             &config.owner_pubkeys,
             &config.bot_keys.public_key(),
+            routes
+                .thread_agents
+                .get(&thread_key)
+                .map(|agent| agent.pubkey),
         ) else {
+            set_thread_status(
+                config,
+                live_connection,
+                routes,
+                thread_key,
+                AgentThreadState::Failed,
+                None,
+            )
+            .await?;
             return Ok(());
         };
         agent
     } else {
-        let Some(agent) = top_level_route_target(
+        let configured_default = config
+            .channel_default_agents
+            .get(&channel_id)
+            .or(config.default_agent.as_ref());
+        let Some(agent) = top_level_route_target_with_default(
             candidate,
             &config.owner_pubkeys,
             &config.bot_keys.public_key(),
             routes.last_agents.get(&channel_id),
+            configured_default,
         ) else {
+            set_thread_status(
+                config,
+                live_connection,
+                routes,
+                thread_key,
+                AgentThreadState::Failed,
+                None,
+            )
+            .await?;
             return Ok(());
         };
         agent
@@ -705,7 +893,22 @@ async fn maybe_route(
     let created_at = event.created_at.as_secs();
     let response = live_connection.send_event(event).await?;
     if !response.accepted {
-        bail!("relay rejected routed mention: {}", response.message);
+        eprintln!(
+            "relay rejected routed mention for {}: {}",
+            candidate.id.to_hex(),
+            response.message
+        );
+        routes.handled_sources.insert(candidate.id);
+        set_thread_status(
+            config,
+            live_connection,
+            routes,
+            thread_key,
+            AgentThreadState::Failed,
+            None,
+        )
+        .await?;
+        return Ok(());
     }
     eprintln!(
         "tagged agent {} for owner message {}",
@@ -722,6 +925,21 @@ async fn maybe_route(
             created_at,
         },
     );
+    record_thread_assignment(routes, thread_key, agent, created_at, event_id);
+    record_agent_turn(
+        routes,
+        thread_key,
+        agent,
+        AgentTurnRecord {
+            state: AgentThreadState::Agent,
+            revision: unix_revision(),
+            event_id,
+            turn_id: format!("route:{}", candidate.id.to_hex()),
+            expires_at: Some(unix_seconds().saturating_add(ROUTED_STATUS_EXPIRY_SECS)),
+            authoritative: false,
+        },
+    );
+    reconcile_thread_status(config, live_connection, routes, thread_key).await?;
     Ok(())
 }
 
@@ -1609,6 +1827,14 @@ async fn load_route_state(config: &Config, channel_ids: &[Uuid]) -> Result<Route
             .extend(channel_state.judge_deliveries);
         state.emoji_reactions.extend(channel_state.emoji_reactions);
         state.last_agents.extend(channel_state.last_agents);
+        state.thread_agents.extend(channel_state.thread_agents);
+        state.status.extend(channel_state.status);
+        state
+            .historical_threads
+            .extend(channel_state.historical_threads);
+        state
+            .historical_roots
+            .extend(channel_state.historical_roots);
     }
     Ok(state)
 }
@@ -1644,10 +1870,20 @@ async fn load_channel_route_state(config: &Config, channel_id: Uuid) -> Result<R
             Filter::new()
                 .kind(Kind::Custom(9))
                 .custom_tags(SingleLetterTag::lowercase(Alphabet::H), [channel.as_str()])
+                .limit(MAX_THREAD_EVENTS),
+            Filter::new()
+                .kinds([Kind::Reaction, Kind::EventDeletion, Kind::Custom(9005),])
+                .author(config.bot_keys.public_key())
+                .custom_tags(SingleLetterTag::lowercase(Alphabet::H), [channel.as_str()])
+                .custom_tags(
+                    SingleLetterTag::lowercase(Alphabet::T),
+                    [STATUS_DISCOVERY_VALUE],
+                )
                 .limit(MAX_THREAD_EVENTS)
         ]))
         .await?;
     let mut state = RouteState::default();
+    let mut bot_history = Vec::new();
     loop {
         match connection.next_event(THREAD_QUERY_TIMEOUT).await? {
             RelayMessage::Event {
@@ -1662,12 +1898,27 @@ async fn load_channel_route_state(config: &Config, channel_id: Uuid) -> Result<R
                         &config.owner_pubkeys,
                         &config.bot_keys.public_key(),
                     );
+                    record_thread_agent(
+                        &mut state,
+                        &event,
+                        &config.owner_pubkeys,
+                        &config.bot_keys.public_key(),
+                    );
+                    record_historical_thread(
+                        &mut state,
+                        &event,
+                        &config.owner_pubkeys,
+                        &config.bot_keys.public_key(),
+                    );
                     record_route_event(
                         &mut state,
                         channel_id,
                         &event,
                         &config.bot_keys.public_key(),
                     );
+                    if event.pubkey == config.bot_keys.public_key() {
+                        bot_history.push((*event).clone());
+                    }
                 }
             }
             RelayMessage::Eose { subscription_id } if subscription_id == ROUTE_SUBSCRIPTION_ID => {
@@ -1683,7 +1934,177 @@ async fn load_channel_route_state(config: &Config, channel_id: Uuid) -> Result<R
         }
     }
     let _ = connection.disconnect().await;
+    recover_status_projections(
+        &mut state,
+        channel_id,
+        &bot_history,
+        &config.bot_keys.public_key(),
+    );
     Ok(state)
+}
+
+fn record_historical_thread(
+    state: &mut RouteState,
+    event: &Event,
+    owners: &[PublicKey],
+    bot: &PublicKey,
+) {
+    if event.kind != Kind::Custom(9) || event.pubkey == *bot {
+        return;
+    }
+    let Some(channel_id) = event_channel(event).and_then(|value| Uuid::parse_str(value).ok())
+    else {
+        return;
+    };
+    let relation = parse_thread_relation(event);
+    let root_event_id = relation.map_or(event.id, |relation| relation.root_event_id);
+    let key = ThreadKey {
+        channel_id,
+        root_event_id,
+    };
+    if relation.is_none() {
+        state.historical_roots.insert(key);
+    }
+    let state_value = if owners.contains(&event.pubkey) {
+        AgentThreadState::Failed
+    } else {
+        AgentThreadState::Human
+    };
+    let historical = HistoricalThreadState {
+        state: state_value,
+        created_at: event.created_at.as_secs(),
+        event_id: event.id,
+    };
+    if state.historical_threads.get(&key).is_none_or(|existing| {
+        (existing.created_at, existing.event_id.to_hex())
+            < (historical.created_at, historical.event_id.to_hex())
+    }) {
+        state.historical_threads.insert(key, historical);
+    }
+}
+
+async fn backfill_missing_thread_statuses(
+    config: &Config,
+    connection: &mut NostrWsConnection,
+    state: &mut RouteState,
+) -> Result<()> {
+    let missing = state
+        .historical_threads
+        .iter()
+        .filter(|(key, _)| state.historical_roots.contains(key) && !state.status.contains_key(key))
+        .map(|(key, historical)| (*key, historical.state))
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        eprintln!(
+            "backfilling {} missing thread status reaction(s)",
+            missing.len()
+        );
+    }
+    for (index, (key, status)) in missing.into_iter().enumerate() {
+        if index > 0 {
+            tokio::time::sleep(Duration::from_millis(125)).await;
+        }
+        set_thread_status(config, connection, state, key, status, None).await?;
+    }
+    Ok(())
+}
+
+fn recover_status_projections(
+    state: &mut RouteState,
+    channel_id: Uuid,
+    events: &[Event],
+    bot: &PublicKey,
+) {
+    let deleted = events
+        .iter()
+        .filter(|event| {
+            event.pubkey == *bot && matches!(event.kind, Kind::Custom(5) | Kind::Custom(9005))
+        })
+        .flat_map(|event| {
+            event.tags.iter().filter_map(|tag| {
+                let parts = tag.as_slice();
+                (parts.first().map(String::as_str) == Some("e"))
+                    .then(|| parts.get(1))
+                    .flatten()
+                    .and_then(|value| EventId::from_hex(value).ok())
+            })
+        })
+        .collect::<HashSet<_>>();
+
+    for event in events {
+        if event.pubkey != *bot || event.kind != Kind::Reaction || deleted.contains(&event.id) {
+            continue;
+        }
+        let Some(root_event_id) = unique_event_tag_value(event, STATUS_SOURCE_TAG)
+            .and_then(|value| EventId::from_hex(value).ok())
+        else {
+            continue;
+        };
+        if reaction_target(event) != Some(root_event_id) {
+            continue;
+        }
+        let state_value = match unique_event_tag_value(event, STATUS_STATE_TAG) {
+            Some("agent") => AgentThreadState::Agent,
+            Some("human") => AgentThreadState::Human,
+            Some("failed") => AgentThreadState::Failed,
+            _ => continue,
+        };
+        if event.content != status_emoji(state_value) {
+            continue;
+        }
+        let key = ThreadKey {
+            channel_id,
+            root_event_id,
+        };
+        let recovered_agents = parse_status_agents(event);
+        let projection = StatusProjection {
+            event_id: event.id,
+            state: state_value,
+            expires_at: unique_event_tag_value(event, STATUS_EXPIRES_TAG)
+                .and_then(|value| value.parse().ok()),
+            created_at: event.created_at.as_secs(),
+            active_agents: recovered_agents.keys().copied().collect(),
+        };
+        if state.status.get(&key).is_none_or(|existing| {
+            (existing.created_at, existing.event_id.to_hex())
+                < (projection.created_at, projection.event_id.to_hex())
+        }) {
+            if recovered_agents.is_empty() {
+                state.agent_turns.remove(&key);
+            } else {
+                state.agent_turns.insert(key, recovered_agents);
+            }
+            state.status.insert(key, projection);
+        }
+    }
+}
+
+fn parse_status_agents(event: &Event) -> HashMap<PublicKey, AgentTurnRecord> {
+    event
+        .tags
+        .iter()
+        .filter_map(|tag| {
+            let parts = tag.as_slice();
+            if parts.first().map(String::as_str) != Some(STATUS_AGENT_TAG) || parts.len() != 6 {
+                return None;
+            }
+            let agent = PublicKey::parse(&parts[1]).ok()?;
+            let revision = parts[3].parse().ok()?;
+            let expires_at = parts[4].parse().ok()?;
+            let event_id = EventId::from_hex(&parts[5]).ok()?;
+            Some((
+                agent,
+                AgentTurnRecord {
+                    state: AgentThreadState::Agent,
+                    revision,
+                    event_id,
+                    turn_id: parts[2].clone(),
+                    expires_at: Some(expires_at),
+                    authoritative: false,
+                },
+            ))
+        })
+        .collect()
 }
 
 fn record_route_event(state: &mut RouteState, channel_id: Uuid, event: &Event, bot: &PublicKey) {
@@ -1694,6 +2115,18 @@ fn record_route_event(state: &mut RouteState, channel_id: Uuid, event: &Event, b
     };
     state.handled_sources.insert(source_event_id);
     if let Some(agent) = routed_message_agent(event, bot) {
+        if let Some(relation) = parse_thread_relation(event) {
+            record_thread_assignment(
+                state,
+                ThreadKey {
+                    channel_id,
+                    root_event_id: relation.root_event_id,
+                },
+                agent,
+                event.created_at.as_secs(),
+                event.id,
+            );
+        }
         state.pending.insert(
             event.id,
             PendingRoute {
@@ -1743,6 +2176,367 @@ fn record_last_agent(state: &mut RouteState, event: &Event, owners: &[PublicKey]
             event_id: event.id,
         },
     );
+}
+
+fn record_thread_agent(
+    state: &mut RouteState,
+    event: &Event,
+    owners: &[PublicKey],
+    bot: &PublicKey,
+) {
+    if event.kind != Kind::Custom(9)
+        || event.pubkey == *bot
+        || !owners.iter().any(|owner| is_same_owner_agent(event, owner))
+    {
+        return;
+    }
+    let Some(channel_id) = event_channel(event).and_then(|value| Uuid::parse_str(value).ok())
+    else {
+        return;
+    };
+    let root_event_id =
+        parse_thread_relation(event).map_or(event.id, |relation| relation.root_event_id);
+    record_thread_assignment(
+        state,
+        ThreadKey {
+            channel_id,
+            root_event_id,
+        },
+        event.pubkey,
+        event.created_at.as_secs(),
+        event.id,
+    );
+}
+
+fn record_thread_assignment(
+    state: &mut RouteState,
+    key: ThreadKey,
+    agent: PublicKey,
+    created_at: u64,
+    event_id: EventId,
+) {
+    if state.thread_agents.get(&key).is_some_and(|existing| {
+        (existing.created_at, existing.event_id.to_hex()) >= (created_at, event_id.to_hex())
+    }) {
+        return;
+    }
+    state.thread_agents.insert(
+        key,
+        LastAgent {
+            pubkey: agent,
+            created_at,
+            event_id,
+        },
+    );
+}
+
+async fn handle_thread_lifecycle(
+    config: &Config,
+    connection: &mut NostrWsConnection,
+    event: &Event,
+    state: &mut RouteState,
+) -> Result<()> {
+    event.verify().context("invalid lifecycle signature")?;
+    if !config
+        .owner_pubkeys
+        .iter()
+        .any(|owner| is_same_owner_agent(event, owner))
+    {
+        bail!("lifecycle publisher is not an owner-attested agent");
+    }
+    let parsed = parse_agent_thread_lifecycle(event)?;
+    if !config.channel_ids.is_empty() && !config.channel_ids.contains(&parsed.channel_id) {
+        bail!("lifecycle channel is outside the configured scope");
+    }
+    let key = ThreadKey {
+        channel_id: parsed.channel_id,
+        root_event_id: parsed.root_event_id,
+    };
+    record_thread_assignment(
+        state,
+        key,
+        event.pubkey,
+        event.created_at.as_secs(),
+        event.id,
+    );
+    record_agent_turn(
+        state,
+        key,
+        event.pubkey,
+        AgentTurnRecord {
+            state: parsed.lifecycle.state,
+            revision: parsed.lifecycle.revision,
+            event_id: event.id,
+            turn_id: parsed.lifecycle.turn_id,
+            expires_at: parsed.lifecycle.expires_at,
+            authoritative: true,
+        },
+    );
+    reconcile_thread_status(config, connection, state, key).await
+}
+
+fn record_agent_turn(
+    state: &mut RouteState,
+    key: ThreadKey,
+    agent: PublicKey,
+    incoming: AgentTurnRecord,
+) {
+    let records = state.agent_turns.entry(key).or_default();
+    if let Some(existing) = records.get(&agent) {
+        if existing.turn_id == incoming.turn_id
+            && existing.state != AgentThreadState::Agent
+            && incoming.state == AgentThreadState::Agent
+        {
+            return;
+        }
+        match (existing.authoritative, incoming.authoritative) {
+            (false, true) => {}
+            (true, false) if existing.state == AgentThreadState::Agent => return,
+            (true, false) => {}
+            _ => {
+                if (existing.revision, existing.event_id.to_hex())
+                    >= (incoming.revision, incoming.event_id.to_hex())
+                {
+                    return;
+                }
+            }
+        }
+    }
+    records.insert(agent, incoming);
+}
+
+fn aggregate_thread_status(
+    state: &RouteState,
+    key: ThreadKey,
+) -> Option<(AgentThreadState, Option<u64>)> {
+    let records = state.agent_turns.get(&key)?;
+    let active_expiry = records
+        .values()
+        .filter(|record| record.state == AgentThreadState::Agent)
+        .filter_map(|record| record.expires_at)
+        .max();
+    if active_expiry.is_some() {
+        return Some((AgentThreadState::Agent, active_expiry));
+    }
+    if records
+        .values()
+        .any(|record| record.state == AgentThreadState::Failed)
+    {
+        return Some((AgentThreadState::Failed, None));
+    }
+    records
+        .values()
+        .any(|record| record.state == AgentThreadState::Human)
+        .then_some((AgentThreadState::Human, None))
+}
+
+async fn reconcile_thread_status(
+    config: &Config,
+    connection: &mut NostrWsConnection,
+    state: &mut RouteState,
+    key: ThreadKey,
+) -> Result<()> {
+    let Some((status, expires_at)) = aggregate_thread_status(state, key) else {
+        return Ok(());
+    };
+    set_thread_status(config, connection, state, key, status, expires_at).await
+}
+
+async fn set_thread_status(
+    config: &Config,
+    connection: &mut NostrWsConnection,
+    state: &mut RouteState,
+    key: ThreadKey,
+    status: AgentThreadState,
+    expires_at: Option<u64>,
+) -> Result<()> {
+    let active_records = if status == AgentThreadState::Agent {
+        state
+            .agent_turns
+            .get(&key)
+            .into_iter()
+            .flat_map(|records| records.iter())
+            .filter(|(_, record)| record.state == AgentThreadState::Agent)
+            .map(|(agent, record)| (*agent, record.clone()))
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    let active_agents = active_records
+        .iter()
+        .map(|(agent, _)| *agent)
+        .collect::<HashSet<_>>();
+    if let Some(current) = state.status.get(&key) {
+        let refresh_needed = status == AgentThreadState::Agent
+            && expires_at.is_some_and(|next| {
+                next > current
+                    .expires_at
+                    .unwrap_or_default()
+                    .saturating_add(STATUS_PERSIST_REFRESH_SECS)
+            });
+        if current.state == status && current.active_agents == active_agents && !refresh_needed {
+            return Ok(());
+        }
+    }
+
+    let reaction = config.sign(build_thread_status_reaction(
+        key,
+        status,
+        expires_at,
+        &active_records,
+    )?)?;
+    publish_required(connection, reaction.clone(), "thread turn status reaction").await?;
+
+    if let Some(previous) = state.status.get(&key).cloned() {
+        let deletion = config.sign(build_thread_status_deletion(key, previous.event_id)?)?;
+        if let Err(error) =
+            publish_required(connection, deletion, "old thread turn status deletion").await
+        {
+            let rollback = config.sign(build_thread_status_deletion(key, reaction.id)?)?;
+            let _ = publish_required(connection, rollback, "thread turn status rollback").await;
+            return Err(error);
+        }
+    }
+
+    state.status.insert(
+        key,
+        StatusProjection {
+            event_id: reaction.id,
+            state: status,
+            expires_at,
+            created_at: reaction.created_at.as_secs(),
+            active_agents,
+        },
+    );
+    eprintln!(
+        "thread {} status is {}",
+        key.root_event_id.to_hex(),
+        status.as_str()
+    );
+    Ok(())
+}
+
+fn build_thread_status_reaction(
+    key: ThreadKey,
+    status: AgentThreadState,
+    expires_at: Option<u64>,
+    active_records: &[(PublicKey, AgentTurnRecord)],
+) -> Result<EventBuilder> {
+    let channel = key.channel_id.to_string();
+    let root = key.root_event_id.to_hex();
+    let mut builder = buzz_sdk::build_reaction(key.root_event_id, status_emoji(status))?
+        .tag(Tag::parse(["h", channel.as_str()])?)
+        .tag(Tag::parse(["t", STATUS_DISCOVERY_VALUE])?)
+        .tag(Tag::parse([STATUS_SOURCE_TAG, root.as_str()])?)
+        .tag(Tag::parse([STATUS_STATE_TAG, status.as_str()])?);
+    if let Some(expires_at) = expires_at {
+        let expires_at = expires_at.to_string();
+        builder = builder.tag(Tag::parse([STATUS_EXPIRES_TAG, expires_at.as_str()])?);
+    }
+    for (agent, record) in active_records {
+        let agent = agent.to_hex();
+        let revision = record.revision.to_string();
+        let expires_at = record.expires_at.unwrap_or_default().to_string();
+        let source_event = record.event_id.to_hex();
+        builder = builder.tag(Tag::parse([
+            STATUS_AGENT_TAG,
+            agent.as_str(),
+            record.turn_id.as_str(),
+            revision.as_str(),
+            expires_at.as_str(),
+            source_event.as_str(),
+        ])?);
+    }
+    Ok(builder)
+}
+
+fn build_thread_status_deletion(key: ThreadKey, status_event_id: EventId) -> Result<EventBuilder> {
+    let root = key.root_event_id.to_hex();
+    Ok(
+        buzz_sdk::build_delete_compat(key.channel_id, status_event_id)?
+            .tag(Tag::parse(["t", STATUS_DISCOVERY_VALUE])?)
+            .tag(Tag::parse([STATUS_SOURCE_TAG, root.as_str()])?),
+    )
+}
+
+const fn status_emoji(status: AgentThreadState) -> &'static str {
+    match status {
+        AgentThreadState::Agent => "🤖",
+        AgentThreadState::Human => "👤",
+        AgentThreadState::Failed => "⚠️",
+    }
+}
+
+async fn expire_thread_statuses(
+    config: &Config,
+    connection: &mut NostrWsConnection,
+    state: &mut RouteState,
+) -> Result<()> {
+    let now = unix_seconds();
+    let revision = unix_revision();
+    let mut changed = HashSet::new();
+    for (key, records) in &mut state.agent_turns {
+        for record in records.values_mut() {
+            if record.state == AgentThreadState::Agent
+                && record
+                    .expires_at
+                    .is_some_and(|expires_at| expires_at <= now)
+            {
+                record.state = AgentThreadState::Failed;
+                record.phase_to_stale();
+                record.revision = revision;
+                record.expires_at = None;
+                changed.insert(*key);
+            }
+        }
+    }
+    for (key, projection) in &state.status {
+        if projection.state == AgentThreadState::Agent
+            && !state.agent_turns.contains_key(key)
+            && projection
+                .expires_at
+                .is_some_and(|expires_at| expires_at <= now)
+        {
+            changed.insert(*key);
+        }
+    }
+    for key in changed {
+        if state.agent_turns.contains_key(&key) {
+            reconcile_thread_status(config, connection, state, key).await?;
+        } else {
+            set_thread_status(
+                config,
+                connection,
+                state,
+                key,
+                AgentThreadState::Failed,
+                None,
+            )
+            .await?;
+        }
+    }
+    Ok(())
+}
+
+impl AgentTurnRecord {
+    fn phase_to_stale(&mut self) {
+        self.turn_id = format!("stale:{}", self.turn_id);
+    }
+}
+
+fn unix_seconds() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn unix_revision() -> u64 {
+    let micros = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_micros();
+    u64::try_from(micros).unwrap_or(u64::MAX)
 }
 
 async fn load_reaction(
@@ -1904,11 +2698,12 @@ fn parse_thread_relation(event: &Event) -> Option<ThreadRelation> {
     }
 }
 
-fn route_target(
+fn route_target_with_assignment(
     thread: &[Event],
     candidate: &Event,
     owners: &[PublicKey],
     bot: &PublicKey,
+    assigned: Option<PublicKey>,
 ) -> Option<PublicKey> {
     if !owners.contains(&candidate.pubkey) || parse_thread_relation(candidate).is_none() {
         return None;
@@ -1924,8 +2719,10 @@ fn route_target(
         }
         agents.insert(event.pubkey);
     }
-    let agent = match agents.len() {
-        0 => {
+    let assigned = assigned.filter(|agent| !owners.contains(agent) && *agent != *bot);
+    let agent = match (assigned, agents.len()) {
+        (Some(agent), _) => agent,
+        (None, 0) => {
             let root_id = parse_thread_relation(candidate)?.root_event_id;
             let root = thread.iter().find(|event| {
                 event.id == root_id
@@ -1938,8 +2735,8 @@ fn route_target(
             }
             target
         }
-        1 => agents.into_iter().next()?,
-        _ => return None,
+        (None, 1) => agents.into_iter().next()?,
+        (None, _) => return None,
     };
     if event_has_mention(candidate) {
         return None;
@@ -1956,11 +2753,22 @@ fn route_target(
     Some(agent)
 }
 
-fn top_level_route_target(
+#[cfg(test)]
+fn route_target(
+    thread: &[Event],
+    candidate: &Event,
+    owners: &[PublicKey],
+    bot: &PublicKey,
+) -> Option<PublicKey> {
+    route_target_with_assignment(thread, candidate, owners, bot, None)
+}
+
+fn top_level_route_target_with_default(
     candidate: &Event,
     owners: &[PublicKey],
     bot: &PublicKey,
     last_agent: Option<&LastAgent>,
+    configured_default: Option<&PublicKey>,
 ) -> Option<PublicKey> {
     if candidate.kind != Kind::Custom(9)
         || !owners.contains(&candidate.pubkey)
@@ -1969,8 +2777,20 @@ fn top_level_route_target(
     {
         return None;
     }
-    let agent = last_agent?.pubkey;
+    let agent = configured_default
+        .copied()
+        .or_else(|| last_agent.map(|last| last.pubkey))?;
     (!owners.contains(&agent) && agent != *bot).then_some(agent)
+}
+
+#[cfg(test)]
+fn top_level_route_target(
+    candidate: &Event,
+    owners: &[PublicKey],
+    bot: &PublicKey,
+    last_agent: Option<&LastAgent>,
+) -> Option<PublicKey> {
+    top_level_route_target_with_default(candidate, owners, bot, last_agent, None)
 }
 
 fn is_same_owner_agent(event: &Event, owner: &PublicKey) -> bool {
@@ -2282,6 +3102,8 @@ mod tests {
             picture_url: None,
             judge: None,
             emoji_reactor: false,
+            default_agent: None,
+            channel_default_agents: HashMap::new(),
         };
         let event = config
             .sign(
@@ -2775,5 +3597,358 @@ mod tests {
         record_judge_event(&mut deliveries, &reaction, &fixture.bot.public_key());
         assert!(deliveries[&fixture.agent_reply.id].complete());
         assert_eq!(reaction.content, "👍");
+    }
+
+    #[test]
+    fn concurrent_agent_turns_keep_agent_ownership_until_all_finish() {
+        let fixture = Fixture::new();
+        let second_agent = Keys::generate();
+        let key = ThreadKey {
+            channel_id: fixture.channel,
+            root_event_id: fixture.root.id,
+        };
+        let mut state = RouteState::default();
+        record_agent_turn(
+            &mut state,
+            key,
+            fixture.agent.public_key(),
+            AgentTurnRecord {
+                state: AgentThreadState::Agent,
+                revision: 1,
+                event_id: fixture.agent_reply.id,
+                turn_id: "agent-a".to_string(),
+                expires_at: Some(100),
+                authoritative: true,
+            },
+        );
+        record_agent_turn(
+            &mut state,
+            key,
+            second_agent.public_key(),
+            AgentTurnRecord {
+                state: AgentThreadState::Human,
+                revision: 2,
+                event_id: fixture.root.id,
+                turn_id: "agent-b".to_string(),
+                expires_at: None,
+                authoritative: true,
+            },
+        );
+
+        assert_eq!(
+            aggregate_thread_status(&state, key),
+            Some((AgentThreadState::Agent, Some(100)))
+        );
+
+        record_agent_turn(
+            &mut state,
+            key,
+            fixture.agent.public_key(),
+            AgentTurnRecord {
+                state: AgentThreadState::Human,
+                revision: 3,
+                event_id: fixture.root.id,
+                turn_id: "agent-a".to_string(),
+                expires_at: None,
+                authoritative: true,
+            },
+        );
+        assert_eq!(
+            aggregate_thread_status(&state, key),
+            Some((AgentThreadState::Human, None))
+        );
+
+        record_agent_turn(
+            &mut state,
+            key,
+            second_agent.public_key(),
+            AgentTurnRecord {
+                state: AgentThreadState::Failed,
+                revision: 4,
+                event_id: fixture.agent_reply.id,
+                turn_id: "agent-b".to_string(),
+                expires_at: None,
+                authoritative: true,
+            },
+        );
+        assert_eq!(
+            aggregate_thread_status(&state, key),
+            Some((AgentThreadState::Failed, None))
+        );
+    }
+
+    #[test]
+    fn late_working_refresh_cannot_revive_terminal_turn() {
+        let fixture = Fixture::new();
+        let key = ThreadKey {
+            channel_id: fixture.channel,
+            root_event_id: fixture.root.id,
+        };
+        let mut state = RouteState::default();
+        record_agent_turn(
+            &mut state,
+            key,
+            fixture.agent.public_key(),
+            AgentTurnRecord {
+                state: AgentThreadState::Human,
+                revision: 10,
+                event_id: fixture.root.id,
+                turn_id: "same-turn".to_string(),
+                expires_at: None,
+                authoritative: true,
+            },
+        );
+        record_agent_turn(
+            &mut state,
+            key,
+            fixture.agent.public_key(),
+            AgentTurnRecord {
+                state: AgentThreadState::Agent,
+                revision: 11,
+                event_id: fixture.agent_reply.id,
+                turn_id: "same-turn".to_string(),
+                expires_at: Some(100),
+                authoritative: true,
+            },
+        );
+
+        assert_eq!(
+            aggregate_thread_status(&state, key),
+            Some((AgentThreadState::Human, None))
+        );
+    }
+
+    #[test]
+    fn lifecycle_state_supersedes_synthetic_route_revision() {
+        let fixture = Fixture::new();
+        let key = ThreadKey {
+            channel_id: fixture.channel,
+            root_event_id: fixture.root.id,
+        };
+        let mut state = RouteState::default();
+        record_agent_turn(
+            &mut state,
+            key,
+            fixture.agent.public_key(),
+            AgentTurnRecord {
+                state: AgentThreadState::Agent,
+                revision: u64::MAX,
+                event_id: fixture.agent_reply.id,
+                turn_id: "route".to_string(),
+                expires_at: Some(100),
+                authoritative: false,
+            },
+        );
+        record_agent_turn(
+            &mut state,
+            key,
+            fixture.agent.public_key(),
+            AgentTurnRecord {
+                state: AgentThreadState::Human,
+                revision: 1,
+                event_id: fixture.root.id,
+                turn_id: "lifecycle".to_string(),
+                expires_at: None,
+                authoritative: true,
+            },
+        );
+
+        assert_eq!(
+            aggregate_thread_status(&state, key),
+            Some((AgentThreadState::Human, None))
+        );
+    }
+
+    #[test]
+    fn synthetic_route_starts_a_new_turn_after_terminal_lifecycle() {
+        let fixture = Fixture::new();
+        let key = ThreadKey {
+            channel_id: fixture.channel,
+            root_event_id: fixture.root.id,
+        };
+        let mut state = RouteState::default();
+        record_agent_turn(
+            &mut state,
+            key,
+            fixture.agent.public_key(),
+            AgentTurnRecord {
+                state: AgentThreadState::Human,
+                revision: u64::MAX,
+                event_id: fixture.root.id,
+                turn_id: "finished".to_string(),
+                expires_at: None,
+                authoritative: true,
+            },
+        );
+        record_agent_turn(
+            &mut state,
+            key,
+            fixture.agent.public_key(),
+            AgentTurnRecord {
+                state: AgentThreadState::Agent,
+                revision: 1,
+                event_id: fixture.agent_reply.id,
+                turn_id: "route".to_string(),
+                expires_at: Some(100),
+                authoritative: false,
+            },
+        );
+
+        assert_eq!(
+            aggregate_thread_status(&state, key),
+            Some((AgentThreadState::Agent, Some(100)))
+        );
+    }
+
+    #[test]
+    fn status_reaction_is_discoverable_and_targets_root() {
+        let fixture = Fixture::new();
+        let key = ThreadKey {
+            channel_id: fixture.channel,
+            root_event_id: fixture.root.id,
+        };
+        let reaction = build_thread_status_reaction(key, AgentThreadState::Agent, Some(123), &[])
+            .unwrap()
+            .sign_with_keys(&fixture.bot)
+            .unwrap();
+
+        assert_eq!(reaction.content, "🤖");
+        assert_eq!(reaction_target(&reaction), Some(fixture.root.id));
+        assert_eq!(
+            unique_event_tag_value(&reaction, STATUS_SOURCE_TAG),
+            Some(fixture.root.id.to_hex()).as_deref()
+        );
+        assert_eq!(
+            unique_event_tag_value(&reaction, STATUS_STATE_TAG),
+            Some("agent")
+        );
+        assert_eq!(
+            event_tag_value(&reaction, "t"),
+            Some(STATUS_DISCOVERY_VALUE)
+        );
+    }
+
+    #[test]
+    fn recovery_ignores_deleted_status_reactions() {
+        let fixture = Fixture::new();
+        let key = ThreadKey {
+            channel_id: fixture.channel,
+            root_event_id: fixture.root.id,
+        };
+        let reaction = build_thread_status_reaction(key, AgentThreadState::Human, None, &[])
+            .unwrap()
+            .sign_with_keys(&fixture.bot)
+            .unwrap();
+        let deletion = build_thread_status_deletion(key, reaction.id)
+            .unwrap()
+            .sign_with_keys(&fixture.bot)
+            .unwrap();
+        let mut state = RouteState::default();
+        recover_status_projections(
+            &mut state,
+            fixture.channel,
+            &[reaction, deletion],
+            &fixture.bot.public_key(),
+        );
+
+        assert!(state.status.is_empty());
+    }
+
+    #[test]
+    fn recovery_restores_each_active_agent_from_status_projection() {
+        let fixture = Fixture::new();
+        let key = ThreadKey {
+            channel_id: fixture.channel,
+            root_event_id: fixture.root.id,
+        };
+        let active = AgentTurnRecord {
+            state: AgentThreadState::Agent,
+            revision: 42,
+            event_id: fixture.agent_reply.id,
+            turn_id: "active-turn".to_string(),
+            expires_at: Some(123),
+            authoritative: true,
+        };
+        let reaction = build_thread_status_reaction(
+            key,
+            AgentThreadState::Agent,
+            Some(123),
+            &[(fixture.agent.public_key(), active)],
+        )
+        .unwrap()
+        .sign_with_keys(&fixture.bot)
+        .unwrap();
+        let mut state = RouteState::default();
+
+        recover_status_projections(
+            &mut state,
+            fixture.channel,
+            &[reaction],
+            &fixture.bot.public_key(),
+        );
+
+        let recovered = &state.agent_turns[&key][&fixture.agent.public_key()];
+        assert_eq!(recovered.turn_id, "active-turn");
+        assert_eq!(recovered.revision, 42);
+        assert_eq!(recovered.expires_at, Some(123));
+    }
+
+    #[test]
+    fn sticky_assignment_resolves_a_multi_agent_thread() {
+        let fixture = Fixture::new();
+        let second_agent = Keys::generate();
+        let second_reply = message(
+            &second_agent,
+            Some(&auth_tag(&fixture.owner, &second_agent)),
+            fixture.channel,
+            Some(&ThreadRef {
+                root_event_id: fixture.root.id,
+                parent_event_id: fixture.root.id,
+            }),
+            &[],
+        );
+        let candidate = message(
+            &fixture.owner,
+            None,
+            fixture.channel,
+            Some(&ThreadRef {
+                root_event_id: fixture.root.id,
+                parent_event_id: second_reply.id,
+            }),
+            &[],
+        );
+
+        assert_eq!(
+            route_target_with_assignment(
+                &[
+                    fixture.root,
+                    fixture.agent_reply,
+                    second_reply,
+                    candidate.clone(),
+                ],
+                &candidate,
+                &[fixture.owner.public_key()],
+                &fixture.bot.public_key(),
+                Some(second_agent.public_key()),
+            ),
+            Some(second_agent.public_key())
+        );
+    }
+
+    #[test]
+    fn configured_default_routes_an_untagged_new_root() {
+        let fixture = Fixture::new();
+        let candidate = message(&fixture.owner, None, fixture.channel, None, &[]);
+
+        assert_eq!(
+            top_level_route_target_with_default(
+                &candidate,
+                &[fixture.owner.public_key()],
+                &fixture.bot.public_key(),
+                None,
+                Some(&fixture.agent.public_key()),
+            ),
+            Some(fixture.agent.public_key())
+        );
     }
 }

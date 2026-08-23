@@ -1,7 +1,10 @@
 # Thread Mention Bot
 
-A small Buzz automation bot. Its default deterministic rule tags the sole agent
-when the owner writes an untagged reply in an otherwise two-party thread.
+A small Buzz automation bot. Its deterministic router tags the assigned agent
+when the owner writes without an explicit mention. It also coordinates one
+durable reaction on every active thread root: `🤖` while agent work is queued
+or running, `👤` after successful completion, and `⚠️` for failed, stale, or
+unassigned work.
 
 An optional judge runs one persistent ACP session for every agent-authored
 message. The ACP session returns a structured verdict; the bot applies it
@@ -25,17 +28,18 @@ created during the initial pass are included.
 
 For each new kind `9` message authored by the configured owner, the bot:
 
-1. Requires NIP-10 thread tags. Top-level messages are ignored.
+1. Uses NIP-10 thread tags when present; a top-level message starts a new thread.
 2. Queries the complete thread from the relay.
 3. Ignores its own prior routing messages when counting participants.
 4. Requires every other author to have exactly one valid NIP-OA `auth` tag
    proving the configured owner.
-5. Requires exactly one such agent author in the thread.
-6. Does nothing if another human, a second agent, or an unverified process has
-   authored a thread message.
+5. Reuses the thread's sticky agent assignment. Otherwise it requires exactly
+   one verified agent author in the thread.
+6. Uses a per-channel or global configured default for a new untagged root,
+   falling back to the most recent verified agent in that channel.
 7. Does nothing if the owner's new message already `p`-tags anyone.
 8. Does nothing if it already routed that exact message.
-9. Otherwise posts a sibling kind `9` reply in the existing thread with the
+9. Otherwise posts a sibling kind `9` reply in the thread with the
    agent's real `p` tag, friendly `@name`, and the owner's message text.
 
 The original user event remains unchanged because Nostr events are signed and
@@ -62,6 +66,10 @@ export BUZZ_OWNER_PUBKEY=<owner-npub-or-hex-public-key>
 export BUZZ_OWNER_PUBKEYS=<owner-public-key>[,<owner-public-key>...]
 # Optional: restrict routing to specific channels.
 export BUZZ_CHANNEL_IDS=<channel-uuid>[,<channel-uuid>...]
+# Optional: route untagged new roots to this agent.
+export BUZZ_DEFAULT_AGENT_PUBKEY=<agent-public-key>
+# Optional: override defaults per channel.
+export BUZZ_CHANNEL_AGENT_DEFAULTS=<channel-uuid>=<agent-public-key>[,...]
 # Optional: publish a profile avatar.
 export BUZZ_BOT_PICTURE_URL=https://buzz.example.com/media/avatar.png
 # Optional: enable one vendor-independent ACP judge session.
@@ -79,8 +87,15 @@ cargo run -p thread-mention-bot
 ```
 
 Omit `BUZZ_CHANNEL_IDS` to discover and watch every channel the bot can access.
-The channel list is refreshed every five minutes.
+Membership notifications refresh the channel list immediately, with a
+five-minute safety refresh as a fallback.
 `BUZZ_CHANNEL_ID` is accepted as a single-channel compatibility alias.
+
+The coordinator accepts ephemeral `kind:24201` lifecycle snapshots only from
+agents with a valid NIP-OA attestation for a configured owner. It aggregates
+concurrent agent turns, rejects reordered snapshots, expires stale work, and
+recovers its tagged durable root reactions after restart. See
+[`NIP-AT`](../../docs/nips/NIP-AT.md).
 
 To upgrade from standalone mode, generate the bot-specific attestation once
 and save its output as `BUZZ_AUTH_TAG`. The verified attestation adds its signer

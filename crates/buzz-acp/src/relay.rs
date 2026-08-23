@@ -117,8 +117,8 @@ const GATED_OBSERVER_QUEUE_CAP: usize = 256;
 use std::time::Instant;
 
 use buzz_core::kind::{
-    KIND_AGENT_OBSERVER_FRAME, KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION,
-    KIND_TYPING_INDICATOR,
+    KIND_AGENT_OBSERVER_FRAME, KIND_AGENT_THREAD_LIFECYCLE, KIND_MEMBER_ADDED_NOTIFICATION,
+    KIND_MEMBER_REMOVED_NOTIFICATION, KIND_TYPING_INDICATOR,
 };
 use futures_util::{SinkExt, StreamExt};
 use nostr::{Event, EventBuilder, Keys, Kind, RelayUrl, Tag};
@@ -553,6 +553,13 @@ enum RelayCommand {
     SetStartupWatermark { ts: u64 },
 }
 
+fn is_durable_publish(event: &Event) -> bool {
+    matches!(
+        event.kind.as_u16() as u32,
+        KIND_AGENT_OBSERVER_FRAME | KIND_AGENT_THREAD_LIFECYCLE
+    )
+}
+
 type WsStream = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 
 /// Harness-side relay client.
@@ -597,6 +604,15 @@ impl RelayEventPublisher {
                 event: Box::new(event),
             })
             .await
+            .map_err(|_| RelayError::ConnectionClosed)
+    }
+
+    /// Best-effort non-blocking publish for refreshable ephemeral state.
+    pub fn try_publish_event(&self, event: Event) -> Result<(), RelayError> {
+        self.cmd_tx
+            .try_send(RelayCommand::PublishEvent {
+                event: Box::new(event),
+            })
             .map_err(|_| RelayError::ConnectionClosed)
     }
 
@@ -1308,12 +1324,12 @@ fn apply_command_to_state(state: &mut BgState, cmd: RelayCommand) {
                 state.membership_last_seen = Some(ts);
             }
         }
-        // Observer telemetry frames are durable: park them (bounded, visible
-        // overflow) so they are delivered by the post-reconnect drain. Other
+        // Observer telemetry and thread lifecycle snapshots are durable: park
+        // them (bounded, visible overflow) for the post-reconnect drain. Other
         // ephemeral publishes (typing indicators) are meaningless while
         // disconnected and are dropped.
         RelayCommand::PublishEvent { event } => {
-            if event.kind.as_u16() as u32 == KIND_AGENT_OBSERVER_FRAME {
+            if is_durable_publish(&event) {
                 state.park_gated_observer_frame(event);
             }
         }
@@ -1337,9 +1353,7 @@ fn apply_command_to_state(state: &mut BgState, cmd: RelayCommand) {
 /// `Shutdown` and `Reconnect` are handled by the caller.
 fn retain_failed_command_intent(state: &mut BgState, cmd: RelayCommand) {
     match cmd {
-        RelayCommand::PublishEvent { event }
-            if event.kind.as_u16() as u32 == KIND_AGENT_OBSERVER_FRAME =>
-        {
+        RelayCommand::PublishEvent { event } if is_durable_publish(&event) => {
             state.park_gated_observer_frame(event);
         }
         RelayCommand::PublishEvent { .. } => {}
@@ -1497,12 +1511,11 @@ async fn execute_connected_command(
             }
         }
         RelayCommand::PublishEvent { event } => {
-            // Observer telemetry frames (kind 24200) are durable telemetry, not
-            // droppable ephemera: park them while the rate-limit gate is armed —
-            // and while earlier parked frames are still draining, so relative
-            // order is preserved — then let the main-loop drain deliver them
-            // one per pacing tick once the gate clears.
-            if event.kind.as_u16() as u32 == KIND_AGENT_OBSERVER_FRAME
+            // Observer telemetry and thread lifecycle snapshots are durable,
+            // not droppable ephemera: park them while the rate-limit gate is
+            // armed — and while earlier parked frames are still draining, so
+            // relative order is preserved — then drain one per pacing tick.
+            if is_durable_publish(&event)
                 && (state.check_rate_gate().is_some() || !state.gated_observer_pending.is_empty())
             {
                 debug!(
@@ -1516,24 +1529,22 @@ async fn execute_connected_command(
             // indicators are worthless and sending them would consume admission
             // budget the relay already rejected us on.
             //
-            // INVARIANT: apart from observer frames (parked above), the WS publish
-            // path carries only ephemeral kinds (typing indicators). The silent
-            // drop-while-gated relies on that invariant. If a future caller
-            // publishes durable events through this path, it must extend the
-            // kind guard above to avoid silently discarding user data.
+            // INVARIANT: apart from the durable kinds parked above, the WS
+            // publish path carries only ephemeral kinds (typing indicators).
+            // The silent drop-while-gated relies on that invariant.
             if state.check_rate_gate().is_some() {
                 debug!("rate-gated: dropping ephemeral PublishEvent (typing indicator)");
                 return true;
             }
             // Best-effort: log a send failure but don't trigger reconnect — the
-            // next ping or read will detect the dead socket. A failed observer
-            // frame is parked so the post-reconnect drain redelivers it.
-            let is_observer = event.kind.as_u16() as u32 == KIND_AGENT_OBSERVER_FRAME;
+            // next ping or read will detect the dead socket. Failed durable
+            // events are parked so the post-reconnect drain redelivers them.
+            let is_durable = is_durable_publish(&event);
             if send_publish_event_frame(ws, &event).await {
-                if is_observer {
+                if is_durable {
                     state.track_observer_in_flight(event);
                 }
-            } else if is_observer {
+            } else if is_durable {
                 state.park_gated_observer_frame(event);
             }
             true
@@ -5875,11 +5886,29 @@ mod tests {
         .expect("sign test observer frame")
     }
 
-    /// While the rate-limit gate is armed, an observer frame (kind 24200) is
-    /// parked — not silently dropped — and delivered by the drain once the
-    /// gate clears. A typing indicator in the same window stays dropped.
+    fn make_thread_lifecycle(keys: &Keys) -> Event {
+        buzz_core::agent_thread_lifecycle::build_agent_thread_lifecycle(
+            Uuid::new_v4(),
+            nostr::EventId::all_zeros(),
+            &buzz_core::agent_thread_lifecycle::AgentThreadLifecycle {
+                version: 1,
+                turn_id: "turn-1".into(),
+                state: buzz_core::agent_thread_lifecycle::AgentThreadState::Agent,
+                phase: "working".into(),
+                revision: 1,
+                expires_at: Some(u64::MAX),
+            },
+        )
+        .expect("build test thread lifecycle")
+        .sign_with_keys(keys)
+        .expect("sign test thread lifecycle")
+    }
+
+    /// While the rate-limit gate is armed, durable observer and lifecycle
+    /// events are parked and drained once the gate clears. A typing indicator
+    /// in the same window stays dropped.
     #[tokio::test]
-    async fn gated_observer_frame_is_parked_then_drained_not_dropped() {
+    async fn gated_durable_events_are_parked_then_drained_not_dropped() {
         let (mut client, mut server) = test_ws_pair().await;
         let mut state = BgState::new();
         let keys = Keys::generate();
@@ -5903,6 +5932,23 @@ mod tests {
             "observer frame must be parked while gated"
         );
 
+        let lifecycle = make_thread_lifecycle(&keys);
+        let ok = execute_connected_command(
+            &mut client,
+            &mut state,
+            "agent-pubkey",
+            RelayCommand::PublishEvent {
+                event: Box::new(lifecycle.clone()),
+            },
+        )
+        .await;
+        assert!(ok);
+        assert_eq!(
+            state.gated_observer_pending.len(),
+            2,
+            "thread lifecycle must be parked while gated"
+        );
+
         // Typing indicator while gated: still dropped, not parked.
         let typing = EventBuilder::new(Kind::Custom(KIND_TYPING_INDICATOR as u16), "")
             .tags([Tag::parse(["h", &Uuid::new_v4().to_string()]).unwrap()])
@@ -5920,7 +5966,7 @@ mod tests {
         assert!(ok);
         assert_eq!(
             state.gated_observer_pending.len(),
-            1,
+            2,
             "typing indicators must not be parked"
         );
         assert!(
@@ -5933,8 +5979,8 @@ mod tests {
         // Gate expires — the drain delivers the parked frame.
         tokio::time::sleep(Duration::from_millis(160)).await;
         assert_eq!(
-            drain_gated_observer_pending(&mut client, &mut state, 1).await,
-            1
+            drain_gated_observer_pending(&mut client, &mut state, 2).await,
+            2
         );
         assert!(state.gated_observer_pending.is_empty());
         let frame = next_test_frame(&mut server).await;
@@ -5945,6 +5991,10 @@ mod tests {
             u64::from(KIND_AGENT_OBSERVER_FRAME),
             "delivered frame must be the parked observer frame"
         );
+        let frame = next_test_frame(&mut server).await;
+        assert_eq!(frame[0], "EVENT");
+        assert_eq!(frame[1]["id"], lifecycle.id.to_hex());
+        assert_eq!(frame[1]["kind"], u64::from(KIND_AGENT_THREAD_LIFECYCLE));
     }
 
     /// Observer frames arriving while earlier parked frames are still queued

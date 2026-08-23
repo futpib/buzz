@@ -21,6 +21,10 @@ use crate::state::AppState;
 
 use super::{api_error, internal_error, not_found};
 
+fn is_http_ephemeral_publish_kind(kind: u32) -> bool {
+    kind == buzz_core::kind::KIND_AGENT_THREAD_LIFECYCLE
+}
+
 pub(crate) async fn enforce_http_admission(
     state: &AppState,
     tenant: &TenantContext,
@@ -830,6 +834,63 @@ async fn submit_event_authed(
     }
 
     let kind_u32 = buzz_core::kind::event_kind_u32(&event);
+    if is_http_ephemeral_publish_kind(kind_u32) {
+        let event_id = event.id.to_hex();
+        if let Err(error) = buzz_core::agent_thread_lifecycle::parse_agent_thread_lifecycle(&event)
+        {
+            crate::handlers::ingest::reject_with_transport("http", "invalid");
+            let message = format!("invalid: {error}");
+            return SubmitOutcome::Rejected {
+                kind: kind_u32,
+                reason: truncate_reason(&message, REJECT_REASON_MAX_BYTES).to_owned(),
+                response: api_error(StatusCode::BAD_REQUEST, &message),
+            };
+        }
+        return match crate::handlers::event::handle_ephemeral_event(
+            event,
+            None,
+            pubkey_bytes,
+            pubkey,
+            tenant,
+            Arc::clone(state),
+        )
+        .await
+        {
+            Ok(()) => SubmitOutcome::Ok {
+                accepted: true,
+                kind: kind_u32,
+                response: Json(serde_json::json!({
+                    "event_id": event_id,
+                    "accepted": true,
+                    "message": "",
+                })),
+            },
+            Err(message) if message.starts_with("restricted:") => {
+                crate::handlers::ingest::reject_with_transport("http", "auth");
+                let response = api_error(StatusCode::FORBIDDEN, &message);
+                SubmitOutcome::Err {
+                    status: response.0,
+                    response,
+                }
+            }
+            Err(message) if message.starts_with("error:") => {
+                crate::handlers::ingest::reject_with_transport("http", "error");
+                let response = internal_error(&message);
+                SubmitOutcome::Err {
+                    status: response.0,
+                    response,
+                }
+            }
+            Err(message) => {
+                crate::handlers::ingest::reject_with_transport("http", "invalid");
+                SubmitOutcome::Rejected {
+                    kind: kind_u32,
+                    reason: truncate_reason(&message, REJECT_REASON_MAX_BYTES).to_owned(),
+                    response: api_error(StatusCode::BAD_REQUEST, &message),
+                }
+            }
+        };
+    }
     let auth = IngestAuth::Http {
         pubkey,
         scopes: buzz_auth::Scope::all_known(), // Pure Nostr: full scopes, channel access via membership
@@ -2320,6 +2381,19 @@ mod tests {
     use super::*;
     use nostr::{Alphabet, EventBuilder, Keys, Kind, SingleLetterTag, Tag};
     use std::sync::Mutex;
+
+    #[test]
+    fn http_bridge_only_admits_the_supported_ephemeral_lifecycle_kind() {
+        assert!(is_http_ephemeral_publish_kind(
+            buzz_core::kind::KIND_AGENT_THREAD_LIFECYCLE
+        ));
+        assert!(!is_http_ephemeral_publish_kind(
+            buzz_core::kind::KIND_TYPING_INDICATOR
+        ));
+        assert!(!is_http_ephemeral_publish_kind(
+            buzz_core::kind::KIND_AGENT_OBSERVER_FRAME
+        ));
+    }
 
     fn redis_pool() -> deadpool_redis::Pool {
         let url = std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".into());

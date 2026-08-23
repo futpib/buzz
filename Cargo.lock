@@ -9777,6 +9777,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "buzz-acp",
+ "buzz-core",
  "buzz-sdk",
  "buzz-ws-client",
  "nostr 0.44.7",

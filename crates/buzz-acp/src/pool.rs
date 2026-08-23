@@ -42,6 +42,7 @@ use crate::queue::{
     PromptChannelInfo, PromptProfile, PromptProfileLookup, ThreadTags,
 };
 use crate::relay::{ChannelInfo, RestClient};
+use crate::thread_lifecycle::ThreadLifecycleReporter;
 
 /// Window within which agent activity before a hard-cap death qualifies
 /// the turn as "recently active" (eligible for requeue instead of dead-letter).
@@ -784,6 +785,8 @@ pub struct PromptContext {
     /// the desktop keys per (agent, relay) pair, e.g. `session_config_captured`,
     /// mirroring the `managed_agent_runtime_lifecycle` frames.
     pub relay_url: String,
+    /// Publishes owner-attested thread ownership state for coordinator bots.
+    pub thread_lifecycle: Option<ThreadLifecycleReporter>,
 }
 
 impl AgentPool {
@@ -1989,6 +1992,24 @@ fn send_prompt_result(
     });
 }
 
+async fn publish_successful_thread_completion(
+    reporter: Option<&ThreadLifecycleReporter>,
+    source: &PromptSource,
+    turn_id: &str,
+) {
+    let (PromptSource::Channel(conversation), Some(reporter)) = (source, reporter) else {
+        return;
+    };
+    reporter
+        .publish_terminal(
+            conversation,
+            turn_id,
+            buzz_core::agent_thread_lifecycle::AgentThreadState::Human,
+            "completed",
+        )
+        .await;
+}
+
 /// Core async function spawned for each prompt.
 ///
 /// Lifecycle:
@@ -2040,6 +2061,21 @@ pub async fn run_prompt_task(
             "triggeringEventIds": triggering_event_ids,
         }),
     );
+
+    let _thread_lifecycle_guard = match (&source, &ctx.thread_lifecycle) {
+        (PromptSource::Channel(conversation), Some(reporter)) => {
+            reporter.try_agent_working(conversation, &turn_id, ctx.turn_liveness_interval);
+            Some(ThreadLifecycleLivenessGuard::new(tokio::spawn(
+                run_thread_lifecycle_liveness(
+                    reporter.clone(),
+                    conversation.clone(),
+                    turn_id.clone(),
+                    ctx.turn_liveness_interval,
+                ),
+            )))
+        }
+        _ => None,
+    };
 
     // Emits `turn_completed` on any exit path. Captures observer handle and
     // metadata now, before the agent is moved into PromptResult. It must be
@@ -2884,6 +2920,12 @@ pub async fn run_prompt_task(
                             );
                         }
                         log_stop_reason(&source, &StopReason::EndTurn);
+                        publish_successful_thread_completion(
+                            ctx.thread_lifecycle.as_ref(),
+                            &source,
+                            &turn_id,
+                        )
+                        .await;
                         if let PromptSource::Channel(key) = &source {
                             let standing_sent = !agent.has_system_prompt_support();
                             record_channel_delivery_success(
@@ -2929,6 +2971,8 @@ pub async fn run_prompt_task(
     match prompt_result {
         Ok(stop_reason) => {
             log_stop_reason(&source, &stop_reason);
+            publish_successful_thread_completion(ctx.thread_lifecycle.as_ref(), &source, &turn_id)
+                .await;
 
             if let PromptSource::Channel(cid) = &source {
                 let standing_sent = !agent.has_system_prompt_support();
@@ -4535,6 +4579,39 @@ struct LivenessGuard {
     state: Arc<Mutex<LivenessState>>,
 }
 
+async fn run_thread_lifecycle_liveness(
+    reporter: ThreadLifecycleReporter,
+    conversation: ConversationKey,
+    turn_id: String,
+    interval: Duration,
+) {
+    if interval.is_zero() {
+        return std::future::pending::<()>().await;
+    }
+    let mut ticker = tokio::time::interval(interval);
+    ticker.tick().await;
+    loop {
+        ticker.tick().await;
+        reporter.try_agent_working(&conversation, &turn_id, interval);
+    }
+}
+
+struct ThreadLifecycleLivenessGuard {
+    handle: JoinHandle<()>,
+}
+
+impl ThreadLifecycleLivenessGuard {
+    fn new(handle: JoinHandle<()>) -> Self {
+        Self { handle }
+    }
+}
+
+impl Drop for ThreadLifecycleLivenessGuard {
+    fn drop(&mut self) {
+        self.handle.abort();
+    }
+}
+
 impl LivenessGuard {
     fn new(handle: JoinHandle<()>, state: Arc<Mutex<LivenessState>>) -> Self {
         Self { handle, state }
@@ -4996,6 +5073,32 @@ async fn clear_reactions(rest: crate::relay::RestClient, event_ids: Vec<String>)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn successful_thread_completion_is_published_before_result_cleanup() {
+        let (publisher, mut events) = crate::relay::RelayEventPublisher::test_pair();
+        let reporter = ThreadLifecycleReporter::new(publisher, nostr::Keys::generate(), None);
+        let root = nostr::EventId::all_zeros();
+        let source = PromptSource::Channel(ConversationKey {
+            channel_id: Uuid::new_v4(),
+            thread_root: Some(root.to_hex()),
+        });
+
+        publish_successful_thread_completion(Some(&reporter), &source, "turn-1").await;
+
+        let parsed = buzz_core::agent_thread_lifecycle::parse_agent_thread_lifecycle(
+            &events.recv().await.unwrap(),
+        )
+        .unwrap();
+        assert_eq!(parsed.root_event_id, root);
+        assert_eq!(parsed.lifecycle.turn_id, "turn-1");
+        assert_eq!(
+            parsed.lifecycle.state,
+            buzz_core::agent_thread_lifecycle::AgentThreadState::Human
+        );
+        assert_eq!(parsed.lifecycle.phase, "completed");
+        assert_eq!(parsed.lifecycle.expires_at, None);
+    }
 
     #[tokio::test]
     async fn pool_grants_multiple_session_leases_from_one_process() {
@@ -8270,6 +8373,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             memory_enabled: false,
             harness_name: "goose".to_string(),
             relay_url: "ws://127.0.0.1:3000".to_string(),
+            thread_lifecycle: None,
         }
     }
 

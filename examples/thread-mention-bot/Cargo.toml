@@ -14,3 +14,4 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "si
 uuid = { workspace = true }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 buzz-acp = { version = "0.1.0", path = "../../crates/buzz-acp" }
+buzz-core = { version = "0.1.0", path = "../../crates/buzz-core" }
