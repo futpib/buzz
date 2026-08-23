@@ -374,8 +374,31 @@ test("duplicate owned agents preserve provenance and exact pubkey selection", as
     `mention-suggestion-${managedPubkey}`,
   );
   const relayRow = dropdown.getByTestId(`mention-suggestion-${relayPubkey}`);
-  await expect(managedRow).toContainText("agent · managed here");
-  await expect(relayRow).toContainText("agent · managed elsewhere");
+  await expect(managedRow).toContainText("agent");
+  await expect(managedRow.getByTestId("mention-agent-provenance")).toHaveCount(
+    0,
+  );
+  await expect(relayRow).toContainText("agent");
+  await expect(
+    relayRow.getByTestId("mention-agent-provenance"),
+  ).toHaveAttribute("aria-label", "From another Buzz setup");
+  await expect(
+    relayRow.getByText("Other setup", { exact: true }),
+  ).toBeVisible();
+  await expect(managedRow).not.toContainText("managed by you");
+  await expect(relayRow).not.toContainText("managed by you");
+
+  await page.setViewportSize({ width: 760, height: 640 });
+  await expect(
+    relayRow.getByText("Other setup", { exact: true }),
+  ).toBeVisible();
+  const rowBox = await relayRow.boundingBox();
+  const dropdownBox = await dropdown.boundingBox();
+  expect(rowBox).not.toBeNull();
+  expect(dropdownBox).not.toBeNull();
+  expect((rowBox?.x ?? 0) + (rowBox?.width ?? 0)).toBeLessThanOrEqual(
+    (dropdownBox?.x ?? 0) + (dropdownBox?.width ?? 0) + 1,
+  );
 
   const collisionKeys = dropdown.getByTestId("mention-collision-npub");
   await expect(collisionKeys).toHaveCount(2);
@@ -385,34 +408,39 @@ test("duplicate owned agents preserve provenance and exact pubkey selection", as
   expect(fullNpubs).toHaveLength(2);
   expect(new Set(fullNpubs).size).toBe(2);
 
-  const initialRows = dropdown.locator("button");
-  const managedIndex = await initialRows.evaluateAll(
-    (buttons, pubkey) =>
-      buttons.findIndex(
-        (button) =>
-          button.getAttribute("data-testid") === `mention-suggestion-${pubkey}`,
-      ),
-    managedPubkey,
-  );
-  expect(managedIndex).toBeGreaterThanOrEqual(0);
-  for (let index = 0; index < managedIndex; index += 1) {
-    await input.press("ArrowDown");
-  }
-  await input.press("Enter");
-  await page.keyboard.type("local");
+  await managedRow
+    .getByRole("button", { name: "Automatically mention carl", exact: true })
+    .click();
+  await expect(
+    page.getByTestId(`composer-address-lock-${managedPubkey}`),
+  ).toBeVisible();
+  await expect(
+    page.getByTestId(`composer-address-lock-${relayPubkey}`),
+  ).toHaveCount(0);
+  await input.fill("local");
   await page.getByTestId("send-message").click();
   await expect
-    .poll(() => readOutgoingMentionPubkeys(page, "@carl local"))
+    .poll(() => readOutgoingMentionPubkeys(page, "local"))
     .toEqual([managedPubkey]);
   await expect(input).toBeEmpty();
 
+  await page.getByTestId(`composer-address-lock-${managedPubkey}`).click();
   await input.fill("@carl");
   const reopenedDropdown = autocomplete(page);
   await expect(reopenedDropdown).toBeVisible();
-  await reopenedDropdown
-    .getByTestId(`mention-suggestion-${relayPubkey}`)
+  const reopenedRelayRow = reopenedDropdown.getByTestId(
+    `mention-suggestion-${relayPubkey}`,
+  );
+  await reopenedRelayRow
+    .getByRole("button", { name: "Automatically mention carl", exact: true })
     .click();
-  await page.keyboard.type("remote");
+  await expect(
+    page.getByTestId(`composer-address-lock-${relayPubkey}`),
+  ).toBeVisible();
+  await expect(
+    page.getByTestId(`composer-address-lock-${managedPubkey}`),
+  ).toHaveCount(0);
+  await input.fill("remote");
   await page.getByTestId("send-message").click();
   const sendWithoutInviting = page.getByRole("button", { name: "Do nothing" });
   try {
@@ -422,8 +450,57 @@ test("duplicate owned agents preserve provenance and exact pubkey selection", as
     // In-channel selections send immediately without opening the prompt.
   }
   await expect
-    .poll(() => readOutgoingMentionPubkeys(page, "@carl remote"))
+    .poll(() => readOutgoingMentionPubkeys(page, "remote"))
     .toEqual([relayPubkey]);
+
+  await page.getByTestId("channel-members-trigger").click();
+  const remoteSidebarMarker = page.getByTestId(
+    `sidebar-member-agent-provenance-${relayPubkey}`,
+  );
+  await expect(
+    page.getByTestId(`sidebar-member-agent-provenance-${managedPubkey}`),
+  ).toHaveCount(0);
+  await expect(remoteSidebarMarker).toHaveAttribute(
+    "aria-label",
+    "From another Buzz setup",
+  );
+  await expect(remoteSidebarMarker).toHaveText("Other setup");
+  const remoteSidebarRow = page.getByTestId(`sidebar-member-${relayPubkey}`);
+  const localSidebarMarker = page.getByTestId(
+    `sidebar-member-agent-provenance-${managedPubkey}`,
+  );
+  const markerRemainsVisible = () =>
+    remoteSidebarMarker.evaluate((marker) => {
+      let element: Element | null = marker;
+      while (element) {
+        const style = window.getComputedStyle(element);
+        if (style.display === "none" || style.visibility === "hidden") {
+          return false;
+        }
+        if (Number(style.opacity) === 0) return false;
+        element = element.parentElement;
+      }
+      return true;
+    });
+  await expect.poll(markerRemainsVisible).toBe(true);
+  await expect(localSidebarMarker).toHaveCount(0);
+  const sidebarMarkerBox = await remoteSidebarMarker.boundingBox();
+  const sidebarBox = await page.getByTestId("members-sidebar").boundingBox();
+  expect(sidebarMarkerBox).not.toBeNull();
+  expect(sidebarBox).not.toBeNull();
+  expect(
+    (sidebarMarkerBox?.x ?? 0) + (sidebarMarkerBox?.width ?? 0),
+  ).toBeLessThanOrEqual((sidebarBox?.x ?? 0) + (sidebarBox?.width ?? 0) + 1);
+
+  await remoteSidebarRow.hover();
+  await page.waitForTimeout(200);
+  await expect.poll(markerRemainsVisible).toBe(true);
+  await expect(localSidebarMarker).toHaveCount(0);
+
+  await page.getByTestId(`sidebar-member-open-profile-${relayPubkey}`).focus();
+  await page.waitForTimeout(200);
+  await expect.poll(markerRemainsVisible).toBe(true);
+  await expect(localSidebarMarker).toHaveCount(0);
 });
 
 test("relay-only shared agents emit an outbound mention tag when selected", async ({
@@ -802,6 +879,53 @@ test("clicking a person mention chip edge is not treated as after the trailing s
   expect(text).not.toMatch(/@bob x/);
 });
 
+test("typing a mention before existing text does not interleave spaces", async ({
+  page,
+}) => {
+  // Regression (the reported repro): with a draft already written, place the
+  // caret earlier in the message, type a partial mention, pick a suggestion,
+  // then keep typing. Caret correction used to fire on every document change
+  // and walk the caret across the mention's trailing space, so each keystroke
+  // pushed a space further into the rest of the draft.
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  const input = page.getByTestId("message-input");
+  await input.fill("hello world");
+
+  // Click between "hello" and " world", then open autocomplete there.
+  await input.focus();
+  for (let i = 0; i < " world".length; i++) {
+    await page.keyboard.press("ArrowLeft");
+  }
+  await page.keyboard.type(" @bo");
+  await autocomplete(page).getByText("bob").click();
+  await page.keyboard.type("abc");
+
+  await expect(input).toHaveText("hello @bob abc world");
+});
+
+test("typing an unregistered @token before existing text is left alone", async ({
+  page,
+}) => {
+  // The trailing-space scan is purely textual, so it also fired for tokens
+  // that were never registered as mentions.
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  const input = page.getByTestId("message-input");
+  await input.fill("hello world");
+  await input.focus();
+  for (let i = 0; i < " world".length; i++) {
+    await page.keyboard.press("ArrowLeft");
+  }
+  await page.keyboard.type(" @zzq");
+
+  await expect(input).toHaveText("hello @zzq world");
+});
+
 test("channel references keep caret movement through the channel name", async ({
   page,
 }) => {
@@ -1016,7 +1140,7 @@ test("selecting a persona mention reuses an existing persona agent", async ({
   await expect(mentionChip).toHaveText("Fizz");
 });
 
-test("managed relay-profile agents with member roles use the agent composer style", async ({
+test("managed relay-profile agents with member roles use the agent address tray", async ({
   page,
 }) => {
   await installMockBridge(page, {
@@ -1046,11 +1170,15 @@ test("managed relay-profile agents with member roles use the agent composer styl
   await expect(dropdown.getByText("agent")).toBeVisible();
   await input.press("Enter");
 
-  const agentMentionChip = input.locator(".agent-mention-highlight", {
-    hasText: "charlie",
-  });
-  await expect(agentMentionChip).toBeVisible();
-  await expect(agentMentionChip).toHaveText("charlie");
+  await expect(input).toBeEmpty();
+  await expect(
+    page.getByTestId(`composer-address-lock-${TEST_IDENTITIES.charlie.pubkey}`),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("status").filter({
+      hasText: "Automatically mentioning charlie",
+    }),
+  ).toBeVisible();
 });
 
 test("other-owned agents without a shared channel are hidden from mentions", async ({
@@ -2369,7 +2497,7 @@ test("system member-joined rows render the joined person as a plain profile name
   await expect(joinedPersonName).not.toHaveAttribute("data-mention");
 });
 
-test("selecting a managed non-member agent from a DM inserts @Name into input", async ({
+test("selecting a managed non-member agent from a DM addresses it", async ({
   page,
 }) => {
   await installMockBridge(page, {
@@ -2394,8 +2522,11 @@ test("selecting a managed non-member agent from a DM inserts @Name into input", 
   await expect(input.locator(".mention-chip")).toHaveCount(0);
   await input.press("Enter");
 
-  await expect(input).toHaveText("@charlie ");
-  await expect(input.locator(".mention-chip")).toBeVisible();
+  await expect(input).toBeEmpty();
+  await expect(input.locator(".mention-chip")).toHaveCount(0);
+  await expect(
+    page.getByTestId(`composer-address-lock-${TEST_IDENTITIES.charlie.pubkey}`),
+  ).toBeVisible();
 });
 
 test("global non-member people can be selected from channel mentions", async ({
