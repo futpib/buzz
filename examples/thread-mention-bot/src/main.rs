@@ -709,6 +709,36 @@ async fn listen_once(
                         &config.owner_pubkeys,
                         &config.bot_keys.public_key(),
                     );
+                    if let Some(key) = agent_handoff_thread(
+                        &event,
+                        &config.owner_pubkeys,
+                        &config.bot_keys.public_key(),
+                    ) {
+                        record_agent_turn(
+                            &mut routes,
+                            key,
+                            event.pubkey,
+                            AgentTurnRecord {
+                                state: AgentThreadState::Human,
+                                revision: unix_revision(),
+                                event_id: event.id,
+                                turn_id: format!("handoff:{}", event.id.to_hex()),
+                                expires_at: None,
+                                authoritative: true,
+                            },
+                        );
+                        if let Err(error) = reconcile_thread_status(
+                            config,
+                            &mut connection,
+                            &mut routes,
+                            key,
+                        ).await {
+                            eprintln!(
+                                "failed to reconcile agent handoff {}: {error:#}",
+                                event.id.to_hex()
+                            );
+                        }
+                    }
                     if let Some(judge_tx) = judge_tx {
                         if let Err(error) = maybe_enqueue_judge(
                             config,
@@ -2385,6 +2415,22 @@ fn record_thread_assignment(
     );
 }
 
+fn agent_handoff_thread(event: &Event, owners: &[PublicKey], bot: &PublicKey) -> Option<ThreadKey> {
+    if event.kind != Kind::Custom(9)
+        || event.pubkey == *bot
+        || !owners.iter().any(|owner| is_same_owner_agent(event, owner))
+        || !owners.iter().any(|owner| event_mentions(event, owner))
+    {
+        return None;
+    }
+    let channel_id = event_channel(event).and_then(|value| Uuid::parse_str(value).ok())?;
+    let root_event_id = parse_thread_relation(event)?.root_event_id;
+    Some(ThreadKey {
+        channel_id,
+        root_event_id,
+    })
+}
+
 async fn handle_thread_lifecycle(
     config: &Config,
     connection: &mut NostrWsConnection,
@@ -2897,19 +2943,22 @@ fn route_target_with_assignment(
         return None;
     }
 
+    let assigned = assigned.filter(|agent| !owners.contains(agent) && *agent != *bot);
     let mut agents = HashSet::new();
+    let mut has_untrusted_participant = false;
     for event in thread {
         if event.kind != Kind::Custom(9) || owners.contains(&event.pubkey) || event.pubkey == *bot {
             continue;
         }
         if !owners.iter().any(|owner| is_same_owner_agent(event, owner)) {
-            return None;
+            has_untrusted_participant = true;
+            continue;
         }
         agents.insert(event.pubkey);
     }
-    let assigned = assigned.filter(|agent| !owners.contains(agent) && *agent != *bot);
     let agent = match (assigned, agents.len()) {
         (Some(agent), _) => agent,
+        (None, _) if has_untrusted_participant => return None,
         (None, 0) => {
             let root_id = parse_thread_relation(candidate)?.root_event_id;
             let root = thread.iter().find(|event| {
@@ -4239,6 +4288,92 @@ mod tests {
             ),
             Some(second_agent.public_key())
         );
+    }
+
+    #[test]
+    fn sticky_assignment_survives_an_unattested_failure_notice() {
+        let fixture = Fixture::new();
+        let failure_notice = message(
+            &fixture.agent,
+            None,
+            fixture.channel,
+            Some(&ThreadRef {
+                root_event_id: fixture.root.id,
+                parent_event_id: fixture.agent_reply.id,
+            }),
+            &[],
+        );
+        let candidate = message(
+            &fixture.owner,
+            None,
+            fixture.channel,
+            Some(&ThreadRef {
+                root_event_id: fixture.root.id,
+                parent_event_id: failure_notice.id,
+            }),
+            &[],
+        );
+
+        assert_eq!(
+            route_target_with_assignment(
+                &[
+                    fixture.root,
+                    fixture.agent_reply,
+                    failure_notice,
+                    candidate.clone(),
+                ],
+                &candidate,
+                &[fixture.owner.public_key()],
+                &fixture.bot.public_key(),
+                Some(fixture.agent.public_key()),
+            ),
+            Some(fixture.agent.public_key())
+        );
+    }
+
+    #[test]
+    fn owner_directed_attested_reply_is_a_handoff() {
+        let fixture = Fixture::new();
+        let owner = fixture.owner.public_key().to_hex();
+        let final_reply = message(
+            &fixture.agent,
+            Some(&auth_tag(&fixture.owner, &fixture.agent)),
+            fixture.channel,
+            Some(&ThreadRef {
+                root_event_id: fixture.root.id,
+                parent_event_id: fixture.agent_reply.id,
+            }),
+            &[owner.as_str()],
+        );
+
+        assert_eq!(
+            agent_handoff_thread(
+                &final_reply,
+                &[fixture.owner.public_key()],
+                &fixture.bot.public_key(),
+            ),
+            Some(ThreadKey {
+                channel_id: fixture.channel,
+                root_event_id: fixture.root.id,
+            })
+        );
+
+        let progress = message(
+            &fixture.agent,
+            Some(&auth_tag(&fixture.owner, &fixture.agent)),
+            fixture.channel,
+            Some(&ThreadRef {
+                root_event_id: fixture.root.id,
+                parent_event_id: fixture.agent_reply.id,
+            }),
+            &[],
+        );
+        assert!(agent_handoff_thread(
+            &progress,
+            &[fixture.owner.public_key()],
+            &fixture.bot.public_key(),
+        )
+        .is_none());
     }
 
     #[test]

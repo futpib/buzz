@@ -4915,12 +4915,12 @@ pub(crate) async fn reaction_add(rest: &crate::relay::RestClient, event_id: &str
 /// batch is dead-lettered. Replies into the thread of `thread_tags` when the
 /// triggering event was threaded. Errors are logged and swallowed — the
 /// notice must never take down the main loop.
-pub(crate) async fn post_failure_notice(
+fn build_failure_notice_event(
     rest: &crate::relay::RestClient,
     channel_id: Uuid,
     thread_tags: &ThreadTags,
     content: &str,
-) {
+) -> Result<nostr::Event, String> {
     let thread_ref = thread_tags.root_event_id.as_deref().and_then(|root| {
         let root_id = nostr::EventId::from_hex(root).ok()?;
         let parent_id = thread_tags
@@ -4933,18 +4933,28 @@ pub(crate) async fn post_failure_notice(
             parent_event_id: parent_id,
         })
     });
-    let builder =
-        match buzz_sdk::build_message(channel_id, content, thread_ref.as_ref(), &[], false, &[]) {
-            Ok(b) => b,
-            Err(e) => {
-                tracing::warn!(channel = %channel_id, "failure notice: build failed: {e}");
-                return;
-            }
-        };
-    let event = match builder.sign_with_keys(&rest.keys) {
-        Ok(e) => e,
-        Err(e) => {
-            tracing::warn!(channel = %channel_id, "failure notice: sign failed: {e}");
+    let mut builder =
+        buzz_sdk::build_message(channel_id, content, thread_ref.as_ref(), &[], false, &[])
+            .map_err(|error| error.to_string())?;
+    if let Some(auth_tag) = rest.auth_tag_json.as_deref() {
+        builder = builder
+            .tag(buzz_sdk::nip_oa::parse_auth_tag(auth_tag).map_err(|error| error.to_string())?);
+    }
+    builder
+        .sign_with_keys(&rest.keys)
+        .map_err(|error| error.to_string())
+}
+
+pub(crate) async fn post_failure_notice(
+    rest: &crate::relay::RestClient,
+    channel_id: Uuid,
+    thread_tags: &ThreadTags,
+    content: &str,
+) {
+    let event = match build_failure_notice_event(rest, channel_id, thread_tags, content) {
+        Ok(event) => event,
+        Err(error) => {
+            tracing::warn!(channel = %channel_id, "failure notice: build failed: {error}");
             return;
         }
     };
@@ -5098,6 +5108,39 @@ mod tests {
         );
         assert_eq!(parsed.lifecycle.phase, "completed");
         assert_eq!(parsed.lifecycle.expires_at, None);
+    }
+
+    #[test]
+    fn failure_notice_carries_the_agent_attestation() {
+        let owner = nostr::Keys::generate();
+        let agent = nostr::Keys::generate();
+        let auth_json =
+            buzz_sdk::nip_oa::compute_auth_tag(&owner, &agent.public_key(), "kind=9").unwrap();
+        let auth_tag = buzz_sdk::nip_oa::parse_auth_tag(&auth_json).unwrap();
+        let rest = crate::relay::RestClient {
+            http: reqwest::Client::new(),
+            base_url: "http://127.0.0.1:1".to_string(),
+            keys: agent,
+            auth_tag_json: Some(auth_json.clone()),
+        };
+        let root = nostr::EventId::all_zeros();
+        let event = build_failure_notice_event(
+            &rest,
+            Uuid::new_v4(),
+            &ThreadTags {
+                root_event_id: Some(root.to_hex()),
+                parent_event_id: Some(root.to_hex()),
+                mentioned_pubkeys: Vec::new(),
+            },
+            "failed",
+        )
+        .unwrap();
+
+        assert!(event.tags.iter().any(|tag| tag == &auth_tag));
+        assert_eq!(
+            buzz_sdk::nip_oa::verify_auth_tag(&auth_json, &event.pubkey).unwrap(),
+            owner.public_key()
+        );
     }
 
     #[tokio::test]

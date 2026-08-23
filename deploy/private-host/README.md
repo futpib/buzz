@@ -126,7 +126,9 @@ No owner secret is needed for standalone mode. The bot discovers every
 accessible channel and uses one channel-scoped live subscription per channel.
 Private channels must add it as a member; the optional
 `--sign --channel CHANNEL_UUID --restart` path prompts without echo and stores
-only the resulting NIP-OA tag. Subsequent code updates only need `--restart`.
+only the resulting NIP-OA tag. Subsequent bot-only code updates need only
+`--restart`, which leaves active ACP turns untouched. Add `--restart-agents`
+only when the launcher, units, or allowlist changed and agent turns have drained.
 Pass `--judge --emoji-reactor` to enable the persistent delivery-completeness
 judge and a separate lazy ACP session that chooses one relevant reaction for
 each new top-level thread without a hardcoded emoji palette.

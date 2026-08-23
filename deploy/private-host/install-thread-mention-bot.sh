@@ -19,6 +19,7 @@ avatar_source="${script_dir}/agent-avatars/thread-mention-bot.png"
 unit="buzz-thread-mention-bot.service"
 sign=false
 restart=false
+restart_agents=false
 judge=false
 emoji_reactor=false
 declare -a channels=()
@@ -35,6 +36,9 @@ ACP agent services. Optional --sign upgrades the bot to a same-owner identity.
   --channel UUID Add the bot to a private channel while the owner key is loaded.
                  May be repeated and requires --sign.
   --restart      Enable and restart the installed user service.
+  --restart-agents
+                 Also restart active ACP agent services. Use only after their
+                 in-flight turns have drained.
   --judge        Enable the single-session ACP message judge.
   --emoji-reactor
                  React to each new top-level thread with an ACP-selected emoji.
@@ -58,6 +62,9 @@ while (($# > 0)); do
     --restart)
       restart=true
       ;;
+    --restart-agents)
+      restart_agents=true
+      ;;
     --judge)
       judge=true
       ;;
@@ -76,6 +83,11 @@ while (($# > 0)); do
   esac
   shift
 done
+
+if [[ "${restart_agents}" == true && "${restart}" != true ]]; then
+  echo "--restart-agents requires --restart" >&2
+  exit 2
+fi
 
 if [[ "${emoji_reactor}" == true && "${judge}" != true && ! -r "${judge_file}" ]]; then
   echo "--emoji-reactor requires --judge on first install" >&2
@@ -273,8 +285,11 @@ systemctl --user daemon-reload
 if [[ "${restart}" == true ]]; then
   systemctl --user enable "${unit}"
   systemctl --user restart "${unit}"
-  systemctl --user try-restart "${agent_units[@]}"
-  echo "Enabled and restarted ${unit} and refreshed active ACP agents"
+  echo "Enabled and restarted ${unit}"
+  if [[ "${restart_agents}" == true ]]; then
+    systemctl --user try-restart "${agent_units[@]}"
+    echo "Restarted active ACP agents"
+  fi
 elif [[ ! -r "${auth_file}" ]]; then
   echo "Run with --restart for standalone allowlisted mode, or --sign --restart for owner-attested mode."
 else
