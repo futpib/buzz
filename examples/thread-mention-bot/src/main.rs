@@ -594,7 +594,7 @@ async fn listen_once(
         config.owner_auth_tag.as_ref(),
     )
     .await?;
-    backfill_missing_thread_statuses(config, &mut connection, &mut routes).await?;
+    backfill_missing_thread_statuses(config, &mut connection, &mut routes).await;
     let now = Timestamp::now().as_secs();
     for channel_id in &channel_ids {
         let channel = channel_id.to_string();
@@ -2003,6 +2003,45 @@ async fn load_route_state(config: &Config, channel_ids: &[Uuid]) -> Result<Route
     Ok(state)
 }
 
+struct RouteStateFilters {
+    recent_bot_history: Filter,
+    messages: Filter,
+    status_reactions: Filter,
+    status_deletions: Filter,
+}
+
+fn route_state_filters(channel: &str, bot: PublicKey, since: Timestamp) -> RouteStateFilters {
+    let status_scope = || {
+        Filter::new()
+            .author(bot)
+            .custom_tags(SingleLetterTag::lowercase(Alphabet::H), [channel])
+            .custom_tags(
+                SingleLetterTag::lowercase(Alphabet::T),
+                [STATUS_DISCOVERY_VALUE],
+            )
+            .limit(MAX_THREAD_EVENTS)
+    };
+    RouteStateFilters {
+        recent_bot_history: Filter::new()
+            .kinds([
+                Kind::Custom(9),
+                Kind::Reaction,
+                Kind::EventDeletion,
+                Kind::Custom(9005),
+            ])
+            .author(bot)
+            .since(since)
+            .custom_tags(SingleLetterTag::lowercase(Alphabet::H), [channel])
+            .limit(MAX_THREAD_EVENTS),
+        messages: Filter::new()
+            .kind(Kind::Custom(9))
+            .custom_tags(SingleLetterTag::lowercase(Alphabet::H), [channel])
+            .limit(MAX_THREAD_EVENTS),
+        status_reactions: status_scope().kind(Kind::Reaction),
+        status_deletions: status_scope().kinds([Kind::EventDeletion, Kind::Custom(9005)]),
+    }
+}
+
 async fn load_channel_route_state(config: &Config, channel_id: Uuid) -> Result<RouteState> {
     let mut connection = NostrWsConnection::connect_authenticated(
         &config.relay_url,
@@ -2016,34 +2055,15 @@ async fn load_channel_route_state(config: &Config, channel_id: Uuid) -> Result<R
             .as_secs()
             .saturating_sub(ROUTE_ACK_WINDOW_SECS),
     );
+    let filters = route_state_filters(&channel, config.bot_keys.public_key(), since);
     connection
         .send_raw(&json!([
             "REQ",
             ROUTE_SUBSCRIPTION_ID,
-            Filter::new()
-                .kinds([
-                    Kind::Custom(9),
-                    Kind::Reaction,
-                    Kind::EventDeletion,
-                    Kind::Custom(9005),
-                ])
-                .author(config.bot_keys.public_key())
-                .since(since)
-                .custom_tags(SingleLetterTag::lowercase(Alphabet::H), [channel.as_str()])
-                .limit(MAX_THREAD_EVENTS),
-            Filter::new()
-                .kind(Kind::Custom(9))
-                .custom_tags(SingleLetterTag::lowercase(Alphabet::H), [channel.as_str()])
-                .limit(MAX_THREAD_EVENTS),
-            Filter::new()
-                .kinds([Kind::Reaction, Kind::EventDeletion, Kind::Custom(9005),])
-                .author(config.bot_keys.public_key())
-                .custom_tags(SingleLetterTag::lowercase(Alphabet::H), [channel.as_str()])
-                .custom_tags(
-                    SingleLetterTag::lowercase(Alphabet::T),
-                    [STATUS_DISCOVERY_VALUE],
-                )
-                .limit(MAX_THREAD_EVENTS)
+            filters.recent_bot_history,
+            filters.messages,
+            filters.status_reactions,
+            filters.status_deletions
         ]))
         .await?;
     let mut state = RouteState::default();
@@ -2151,7 +2171,7 @@ async fn backfill_missing_thread_statuses(
     config: &Config,
     connection: &mut NostrWsConnection,
     state: &mut RouteState,
-) -> Result<()> {
+) {
     let mut pending = state
         .historical_threads
         .iter()
@@ -2178,9 +2198,15 @@ async fn backfill_missing_thread_statuses(
         if index > 0 {
             tokio::time::sleep(Duration::from_millis(125)).await;
         }
-        set_thread_status(config, connection, state, key, status, expires_at).await?;
+        if let Err(error) =
+            set_thread_status(config, connection, state, key, status, expires_at).await
+        {
+            eprintln!(
+                "failed to backfill thread status {}: {error:#}",
+                key.root_event_id.to_hex()
+            );
+        }
     }
-    Ok(())
 }
 
 fn recover_status_projections(
@@ -2205,7 +2231,11 @@ fn recover_status_projections(
         })
         .collect::<HashSet<_>>();
 
+    let mut seen = HashSet::new();
     for event in events {
+        if !seen.insert(event.id) {
+            continue;
+        }
         if event.pubkey != *bot || event.kind != Kind::Reaction || deleted.contains(&event.id) {
             continue;
         }
@@ -4139,6 +4169,26 @@ mod tests {
     }
 
     #[test]
+    fn status_reactions_have_a_separate_recovery_budget_from_deletions() {
+        let fixture = Fixture::new();
+        let filters = route_state_filters(
+            fixture.channel.to_string().as_str(),
+            fixture.bot.public_key(),
+            Timestamp::from_secs(1),
+        );
+
+        let reaction_kinds = filters.status_reactions.kinds.as_ref().unwrap();
+        assert_eq!(reaction_kinds.len(), 1);
+        assert!(reaction_kinds.contains(&Kind::Reaction));
+        let deletion_kinds = filters.status_deletions.kinds.as_ref().unwrap();
+        assert_eq!(deletion_kinds.len(), 2);
+        assert!(deletion_kinds.contains(&Kind::EventDeletion));
+        assert!(deletion_kinds.contains(&Kind::Custom(9005)));
+        assert_eq!(filters.status_reactions.limit, Some(MAX_THREAD_EVENTS));
+        assert_eq!(filters.status_deletions.limit, Some(MAX_THREAD_EVENTS));
+    }
+
+    #[test]
     fn recovery_refreshes_legacy_status_emoji() {
         let fixture = Fixture::new();
         let key = ThreadKey {
@@ -4181,6 +4231,27 @@ mod tests {
             state.obsolete_status_events[&key],
             HashSet::from([legacy.id])
         );
+    }
+
+    #[test]
+    fn recovery_ignores_duplicate_delivery_of_the_same_status_reaction() {
+        let fixture = Fixture::new();
+        let key = ThreadKey {
+            channel_id: fixture.channel,
+            root_event_id: fixture.root.id,
+        };
+        let current = thread_status_reaction(&fixture.bot, key, AgentThreadState::Human, "✅", 20);
+        let mut state = RouteState::default();
+
+        recover_status_projections(
+            &mut state,
+            fixture.channel,
+            &[current.clone(), current.clone()],
+            &fixture.bot.public_key(),
+        );
+
+        assert_eq!(state.status[&key].event_id, current.id);
+        assert!(!state.obsolete_status_events.contains_key(&key));
     }
 
     #[test]
