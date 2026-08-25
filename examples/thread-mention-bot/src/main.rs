@@ -649,7 +649,19 @@ async fn listen_once(
 
     loop {
         tokio::select! {
-            _ = &mut refresh => bail!("refreshing channel subscriptions"),
+            _ = &mut refresh => {
+                let refreshed_channel_ids = discover_channels(config).await?;
+                if channel_refresh_requires_reconnect(&channel_ids, &refreshed_channel_ids) {
+                    bail!("accessible channel set changed; refreshing subscriptions");
+                }
+                refresh
+                    .as_mut()
+                    .reset(tokio::time::Instant::now() + CHANNEL_REFRESH_INTERVAL);
+                eprintln!(
+                    "channel safety refresh kept {} live subscription(s)",
+                    channel_ids.len()
+                );
+            },
             _ = reaction_poll.tick(), if !routes.pending.is_empty() => {
                 if let Err(error) = poll_acknowledged_routes(
                     config,
@@ -781,6 +793,10 @@ async fn listen_once(
             }
         }
     }
+}
+
+fn channel_refresh_requires_reconnect(current: &[Uuid], refreshed: &[Uuid]) -> bool {
+    current != refreshed
 }
 
 async fn discover_channels(config: &Config) -> Result<Vec<Uuid>> {
@@ -4186,6 +4202,21 @@ mod tests {
         assert!(deletion_kinds.contains(&Kind::Custom(9005)));
         assert_eq!(filters.status_reactions.limit, Some(MAX_THREAD_EVENTS));
         assert_eq!(filters.status_deletions.limit, Some(MAX_THREAD_EVENTS));
+    }
+
+    #[test]
+    fn unchanged_channel_safety_refresh_keeps_live_subscriptions() {
+        let first = Uuid::new_v4();
+        let second = Uuid::new_v4();
+
+        assert!(!channel_refresh_requires_reconnect(
+            &[first, second],
+            &[first, second]
+        ));
+        assert!(channel_refresh_requires_reconnect(
+            &[first, second],
+            &[first]
+        ));
     }
 
     #[test]

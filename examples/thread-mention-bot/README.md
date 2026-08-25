@@ -93,8 +93,9 @@ cargo run -p thread-mention-bot
 ```
 
 Omit `BUZZ_CHANNEL_IDS` to discover and watch every channel the bot can access.
-Membership notifications refresh the channel list immediately, with a
-five-minute safety refresh as a fallback.
+Membership notifications refresh the channel list immediately. A five-minute
+safety check keeps the current subscriptions live when the accessible set is
+unchanged and reconnects only when that set actually changes.
 `BUZZ_CHANNEL_ID` is accepted as a single-channel compatibility alias.
 
 The coordinator accepts ephemeral `kind:24201` lifecycle snapshots only from
