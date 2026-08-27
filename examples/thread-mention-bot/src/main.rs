@@ -1557,7 +1557,10 @@ async fn process_judge_job(
         .unwrap_or_default();
     let verdict = match delivery.verdict {
         Some(verdict) => verdict,
-        None => request_judge_verdict(judge_config, session, &job.event).await?,
+        None => match deterministic_judge_verdict(&job.event) {
+            Some(verdict) => verdict,
+            None => request_judge_verdict(judge_config, session, &job.event).await?,
+        },
     };
     apply_judge_verdict(config, tracker, job, &verdict).await?;
     Ok(verdict)
@@ -1679,9 +1682,27 @@ async fn apply_judge_verdict(
 fn judge_prompt(event: &Event) -> String {
     let content = serde_json::to_string(&event.content).unwrap_or_else(|_| "\"\"".to_string());
     format!(
-        "You are a delivery-completeness judge. Evaluate only whether the message appears fully delivered. Do not judge correctness, usefulness, task completion, style, or brevity. Fail rule `{COMPLETE_MESSAGE_RULE}` only for evidence of truncation, such as an abrupt mid-sentence or mid-token ending, a dangling colon that clearly introduces missing content, an unfinished list item, or an unmatched code fence or delimiter. Questions, intentional fragments, terse progress updates, and references to prior context may pass. Return exactly one JSON object and no prose: {{\"pass\":true,\"failures\":[]}} or {{\"pass\":false,\"failures\":[{{\"rule\":\"{COMPLETE_MESSAGE_RULE}\",\"issue\":\"concise concrete reason\"}}]}}.\n\nMessage event id: {}\nMessage content: {content}",
-        event.id.to_hex()
+        "You are a delivery-completeness judge. Evaluate only whether the message appears fully delivered. Do not judge correctness, usefulness, task completion, style, or brevity. Fail rule `{COMPLETE_MESSAGE_RULE}` for an empty message without an attachment, or for evidence of truncation such as an abrupt mid-sentence or mid-token ending, a dangling colon that clearly introduces missing content, an unfinished list item, or an unmatched code fence or delimiter. Questions, intentional fragments, terse progress updates, references to prior context, and attachment-only messages may pass. Return exactly one JSON object and no prose: {{\"pass\":true,\"failures\":[]}} or {{\"pass\":false,\"failures\":[{{\"rule\":\"{COMPLETE_MESSAGE_RULE}\",\"issue\":\"concise concrete reason\"}}]}}.\n\nMessage event id: {}\nMessage has attachment: {}\nMessage content: {content}",
+        event.id.to_hex(),
+        event_has_attachment(event)
     )
+}
+
+fn deterministic_judge_verdict(event: &Event) -> Option<JudgeVerdict> {
+    (event.content.trim().is_empty() && !event_has_attachment(event)).then(|| JudgeVerdict {
+        pass: false,
+        failures: vec![JudgeFailure {
+            rule: COMPLETE_MESSAGE_RULE.to_string(),
+            issue: "message has no text or attachment".to_string(),
+        }],
+    })
+}
+
+fn event_has_attachment(event: &Event) -> bool {
+    event
+        .tags
+        .iter()
+        .any(|tag| tag.as_slice().first().map(String::as_str) == Some("imeta"))
 }
 
 fn parse_judge_verdict(text: &str) -> Result<JudgeVerdict> {
@@ -3874,6 +3895,45 @@ mod tests {
         )
         .is_err());
         assert!(parse_judge_verdict(r#"{"pass":false,"failures":[]}"#).is_err());
+    }
+
+    #[test]
+    fn blank_delivery_fails_without_calling_the_judge() {
+        let fixture = Fixture::new();
+        let event = buzz_sdk::build_message(fixture.channel, " \n\t", None, &[], false, &[])
+            .unwrap()
+            .sign_with_keys(&fixture.agent)
+            .unwrap();
+
+        assert_eq!(
+            deterministic_judge_verdict(&event),
+            Some(JudgeVerdict {
+                pass: false,
+                failures: vec![JudgeFailure {
+                    rule: COMPLETE_MESSAGE_RULE.to_string(),
+                    issue: "message has no text or attachment".to_string(),
+                }],
+            })
+        );
+    }
+
+    #[test]
+    fn attachment_only_delivery_still_reaches_the_judge() {
+        let fixture = Fixture::new();
+        let media = vec![vec![
+            "imeta".to_string(),
+            "url https://example.com/file.png".to_string(),
+            "m image/png".to_string(),
+            format!("x {}", "a".repeat(64)),
+            "size 1".to_string(),
+        ]];
+        let event = buzz_sdk::build_message(fixture.channel, "", None, &[], false, &media)
+            .unwrap()
+            .sign_with_keys(&fixture.agent)
+            .unwrap();
+
+        assert!(event_has_attachment(&event));
+        assert_eq!(deterministic_judge_verdict(&event), None);
     }
 
     #[test]
