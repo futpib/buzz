@@ -1078,7 +1078,7 @@ pub async fn dispatch(
 mod tests {
     use super::{
         channel_id_from_event, cmd_get_thread, event_mention_pubkeys, find_root_from_tags,
-        format_attachment_markdown, match_profiles_by_name, merge_message_mentions,
+        format_attachment_markdown, format_events, match_profiles_by_name, merge_message_mentions,
         missing_members, normalize_explicit_mentions, parse_member_pubkeys,
         resolve_names_to_pubkeys, resolve_thread_target, thread_ref_from_event,
         thread_ref_from_parent_tags, BuzzClient, CliError, Uuid,
@@ -1120,6 +1120,33 @@ mod tests {
         assert_eq!(
             format_attachment_markdown(&attachment("audio/mpeg", r"song[demo].mp3")),
             "\n[song\\[demo\\].mp3](https://relay.example/media/blob)"
+        );
+    }
+
+    #[test]
+    fn compact_event_format_remains_the_three_key_contract() {
+        let normalized = serde_json::json!([{
+            "id": ID_A,
+            "pubkey": PUBKEY,
+            "kind": 9,
+            "content": "compact content",
+            "created_at": 1_787_754_972_u64,
+            "tags": [["h", "channel-id"]],
+            "sig": "d".repeat(128),
+        }])
+        .to_string();
+
+        let output: Vec<serde_json::Value> =
+            serde_json::from_str(&format_events(&normalized, &crate::OutputFormat::Compact))
+                .unwrap();
+
+        assert_eq!(
+            output[0],
+            serde_json::json!({
+                "id": ID_A,
+                "content": "compact content",
+                "created_at": 1_787_754_972_u64,
+            })
         );
     }
 
