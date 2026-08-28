@@ -97,21 +97,22 @@ When `--channel` is used, it is briefly passed to the Buzz CLI in the child
 process environment so the owner can sign the membership event; it is still
 never written to disk or put in a process argument.
 
-Available agent and routing bot 512px profile images are kept in
+Available agent and coordinator 512px profile images are kept in
 `agent-avatars/`. They use the official Codex and Claude Code Marketplace
 icons, OpenCode's production desktop icon, and Grok's official product icon,
-resized on a common canvas. The thread mention bot uses
+resized on a common canvas. The Buzz coordinator uses
 original artwork. Their published kind-0 profiles point at authenticated
 Blossom copies on this Buzz relay.
 
-## Thread routing and message-quality bot
+## Buzz conversation coordinator
 
-The tracked thread mention bot handles deterministic routing: in a thread
+The tracked Buzz coordinator handles deterministic routing: in a thread
 authored only by the human owner and one owner-attested agent, an untagged owner
 reply gets a sibling bot reply carrying the agent's real `p` tag and friendly
 `@name`. An untagged top-level owner message targets the last owner-attested
 agent active in that channel. It fails closed for explicit recipients,
-additional thread authors, and unverified agents.
+additional thread authors, and unverified agents. It also projects thread work
+status, judges agent replies, and reacts to new topics.
 
 Install it with a dedicated identity. The installer adds that exact identity
 to the existing ACP agents' response allowlists, keeping the human owner
@@ -119,7 +120,7 @@ implicitly allowed. It also uploads the tracked bot avatar with the bot's own
 identity and publishes its authenticated Blossom URL in the bot profile:
 
 ```bash
-./deploy/private-host/install-thread-mention-bot.sh --restart
+./deploy/private-host/install-buzz-coordinator-bot.sh --restart
 ```
 
 No owner secret is needed for standalone mode. The bot discovers every
@@ -129,9 +130,12 @@ Private channels must add it as a member; the optional
 only the resulting NIP-OA tag. Subsequent bot-only code updates need only
 `--restart`, which leaves active ACP turns untouched. Add `--restart-agents`
 only when the launcher, units, or allowlist changed and agent turns have drained.
-Pass `--judge --emoji-reactor` to enable the persistent delivery-completeness
+Pass `--judge --emoji-reactor` to enable the persistent context-only message
 judge and a separate lazy ACP session that chooses one relevant reaction for
-each new top-level thread without a hardcoded emoji palette.
+each new top-level thread without a hardcoded emoji palette. The coordinator
+supplies bounded thread context to the judge; the judge does not investigate or
+call tools. Failed replies receive corrective steering addressed to their
+author agent.
 
 The optional `buzz-zai-agent.service` uses the same launcher and identity
 plumbing but connects Buzz directly to `opencode acp`, without slopd. It pins

@@ -1012,6 +1012,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "buzz-coordinator-bot"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "buzz-acp",
+ "buzz-core",
+ "buzz-sdk",
+ "buzz-ws-client",
+ "nostr 0.44.7",
+ "rustls",
+ "serde_json",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "buzz-core"
 version = "0.1.0"
 dependencies = [
@@ -9774,22 +9790,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
-]
-
-[[package]]
-name = "thread-mention-bot"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "buzz-acp",
- "buzz-core",
- "buzz-sdk",
- "buzz-ws-client",
- "nostr 0.44.7",
- "rustls",
- "serde_json",
- "tokio",
- "uuid",
 ]
 
 [[package]]

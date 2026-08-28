@@ -5,7 +5,8 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "${script_dir}/../.." && pwd)"
 bridge_config="${BUZZ_AGENT_BRIDGE_CONFIG:-${HOME}/.config/buzz-slopd-agent/bridge.env}"
 machine_public="${BUZZ_MACHINE_PUBLIC_CONFIG:-${HOME}/.config/buzz-machine/public.env}"
-config_dir="${HOME}/.config/buzz-thread-mention-bot"
+config_dir="${HOME}/.config/buzz-coordinator-bot"
+legacy_config_dir="${HOME}/.config/buzz-thread-mention-bot"
 identity_file="${config_dir}/identity.env"
 auth_file="${config_dir}/auth.env"
 public_file="${config_dir}/public.env"
@@ -14,9 +15,11 @@ judge_file="${config_dir}/judge.env"
 emoji_file="${config_dir}/emoji-reactor.env"
 unit_dir="${HOME}/.config/systemd/user"
 libexec_dir="${HOME}/.local/libexec"
-binary="${libexec_dir}/buzz-thread-mention-bot"
-avatar_source="${script_dir}/agent-avatars/thread-mention-bot.png"
-unit="buzz-thread-mention-bot.service"
+binary="${libexec_dir}/buzz-coordinator-bot"
+avatar_source="${script_dir}/agent-avatars/buzz-coordinator-bot.png"
+unit="buzz-coordinator-bot.service"
+legacy_unit="buzz-thread-mention-bot.service"
+legacy_binary="${libexec_dir}/buzz-thread-mention-bot"
 sign=false
 restart=false
 restart_agents=false
@@ -26,9 +29,9 @@ declare -a channels=()
 
 usage() {
   cat <<'EOF'
-Usage: install-thread-mention-bot.sh [OPTIONS]
+Usage: install-buzz-coordinator-bot.sh [OPTIONS]
 
-Build and install the thread routing and message-quality bot and its
+Build and install the conversation coordination bot and its
 tracked systemd user service. Standalone mode is allowlisted in the installed
 ACP agent services. Optional --sign upgrades the bot to a same-owner identity.
 
@@ -89,6 +92,15 @@ if [[ "${restart_agents}" == true && "${restart}" != true ]]; then
   exit 2
 fi
 
+if [[ -d "${legacy_config_dir}" && ! -e "${config_dir}" ]]; then
+  if [[ "${restart}" != true ]]; then
+    echo "Renaming the installed bot requires --restart so its identity can move atomically" >&2
+    exit 2
+  fi
+  mv "${legacy_config_dir}" "${config_dir}"
+  echo "Moved the existing coordinator identity to ${config_dir}"
+fi
+
 if [[ "${emoji_reactor}" == true && "${judge}" != true && ! -r "${judge_file}" ]]; then
   echo "--emoji-reactor requires --judge on first install" >&2
   exit 2
@@ -111,8 +123,8 @@ fi
 
 # shellcheck source=/dev/null
 source "${repo_root}/bin/activate-hermit"
-cargo build --quiet --locked -p thread-mention-bot
-install -Dm700 "${repo_root}/target/debug/thread-mention-bot" "${binary}"
+cargo build --quiet --locked -p buzz-coordinator-bot
+install -Dm700 "${repo_root}/target/debug/buzz-coordinator-bot" "${binary}"
 install -Dm644 "${script_dir}/systemd/${unit}" "${unit_dir}/${unit}"
 install -Dm700 "${script_dir}/buzz-slopd-agent" "${libexec_dir}/buzz-slopd-agent"
 agent_units=(
@@ -174,7 +186,7 @@ temporary_public="$(mktemp "${config_dir}/.public.env.XXXXXX")"
 printf '%s\n' \
   "BUZZ_OWNER_PUBKEY=${expected_owner}" \
   "BUZZ_OWNER_PUBKEYS=${owner_pubkeys}" \
-  "BUZZ_THREAD_MENTION_BOT_PUBKEY=${bot_public_key}" \
+  "BUZZ_COORDINATOR_BOT_PUBKEY=${bot_public_key}" \
   >"${temporary_public}"
 chmod 600 "${temporary_public}"
 mv -f "${temporary_public}" "${public_file}"
@@ -237,7 +249,7 @@ if [[ -r "${avatar_source}" ]]; then
   printf "BUZZ_BOT_PICTURE_URL='%s'\n" "${avatar_url}" >"${temporary_avatar}"
   chmod 600 "${temporary_avatar}"
   mv -f "${temporary_avatar}" "${avatar_file}"
-  echo "Published thread mention bot avatar"
+  echo "Published Buzz coordinator avatar"
 fi
 
 if [[ "${sign}" == true ]]; then
@@ -274,7 +286,7 @@ if [[ "${sign}" == true ]]; then
         --channel "${channel}" \
         --pubkey "${bot_public_key}" \
         --role bot >/dev/null
-      echo "Added thread mention bot to ${channel} as bot"
+      echo "Added Buzz coordinator to ${channel} as bot"
     done
   fi
   owner_secret=""
@@ -283,8 +295,14 @@ fi
 
 systemctl --user daemon-reload
 if [[ "${restart}" == true ]]; then
+  if systemctl --user cat "${legacy_unit}" >/dev/null 2>&1; then
+    systemctl --user disable --now "${legacy_unit}"
+  fi
   systemctl --user enable "${unit}"
   systemctl --user restart "${unit}"
+  systemctl --user is-active --quiet "${unit}"
+  rm -f "${unit_dir}/${legacy_unit}" "${legacy_binary}"
+  systemctl --user daemon-reload
   echo "Enabled and restarted ${unit}"
   if [[ "${restart_agents}" == true ]]; then
     systemctl --user try-restart "${agent_units[@]}"

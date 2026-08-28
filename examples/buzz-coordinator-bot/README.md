@@ -1,4 +1,4 @@
-# Thread Mention Bot
+# Buzz Coordinator Bot
 
 A small Buzz automation bot. Its deterministic router tags the assigned agent
 when the owner writes without an explicit mention. It also coordinates one
@@ -7,11 +7,14 @@ or running, `✅` after successful completion, and `⚠️` for failed, stale, o
 unassigned work.
 
 An optional judge runs one persistent ACP session for every agent-authored
-message. The ACP session returns a structured verdict; the bot applies it
-deterministically. A pass gets a `👍`. A failure gets a `👎` and a threaded reply
-that tags the author agent and lists the failed rules. The initial rule checks
-only whether the delivered message appears complete, not whether it is correct
-or whether the task itself is finished.
+message. The coordinator mechanically supplies the preceding thread context;
+the judge must use only that input and must not call tools or investigate. The
+ACP session returns a structured verdict, which the bot applies
+deterministically. A pass gets a `👍`. A failure gets a `👎` and a corrective
+threaded reply that tags the author agent and tells it to continue. The rules
+check delivery completeness and avoidable handoffs. The latter fails only when
+the supplied context itself establishes a safe next step or existing convention;
+insufficient context and genuine user-only decisions pass.
 
 An optional emoji reactor runs a separate persistent ACP session. For each new
 top-level kind `9` message, it chooses one relevant reaction from the message's
@@ -21,7 +24,7 @@ Replies and the bot's own messages are ignored.
 The lifecycle reactions `⏳`, `✅`, and `⚠️` are reserved and cannot be chosen
 by the free-form reactor.
 
-Run `buzz-thread-mention-bot backfill-emoji` with the same environment to react
+Run `buzz-coordinator-bot backfill-emoji` with the same environment to react
 to every historical top-level thread missing the bot's tagged reaction. The
 paginated backfill is idempotent and rescans once it catches up, so threads
 created during the initial pass are included.
@@ -89,7 +92,7 @@ export BUZZ_JUDGE_MAX_DURATION=600
 # Optional: use the same ACP configuration for top-level emoji reactions.
 export BUZZ_EMOJI_REACTOR_ENABLED=true
 
-cargo run -p thread-mention-bot
+cargo run -p buzz-coordinator-bot
 ```
 
 Omit `BUZZ_CHANNEL_IDS` to discover and watch every channel the bot can access.
@@ -111,7 +114,7 @@ to the configured owners:
 ```bash
 printf '%s\n' '<owner-nsec-or-hex-secret>' | \
   BUZZ_BOT_PRIVATE_KEY=<bot-nsec-or-hex-secret> \
-  cargo run -q -p thread-mention-bot -- auth-tag
+  cargo run -q -p buzz-coordinator-bot -- auth-tag
 ```
 
 Do not leave `BUZZ_OWNER_PRIVATE_KEY` in the service environment. The running
@@ -124,7 +127,7 @@ can be obtained without connecting to a relay:
 
 ```bash
 BUZZ_BOT_PRIVATE_KEY=<bot-nsec-or-hex-secret> \
-  cargo run -q -p thread-mention-bot -- public-key
+  cargo run -q -p buzz-coordinator-bot -- public-key
 ```
 
 ## Private-host installation
@@ -135,7 +138,7 @@ uploads the tracked bot avatar with that identity, and adds only that public
 key to each installed ACP agent's response allowlist:
 
 ```bash
-./deploy/private-host/install-thread-mention-bot.sh --judge --emoji-reactor --restart
+./deploy/private-host/install-buzz-coordinator-bot.sh --judge --emoji-reactor --restart
 ```
 
 This standalone path needs no owner secret. Open channels require no
@@ -149,20 +152,22 @@ session. `BUZZ_JUDGE_AGENT_ACCOUNT` and `BUZZ_JUDGE_AGENT_BACKEND` can override
 the install-time `codex` defaults. `--emoji-reactor` adds a second lazy ACP
 session using that same vendor-independent command. Subsequent code updates
 need only `--restart`; the stable identity and judge configuration remain in
-the mode-0600 files under `~/.config/buzz-thread-mention-bot/`. When present,
+the mode-0600 files under `~/.config/buzz-coordinator-bot/`. When present,
 the shared `buzz-machine` identity is added to the owner allowlist automatically.
+The installer moves an existing `buzz-thread-mention-bot` identity and retires
+its old service during the first renamed `--restart` installation.
 
 ## Generic systemd
 
 ```ini
 [Unit]
-Description=Buzz two-party thread mention bot
+Description=Buzz conversation coordinator bot
 After=network-online.target
 Wants=network-online.target
 
 [Service]
-EnvironmentFile=/etc/buzz/thread-mention-bot.env
-ExecStart=/opt/buzz/thread-mention-bot
+EnvironmentFile=/etc/buzz/coordinator-bot.env
+ExecStart=/opt/buzz/buzz-coordinator-bot
 Restart=always
 RestartSec=3
 

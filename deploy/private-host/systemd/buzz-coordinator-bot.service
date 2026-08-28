@@ -1,0 +1,25 @@
+[Unit]
+Description=Buzz conversation coordinator bot
+Documentation=https://github.com/block/buzz
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+WorkingDirectory=%h
+EnvironmentFile=%h/.config/buzz-slopd-agent/bridge.env
+EnvironmentFile=%h/.config/buzz-coordinator-bot/identity.env
+EnvironmentFile=%h/.config/buzz-coordinator-bot/public.env
+EnvironmentFile=-%h/.config/buzz-coordinator-bot/auth.env
+EnvironmentFile=-%h/.config/buzz-coordinator-bot/avatar.env
+EnvironmentFile=-%h/.config/buzz-coordinator-bot/config.env
+EnvironmentFile=-%h/.config/buzz-coordinator-bot/judge.env
+EnvironmentFile=-%h/.config/buzz-coordinator-bot/emoji-reactor.env
+ExecStart=%h/.local/libexec/buzz-coordinator-bot
+Restart=always
+RestartSec=3
+TimeoutStopSec=15
+
+[Install]
+WantedBy=default.target

@@ -23,9 +23,9 @@ do
   fi
 done
 
-if ! rg -q -F 'EnvironmentFile=-%h/.config/buzz-thread-mention-bot/emoji-reactor.env' \
-  "${deployment_dir}/systemd/buzz-thread-mention-bot.service"; then
-  echo "thread mention bot service does not load emoji reactor configuration" >&2
+if ! rg -q -F 'EnvironmentFile=-%h/.config/buzz-coordinator-bot/emoji-reactor.env' \
+  "${deployment_dir}/systemd/buzz-coordinator-bot.service"; then
+  echo "Buzz coordinator service does not load emoji reactor configuration" >&2
   exit 1
 fi
 
@@ -58,9 +58,9 @@ for unit in "${!expected_auth_files[@]}"; do
     echo "${unit} does not load its per-agent NIP-OA auth tag" >&2
     exit 1
   fi
-  if ! rg -q -F 'EnvironmentFile=-%h/.config/buzz-thread-mention-bot/public.env' \
+  if ! rg -q -F 'EnvironmentFile=-%h/.config/buzz-coordinator-bot/public.env' \
     "${deployment_dir}/systemd/${unit}"; then
-    echo "${unit} does not load the thread mention bot identity" >&2
+    echo "${unit} does not load the Buzz coordinator identity" >&2
     exit 1
   fi
 done
@@ -129,7 +129,7 @@ router_output="$(
     BUZZ_AGENT_COMMAND=/usr/bin/opencode \
     BUZZ_AGENT_RESPOND_TO=allowlist \
     BUZZ_AGENT_RESPOND_TO_ALLOWLIST="${router_existing}" \
-    BUZZ_THREAD_MENTION_BOT_PUBKEY="${router_bot}" \
+    BUZZ_COORDINATOR_BOT_PUBKEY="${router_bot}" \
     BUZZ_AGENT_SESSION_TITLE='z.ai glm-5.2 max' \
     "${launcher}"
 )"

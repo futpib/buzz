@@ -12,7 +12,7 @@ WorkingDirectory=%h
 Environment=RUST_LOG=buzz_acp=info,info
 EnvironmentFile=%h/.config/buzz-slopd-agent/bridge.env
 EnvironmentFile=-%h/.config/buzz-slopd-agent/auth-claude.env
-EnvironmentFile=-%h/.config/buzz-thread-mention-bot/public.env
+EnvironmentFile=-%h/.config/buzz-coordinator-bot/public.env
 Environment=BUZZ_SLOPD_AGENT_IDENTITY_FORMAT=pem
 Environment=BUZZ_SLOPD_AGENT_IDENTITY_FILE=%h/.config/buzz-slopd-claude-agent/identity.pem
 Environment=BUZZ_AGENT_ACCOUNT=claude

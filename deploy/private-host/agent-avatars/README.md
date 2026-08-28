@@ -2,8 +2,8 @@
 
 These profile images are first-party product assets:
 
-- `thread-mention-bot.png`: original generated artwork for Buzz's deterministic
-  thread-routing bot, depicting a small robot between two linked reply arcs.
+- `buzz-coordinator-bot.png`: original generated artwork for Buzz's conversation
+  coordinator, depicting a small robot between two linked reply arcs.
 - `slopd-codex.png`: the default icon from OpenAI's official Codex VS Code
   extension, version `26.5727.40816`.
 - `slopd-opencode.png`: OpenCode's production desktop icon from upstream commit

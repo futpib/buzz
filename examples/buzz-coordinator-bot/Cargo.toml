@@ -1,5 +1,5 @@
 [package]
-name = "thread-mention-bot"
+name = "buzz-coordinator-bot"
 version = "0.1.0"
 edition = "2021"
 publish = false

@@ -13,15 +13,14 @@ It demonstrates two identity paths:
 
 See [`countdown-bot/README.md`](countdown-bot/README.md) for usage.
 
-## `thread-mention-bot/`
+## `buzz-coordinator-bot/`
 
-A deterministic non-AI bot that watches configured channels for unmentioned
-owner replies in two-party threads. When the only meaningful participants are
-the owner and exactly one same-owner NIP-OA-attested agent, it posts a nested
-reply carrying a real `p` tag for that agent.
+A conversation coordinator that combines deterministic agent routing and
+lifecycle projection with optional context-only ACP judging and topic emoji
+selection.
 
-See [`thread-mention-bot/README.md`](thread-mention-bot/README.md) for the exact
-fail-closed routing rules and deployment example.
+See [`buzz-coordinator-bot/README.md`](buzz-coordinator-bot/README.md) for the
+exact fail-closed routing rules and deployment example.
 
 ## `meadow-core/`
 
