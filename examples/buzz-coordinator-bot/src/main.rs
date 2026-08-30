@@ -10,6 +10,7 @@ use buzz_acp::persistent_session::PersistentAcpSession;
 use buzz_core::agent_thread_lifecycle::{parse_agent_thread_lifecycle, AgentThreadState};
 use buzz_core::kind::{
     KIND_AGENT_THREAD_LIFECYCLE, KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION,
+    KIND_STREAM_MESSAGE_EDIT,
 };
 use buzz_sdk::{MemberRole, ThreadRef};
 use buzz_ws_client::{NostrWsConnection, RelayMessage, WsClientError};
@@ -30,10 +31,12 @@ const CHANNEL_SUBSCRIPTION_ID: &str = "thread-mention-channels";
 const MEMBERS_SUBSCRIPTION_ID: &str = "thread-mention-members";
 const MEMBERSHIP_SUBSCRIPTION_ID: &str = "thread-mention-membership";
 const PROFILE_SUBSCRIPTION_ID: &str = "thread-mention-profile";
+const JUDGE_TARGET_SUBSCRIPTION_ID: &str = "thread-mention-judge-target";
 const EMOJI_BACKFILL_MESSAGES_ID: &str = "thread-mention-emoji-backfill-messages";
 const EMOJI_BACKFILL_REACTIONS_ID: &str = "thread-mention-emoji-backfill-reactions";
 const ROUTED_SOURCE_TAG: &str = "thread-mention-for";
 const JUDGED_SOURCE_TAG: &str = "message-judge-for";
+const JUDGED_TARGET_TAG: &str = "message-judge-target";
 const JUDGE_RESULT_TAG: &str = "message-judge-result";
 const EMOJI_SOURCE_TAG: &str = "emoji-reaction-for";
 const STATUS_SOURCE_TAG: &str = "thread-turn-state-for";
@@ -273,16 +276,21 @@ struct RouteState {
 
 #[derive(Clone, Default)]
 struct JudgeDelivery {
+    target_id: Option<EventId>,
     verdict: Option<JudgeVerdict>,
-    reacted: bool,
-    critiqued: bool,
+    reaction_event_id: Option<EventId>,
+    critique_event_id: Option<EventId>,
 }
 
 impl JudgeDelivery {
     fn complete(&self) -> bool {
-        self.verdict
-            .as_ref()
-            .is_some_and(|verdict| self.reacted && (verdict.pass || self.critiqued))
+        self.verdict.as_ref().is_some_and(|verdict| {
+            self.reaction_event_id.is_some() && (verdict.pass || self.critique_event_id.is_some())
+        })
+    }
+
+    fn target_id(&self, source_id: EventId) -> EventId {
+        self.target_id.unwrap_or(source_id)
     }
 }
 
@@ -290,12 +298,36 @@ impl JudgeDelivery {
 struct JudgeTracker {
     deliveries: HashMap<EventId, JudgeDelivery>,
     queued: HashSet<EventId>,
+    latest: HashMap<EventId, (JudgeRevision, EventId)>,
 }
 
 #[derive(Clone)]
 struct JudgeJob {
     event: Event,
+    target: Event,
     channel_id: Uuid,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct JudgeRevision {
+    created_at: u64,
+    is_edit: bool,
+}
+
+impl JudgeRevision {
+    fn supersedes(self, other: Self) -> bool {
+        self.created_at > other.created_at
+            || (self.created_at == other.created_at && self.is_edit && !other.is_edit)
+    }
+}
+
+impl JudgeJob {
+    fn revision(&self) -> JudgeRevision {
+        JudgeRevision {
+            created_at: self.event.created_at.as_secs(),
+            is_edit: self.event.kind == Kind::Custom(KIND_STREAM_MESSAGE_EDIT as u16),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -611,6 +643,7 @@ async fn listen_once(
         let messages = Filter::new()
             .kinds([
                 Kind::Custom(9),
+                Kind::Custom(KIND_STREAM_MESSAGE_EDIT as u16),
                 Kind::Custom(KIND_AGENT_THREAD_LIFECYCLE as u16),
             ])
             .since(Timestamp::from_secs(
@@ -1133,12 +1166,9 @@ async fn maybe_enqueue_judge(
     tracker: &Arc<Mutex<JudgeTracker>>,
     candidate: &Event,
 ) -> Result<()> {
-    if candidate.kind != Kind::Custom(9)
+    if (candidate.kind != Kind::Custom(9)
+        && candidate.kind != Kind::Custom(KIND_STREAM_MESSAGE_EDIT as u16))
         || candidate.pubkey == config.bot_keys.public_key()
-        || !config
-            .owner_pubkeys
-            .iter()
-            .any(|owner| is_same_owner_agent(candidate, owner))
     {
         return Ok(());
     }
@@ -1147,6 +1177,31 @@ async fn maybe_enqueue_judge(
         .and_then(|value| Uuid::parse_str(value).ok())
         .filter(|channel| config.channel_ids.is_empty() || config.channel_ids.contains(channel))
         .ok_or_else(|| anyhow!("candidate has no eligible channel tag"))?;
+    let target = if candidate.kind == Kind::Custom(KIND_STREAM_MESSAGE_EDIT as u16) {
+        let target_id = unique_event_tag_value(candidate, "e")
+            .and_then(|value| EventId::from_hex(value).ok())
+            .ok_or_else(|| anyhow!("message edit has no unique target event"))?;
+        let target = load_judge_target(config, channel_id, target_id).await?;
+        if candidate.pubkey != target.pubkey && !is_same_owner_agent(&target, &candidate.pubkey) {
+            bail!("message edit signer does not own the target message");
+        }
+        target
+    } else {
+        candidate.clone()
+    };
+    if target.pubkey == config.bot_keys.public_key()
+        || !config
+            .owner_pubkeys
+            .iter()
+            .any(|owner| is_same_owner_agent(&target, owner))
+    {
+        return Ok(());
+    }
+    let job = JudgeJob {
+        event: candidate.clone(),
+        target,
+        channel_id,
+    };
     {
         let mut tracker = tracker.lock().await;
         if tracker
@@ -1157,14 +1212,22 @@ async fn maybe_enqueue_judge(
         {
             return Ok(());
         }
+        let revision = job.revision();
+        match tracker.latest.get(&job.target.id).copied() {
+            Some((latest, source_id))
+                if source_id != job.event.id && !revision.supersedes(latest) =>
+            {
+                tracker.queued.remove(&candidate.id);
+                return Ok(());
+            }
+            _ => {
+                tracker
+                    .latest
+                    .insert(job.target.id, (revision, job.event.id));
+            }
+        }
     }
-    if let Err(error) = judge_tx
-        .send(JudgeJob {
-            event: candidate.clone(),
-            channel_id,
-        })
-        .await
-    {
+    if let Err(error) = judge_tx.send(job).await {
         tracker.lock().await.queued.remove(&candidate.id);
         return Err(anyhow!("judge worker stopped: {error}"));
     }
@@ -1181,6 +1244,16 @@ async fn run_judge_worker(
     };
     let mut session = None;
     while let Some(job) = jobs.recv().await {
+        let latest = tracker
+            .lock()
+            .await
+            .latest
+            .get(&job.target.id)
+            .is_some_and(|(_, source_id)| *source_id == job.event.id);
+        if !latest {
+            tracker.lock().await.queued.remove(&job.event.id);
+            continue;
+        }
         let result = process_judge_job(&config, &judge_config, &tracker, &mut session, &job).await;
         tracker.lock().await.queued.remove(&job.event.id);
         match result {
@@ -1570,7 +1643,7 @@ async fn process_judge_job(
         None => match deterministic_judge_verdict(&job.event) {
             Some(verdict) => verdict,
             None => {
-                let context = match load_judge_context(config, &job.event).await {
+                let context = match load_judge_context(config, job).await {
                     Ok(context) => context,
                     Err(error) => {
                         eprintln!(
@@ -1657,6 +1730,7 @@ async fn apply_judge_verdict(
         config.owner_auth_tag.as_ref(),
     )
     .await?;
+    remove_superseded_judgments(config, tracker, job, &mut connection).await?;
     let current = tracker
         .lock()
         .await
@@ -1664,13 +1738,20 @@ async fn apply_judge_verdict(
         .get(&job.event.id)
         .cloned()
         .unwrap_or_default();
-    if !current.reacted {
-        let reaction = config.sign(build_judge_reaction(job.channel_id, &job.event, verdict)?)?;
+    if current.reaction_event_id.is_none() {
+        let reaction = config.sign(build_judge_reaction(
+            job.channel_id,
+            &job.event,
+            &job.target,
+            verdict,
+        )?)?;
+        let reaction_event_id = reaction.id;
         publish_required(&mut connection, reaction, "judge reaction").await?;
         let mut tracker = tracker.lock().await;
         let delivery = tracker.deliveries.entry(job.event.id).or_default();
+        delivery.target_id = Some(job.target.id);
         delivery.verdict = Some(verdict.clone());
-        delivery.reacted = true;
+        delivery.reaction_event_id = Some(reaction_event_id);
     }
     if !verdict.pass {
         let critiqued = tracker
@@ -1678,50 +1759,141 @@ async fn apply_judge_verdict(
             .await
             .deliveries
             .get(&job.event.id)
-            .is_some_and(|delivery| delivery.critiqued);
+            .is_some_and(|delivery| delivery.critique_event_id.is_some());
         if !critiqued {
-            let agent_hex = job.event.pubkey.to_hex();
-            let label = load_agent_label(config, &job.event.pubkey)
+            let agent_hex = job.target.pubkey.to_hex();
+            let label = load_agent_label(config, &job.target.pubkey)
                 .await
                 .unwrap_or_else(|_| format!("agent-{}", &agent_hex[..8]));
             let critique = config.sign(build_judge_critique(
                 job.channel_id,
                 &job.event,
+                &job.target,
                 verdict,
                 &agent_hex,
                 &label,
             )?)?;
+            let critique_event_id = critique.id;
             publish_required(&mut connection, critique, "judge critique").await?;
             let mut tracker = tracker.lock().await;
             let delivery = tracker.deliveries.entry(job.event.id).or_default();
+            delivery.target_id = Some(job.target.id);
             delivery.verdict = Some(verdict.clone());
-            delivery.critiqued = true;
+            delivery.critique_event_id = Some(critique_event_id);
         }
     }
     let _ = connection.disconnect().await;
     Ok(())
 }
 
-async fn load_judge_context(
+async fn remove_superseded_judgments(
     config: &Config,
-    candidate: &Event,
-) -> Result<Vec<JudgeContextMessage>> {
-    let Some(relation) = parse_thread_relation(candidate) else {
+    tracker: &Arc<Mutex<JudgeTracker>>,
+    job: &JudgeJob,
+    connection: &mut NostrWsConnection,
+) -> Result<()> {
+    let obsolete = tracker
+        .lock()
+        .await
+        .deliveries
+        .iter()
+        .filter(|(source_id, delivery)| {
+            **source_id != job.event.id && delivery.target_id(**source_id) == job.target.id
+        })
+        .flat_map(|(source_id, delivery)| {
+            [delivery.reaction_event_id, delivery.critique_event_id]
+                .into_iter()
+                .flatten()
+                .map(|event_id| (*source_id, event_id))
+        })
+        .collect::<Vec<_>>();
+    for (_, event_id) in &obsolete {
+        let deletion = config.sign(build_judge_deletion(
+            job.channel_id,
+            *event_id,
+            job.event.id,
+            job.target.id,
+        )?)?;
+        publish_required(connection, deletion, "superseded judge output deletion").await?;
+    }
+    if !obsolete.is_empty() {
+        let obsolete_sources = obsolete
+            .into_iter()
+            .map(|(source_id, _)| source_id)
+            .collect::<HashSet<_>>();
+        tracker
+            .lock()
+            .await
+            .deliveries
+            .retain(|source_id, _| !obsolete_sources.contains(source_id));
+    }
+    Ok(())
+}
+
+async fn load_judge_context(config: &Config, job: &JudgeJob) -> Result<Vec<JudgeContextMessage>> {
+    let Some(relation) = parse_thread_relation(&job.target) else {
         return Ok(Vec::new());
     };
     let events = load_thread(
         config,
-        event_channel_uuid(candidate)?,
+        event_channel_uuid(&job.target)?,
         relation.root_event_id,
     )
     .await?;
     Ok(judge_context_messages(
         &events,
-        candidate,
+        &job.target,
         &config.owner_pubkeys,
         &config.bot_keys.public_key(),
         relation.root_event_id,
     ))
+}
+
+async fn load_judge_target(config: &Config, channel_id: Uuid, target_id: EventId) -> Result<Event> {
+    let mut connection = NostrWsConnection::connect_authenticated(
+        &config.relay_url,
+        &config.bot_keys,
+        config.owner_auth_tag.as_ref(),
+    )
+    .await?;
+    let channel = channel_id.to_string();
+    let filter = Filter::new()
+        .id(target_id)
+        .kind(Kind::Custom(9))
+        .custom_tags(SingleLetterTag::lowercase(Alphabet::H), [channel.as_str()]);
+    connection
+        .send_raw(&json!(["REQ", JUDGE_TARGET_SUBSCRIPTION_ID, filter]))
+        .await?;
+    let mut target = None;
+    loop {
+        match connection.next_event(THREAD_QUERY_TIMEOUT).await? {
+            RelayMessage::Event {
+                subscription_id,
+                event,
+            } if subscription_id == JUDGE_TARGET_SUBSCRIPTION_ID => {
+                event
+                    .verify()
+                    .context("relay returned an invalid judge target")?;
+                if event.id == target_id && event_channel(&event) == Some(channel.as_str()) {
+                    target = Some(*event);
+                }
+            }
+            RelayMessage::Eose { subscription_id }
+                if subscription_id == JUDGE_TARGET_SUBSCRIPTION_ID =>
+            {
+                break;
+            }
+            RelayMessage::Closed {
+                subscription_id,
+                message,
+            } if subscription_id == JUDGE_TARGET_SUBSCRIPTION_ID => {
+                bail!("relay closed judge target query: {message}");
+            }
+            _ => {}
+        }
+    }
+    let _ = connection.disconnect().await;
+    target.ok_or_else(|| anyhow!("message edit target {} was not found", target_id.to_hex()))
 }
 
 fn judge_context_messages(
@@ -1872,14 +2044,19 @@ fn parse_judge_verdict(text: &str) -> Result<JudgeVerdict> {
 fn build_judge_reaction(
     channel_id: Uuid,
     source: &Event,
+    target: &Event,
     verdict: &JudgeVerdict,
 ) -> Result<EventBuilder> {
     Ok(
-        buzz_sdk::build_reaction(source.id, if verdict.pass { "👍" } else { "👎" })?
+        buzz_sdk::build_reaction(target.id, if verdict.pass { "👍" } else { "👎" })?
             .tag(Tag::parse(["h", channel_id.to_string().as_str()])?)
             .tag(Tag::parse([
                 JUDGED_SOURCE_TAG,
                 source.id.to_hex().as_str(),
+            ])?)
+            .tag(Tag::parse([
+                JUDGED_TARGET_TAG,
+                target.id.to_hex().as_str(),
             ])?)
             .tag(Tag::parse([
                 JUDGE_RESULT_TAG,
@@ -1891,16 +2068,17 @@ fn build_judge_reaction(
 fn build_judge_critique(
     channel_id: Uuid,
     source: &Event,
+    target: &Event,
     verdict: &JudgeVerdict,
     agent_hex: &str,
     agent_label: &str,
 ) -> Result<EventBuilder> {
-    let relation = parse_thread_relation(source);
+    let relation = parse_thread_relation(target);
     let thread_ref = ThreadRef {
         root_event_id: relation
             .map(|relation| relation.root_event_id)
-            .unwrap_or(source.id),
-        parent_event_id: source.id,
+            .unwrap_or(target.id),
+        parent_event_id: target.id,
     };
     let issues = verdict
         .failures
@@ -1923,9 +2101,30 @@ fn build_judge_critique(
         source.id.to_hex().as_str(),
     ])?)
     .tag(Tag::parse([
+        JUDGED_TARGET_TAG,
+        target.id.to_hex().as_str(),
+    ])?)
+    .tag(Tag::parse([
         JUDGE_RESULT_TAG,
         judge_verdict_json(verdict).as_str(),
     ])?))
+}
+
+fn build_judge_deletion(
+    channel_id: Uuid,
+    event_id: EventId,
+    source_id: EventId,
+    target_id: EventId,
+) -> Result<EventBuilder> {
+    Ok(buzz_sdk::build_delete_compat(channel_id, event_id)?
+        .tag(Tag::parse([
+            JUDGED_SOURCE_TAG,
+            source_id.to_hex().as_str(),
+        ])?)
+        .tag(Tag::parse([
+            JUDGED_TARGET_TAG,
+            target_id.to_hex().as_str(),
+        ])?))
 }
 
 fn judge_verdict_json(verdict: &JudgeVerdict) -> String {
@@ -1953,6 +2152,13 @@ fn record_judge_event(
     else {
         return;
     };
+    let target = match unique_event_tag_value(event, JUDGED_TARGET_TAG) {
+        Some(value) => match EventId::from_hex(value) {
+            Ok(target) => target,
+            Err(_) => return,
+        },
+        None => source,
+    };
     let Some(result) = unique_event_tag_value(event, JUDGE_RESULT_TAG) else {
         return;
     };
@@ -1962,17 +2168,60 @@ fn record_judge_event(
     let expected_reaction = if verdict.pass { "👍" } else { "👎" };
     let delivery = deliveries.entry(source).or_default();
     if delivery
+        .target_id
+        .is_some_and(|existing| existing != target)
+    {
+        return;
+    }
+    if delivery
         .verdict
         .as_ref()
         .is_some_and(|existing| existing != &verdict)
     {
         return;
     }
+    delivery.target_id = Some(target);
     delivery.verdict = Some(verdict);
-    if event.kind == Kind::Reaction && event.content == expected_reaction {
-        delivery.reacted = true;
-    } else if event.kind == Kind::Custom(9) {
-        delivery.critiqued = true;
+    if event.kind == Kind::Reaction
+        && event.content == expected_reaction
+        && reaction_target(event) == Some(target)
+    {
+        delivery.reaction_event_id = Some(event.id);
+    } else if event.kind == Kind::Custom(9)
+        && parse_thread_relation(event).is_some_and(|relation| relation.parent_event_id == target)
+    {
+        delivery.critique_event_id = Some(event.id);
+    }
+}
+
+fn recover_judge_deliveries(
+    deliveries: &mut HashMap<EventId, JudgeDelivery>,
+    events: &[Event],
+    bot: &PublicKey,
+) {
+    let deleted = events
+        .iter()
+        .filter(|event| {
+            event.pubkey == *bot
+                && matches!(
+                    event.kind,
+                    Kind::EventDeletion | Kind::Custom(5) | Kind::Custom(9005)
+                )
+        })
+        .flat_map(|event| {
+            event.tags.iter().filter_map(|tag| {
+                let parts = tag.as_slice();
+                (parts.first().map(String::as_str) == Some("e"))
+                    .then(|| parts.get(1))
+                    .flatten()
+                    .and_then(|value| EventId::from_hex(value).ok())
+            })
+        })
+        .collect::<HashSet<_>>();
+    for event in events {
+        if !deleted.contains(&event.id) {
+            record_judge_event(deliveries, event, bot);
+        }
     }
 }
 
@@ -2286,6 +2535,11 @@ async fn load_channel_route_state(config: &Config, channel_id: Uuid) -> Result<R
         &bot_history,
         &config.bot_keys.public_key(),
     );
+    recover_judge_deliveries(
+        &mut state.judge_deliveries,
+        &bot_history,
+        &config.bot_keys.public_key(),
+    );
     Ok(state)
 }
 
@@ -2485,7 +2739,6 @@ fn parse_status_agents(event: &Event) -> HashMap<PublicKey, AgentTurnRecord> {
 }
 
 fn record_route_event(state: &mut RouteState, channel_id: Uuid, event: &Event, bot: &PublicKey) {
-    record_judge_event(&mut state.judge_deliveries, event, bot);
     record_emoji_event(&mut state.emoji_reactions, event, bot);
     let Some(source_event_id) = routed_source_event_id(event, bot) else {
         return;
@@ -4166,6 +4419,146 @@ mod tests {
     }
 
     #[test]
+    fn blank_edit_is_judged_as_the_effective_message() {
+        let fixture = Fixture::new();
+        let channel = fixture.channel.to_string();
+        let target = fixture.agent_reply.id.to_hex();
+        let edit = EventBuilder::new(Kind::Custom(KIND_STREAM_MESSAGE_EDIT as u16), "")
+            .tags(vec![
+                Tag::parse(["h", channel.as_str()]).unwrap(),
+                Tag::parse(["e", target.as_str()]).unwrap(),
+            ])
+            .sign_with_keys(&fixture.owner)
+            .unwrap();
+
+        assert_eq!(
+            deterministic_judge_verdict(&edit),
+            Some(JudgeVerdict {
+                pass: false,
+                failures: vec![JudgeFailure {
+                    rule: COMPLETE_MESSAGE_RULE.to_string(),
+                    issue: "message has no text or attachment".to_string(),
+                }],
+            })
+        );
+    }
+
+    #[test]
+    fn edit_revision_supersedes_its_original_at_the_same_time() {
+        let original = JudgeRevision {
+            created_at: 10,
+            is_edit: false,
+        };
+        let edit = JudgeRevision {
+            created_at: 10,
+            is_edit: true,
+        };
+        let older_edit = JudgeRevision {
+            created_at: 9,
+            is_edit: true,
+        };
+
+        assert!(edit.supersedes(original));
+        assert!(!original.supersedes(edit));
+        assert!(!older_edit.supersedes(edit));
+    }
+
+    #[test]
+    fn edited_delivery_verdict_targets_the_visible_agent_message() {
+        let fixture = Fixture::new();
+        let channel = fixture.channel.to_string();
+        let target = fixture.agent_reply.id.to_hex();
+        let edit = EventBuilder::new(Kind::Custom(KIND_STREAM_MESSAGE_EDIT as u16), "-")
+            .tags(vec![
+                Tag::parse(["h", channel.as_str()]).unwrap(),
+                Tag::parse(["e", target.as_str()]).unwrap(),
+            ])
+            .sign_with_keys(&fixture.owner)
+            .unwrap();
+        let verdict = JudgeVerdict {
+            pass: false,
+            failures: vec![JudgeFailure {
+                rule: COMPLETE_MESSAGE_RULE.to_string(),
+                issue: "replace the placeholder with the complete response".to_string(),
+            }],
+        };
+        let reaction = build_judge_reaction(fixture.channel, &edit, &fixture.agent_reply, &verdict)
+            .unwrap()
+            .sign_with_keys(&fixture.bot)
+            .unwrap();
+        let critique = build_judge_critique(
+            fixture.channel,
+            &edit,
+            &fixture.agent_reply,
+            &verdict,
+            &fixture.agent.public_key().to_hex(),
+            "slopd-codex",
+        )
+        .unwrap()
+        .sign_with_keys(&fixture.bot)
+        .unwrap();
+        let mut deliveries = HashMap::new();
+
+        assert_eq!(reaction_target(&reaction), Some(fixture.agent_reply.id));
+        assert_eq!(
+            unique_event_tag_value(&reaction, JUDGED_SOURCE_TAG),
+            Some(edit.id.to_hex().as_str())
+        );
+        assert_eq!(
+            unique_event_tag_value(&reaction, JUDGED_TARGET_TAG),
+            Some(fixture.agent_reply.id.to_hex().as_str())
+        );
+        assert_eq!(
+            parse_thread_relation(&critique).unwrap().parent_event_id,
+            fixture.agent_reply.id
+        );
+        assert!(event_mentions(&critique, &fixture.agent.public_key()));
+        record_judge_event(&mut deliveries, &reaction, &fixture.bot.public_key());
+        record_judge_event(&mut deliveries, &critique, &fixture.bot.public_key());
+        assert!(deliveries[&edit.id].complete());
+        assert_eq!(
+            deliveries[&edit.id].target_id(edit.id),
+            fixture.agent_reply.id
+        );
+    }
+
+    #[test]
+    fn recovery_ignores_deleted_superseded_judgments() {
+        let fixture = Fixture::new();
+        let verdict = JudgeVerdict {
+            pass: true,
+            failures: vec![],
+        };
+        let reaction = build_judge_reaction(
+            fixture.channel,
+            &fixture.agent_reply,
+            &fixture.agent_reply,
+            &verdict,
+        )
+        .unwrap()
+        .sign_with_keys(&fixture.bot)
+        .unwrap();
+        let deletion = build_judge_deletion(
+            fixture.channel,
+            reaction.id,
+            fixture.agent_reply.id,
+            fixture.agent_reply.id,
+        )
+        .unwrap()
+        .sign_with_keys(&fixture.bot)
+        .unwrap();
+        let mut deliveries = HashMap::new();
+
+        recover_judge_deliveries(
+            &mut deliveries,
+            &[reaction, deletion],
+            &fixture.bot.public_key(),
+        );
+
+        assert!(deliveries.is_empty());
+    }
+
+    #[test]
     fn fail_delivery_is_complete_only_after_reaction_and_critique() {
         let fixture = Fixture::new();
         let verdict = JudgeVerdict {
@@ -4175,12 +4568,18 @@ mod tests {
                 issue: "ends abruptly".to_string(),
             }],
         };
-        let reaction = build_judge_reaction(fixture.channel, &fixture.agent_reply, &verdict)
-            .unwrap()
-            .sign_with_keys(&fixture.bot)
-            .unwrap();
+        let reaction = build_judge_reaction(
+            fixture.channel,
+            &fixture.agent_reply,
+            &fixture.agent_reply,
+            &verdict,
+        )
+        .unwrap()
+        .sign_with_keys(&fixture.bot)
+        .unwrap();
         let critique = build_judge_critique(
             fixture.channel,
+            &fixture.agent_reply,
             &fixture.agent_reply,
             &verdict,
             &fixture.agent.public_key().to_hex(),
@@ -4217,10 +4616,15 @@ mod tests {
             pass: true,
             failures: vec![],
         };
-        let reaction = build_judge_reaction(fixture.channel, &fixture.agent_reply, &verdict)
-            .unwrap()
-            .sign_with_keys(&fixture.bot)
-            .unwrap();
+        let reaction = build_judge_reaction(
+            fixture.channel,
+            &fixture.agent_reply,
+            &fixture.agent_reply,
+            &verdict,
+        )
+        .unwrap()
+        .sign_with_keys(&fixture.bot)
+        .unwrap();
         let mut deliveries = HashMap::new();
 
         assert_eq!(reaction.kind, Kind::Reaction);
