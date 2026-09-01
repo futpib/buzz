@@ -56,8 +56,10 @@ const REACTION_POLL_INTERVAL: Duration = Duration::from_secs(2);
 const STATUS_PERSIST_REFRESH_SECS: u64 = 30;
 const ROUTED_STATUS_EXPIRY_SECS: u64 = 600;
 const CHANNEL_REFRESH_INTERVAL: Duration = Duration::from_secs(300);
-const LIVE_REPLAY_WINDOW_SECS: u64 = 600;
 const ROUTE_ACK_WINDOW_SECS: u64 = 3_600;
+const LIVE_REPLAY_WINDOW_SECS: u64 = ROUTE_ACK_WINDOW_SECS;
+const ROUTE_RETRY_POLL_INTERVAL: Duration = Duration::from_secs(1);
+const RETRY_BACKOFF_MAX: Duration = Duration::from_secs(60);
 const RECEIVE_TIMEOUT: Duration = Duration::from_secs(60);
 const THREAD_QUERY_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_THREAD_EVENTS: usize = 1_000;
@@ -264,6 +266,7 @@ struct HistoricalThreadState {
 struct RouteState {
     pending: HashMap<EventId, PendingRoute>,
     handled_sources: HashSet<EventId>,
+    route_retries: HashMap<EventId, RouteRetry>,
     judge_deliveries: HashMap<EventId, JudgeDelivery>,
     emoji_reactions: HashSet<EventId>,
     last_agents: HashMap<Uuid, LastAgent>,
@@ -273,6 +276,13 @@ struct RouteState {
     obsolete_status_events: HashMap<ThreadKey, HashSet<EventId>>,
     historical_threads: HashMap<ThreadKey, HistoricalThreadState>,
     historical_roots: HashSet<ThreadKey>,
+}
+
+#[derive(Clone)]
+struct RouteRetry {
+    event: Event,
+    failures: u32,
+    retry_at: tokio::time::Instant,
 }
 
 #[derive(Clone, Default)]
@@ -608,6 +618,66 @@ async fn publish_required(
     Ok(())
 }
 
+fn retry_backoff(failures: u32) -> Duration {
+    let multiplier = 1_u64 << failures.saturating_sub(1).min(5);
+    Duration::from_secs(2 * multiplier).min(RETRY_BACKOFF_MAX)
+}
+
+fn transient_relay_text(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    [
+        "rate-limit",
+        "rate limit",
+        "shared admission unavailable",
+        "timeout",
+        "timed out",
+        "connection closed",
+        "temporarily unavailable",
+        "try again",
+        "503",
+    ]
+    .iter()
+    .any(|needle| message.contains(needle))
+}
+
+fn transient_route_error(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .any(|cause| transient_relay_text(&cause.to_string()))
+}
+
+fn missing_reaction_target(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .to_string()
+            .contains("reaction target event not found")
+    })
+}
+
+fn schedule_route_retry(routes: &mut RouteState, event: &Event, prior_failures: u32) -> Duration {
+    let failures = prior_failures.saturating_add(1);
+    let delay = retry_backoff(failures);
+    routes.route_retries.insert(
+        event.id,
+        RouteRetry {
+            event: event.clone(),
+            failures,
+            retry_at: tokio::time::Instant::now() + delay,
+        },
+    );
+    delay
+}
+
+fn take_due_route_retry(routes: &mut RouteState, now: tokio::time::Instant) -> Option<RouteRetry> {
+    let event_id = routes
+        .route_retries
+        .iter()
+        .filter(|(_, retry)| retry.retry_at <= now)
+        .min_by_key(|(_, retry)| retry.retry_at)
+        .map(|(event_id, _)| *event_id)?;
+    routes.route_retries.remove(&event_id)
+}
+
 async fn listen_once(
     config: &Config,
     judge_tx: Option<&mpsc::Sender<JudgeJob>>,
@@ -690,6 +760,10 @@ async fn listen_once(
     reaction_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut status_poll = tokio::time::interval(REACTION_POLL_INTERVAL);
     status_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut route_retry_poll = tokio::time::interval(ROUTE_RETRY_POLL_INTERVAL);
+    route_retry_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut status_failures = 0_u32;
+    let mut status_retry_at = tokio::time::Instant::now();
 
     loop {
         tokio::select! {
@@ -715,13 +789,54 @@ async fn listen_once(
                     eprintln!("failed to poll routed mentions: {error:#}");
                 }
             }
+            _ = route_retry_poll.tick(), if !routes.route_retries.is_empty() => {
+                if let Some(retry) = take_due_route_retry(&mut routes, tokio::time::Instant::now()) {
+                    match maybe_route(config, &mut connection, &retry.event, &mut routes).await {
+                        Ok(()) => {
+                            eprintln!(
+                                "recovered routing for {} after {} transient failure(s)",
+                                retry.event.id.to_hex(),
+                                retry.failures,
+                            );
+                        }
+                        Err(error) if transient_route_error(&error) => {
+                            let delay = schedule_route_retry(
+                                &mut routes,
+                                &retry.event,
+                                retry.failures,
+                            );
+                            eprintln!(
+                                "routing {} still unavailable; retrying in {}s: {error:#}",
+                                retry.event.id.to_hex(),
+                                delay.as_secs(),
+                            );
+                        }
+                        Err(error) => {
+                            eprintln!(
+                                "routing retry for {} failed permanently: {error:#}",
+                                retry.event.id.to_hex(),
+                            );
+                        }
+                    }
+                }
+            }
             _ = status_poll.tick() => {
-                if let Err(error) = expire_thread_statuses(
-                    config,
-                    &mut connection,
-                    &mut routes,
-                ).await {
-                    eprintln!("failed to expire stale thread status: {error:#}");
+                if tokio::time::Instant::now() >= status_retry_at {
+                    match expire_thread_statuses(config, &mut connection, &mut routes).await {
+                        Ok(()) => {
+                            status_failures = 0;
+                            status_retry_at = tokio::time::Instant::now();
+                        }
+                        Err(error) => {
+                            status_failures = status_failures.saturating_add(1);
+                            let delay = retry_backoff(status_failures);
+                            status_retry_at = tokio::time::Instant::now() + delay;
+                            eprintln!(
+                                "failed to expire stale thread status; retrying in {}s: {error:#}",
+                                delay.as_secs(),
+                            );
+                        }
+                    }
                 }
             }
             message = connection.next_event(RECEIVE_TIMEOUT) => match message {
@@ -822,7 +937,16 @@ async fn listen_once(
                         &mut routes,
                     ).await;
                     if let Err(error) = result {
-                        eprintln!("failed to evaluate {}: {error:#}", event.id.to_hex());
+                        if transient_route_error(&error) {
+                            let delay = schedule_route_retry(&mut routes, &event, 0);
+                            eprintln!(
+                                "routing {} temporarily unavailable; retrying in {}s: {error:#}",
+                                event.id.to_hex(),
+                                delay.as_secs(),
+                            );
+                        } else {
+                            eprintln!("failed to evaluate {}: {error:#}", event.id.to_hex());
+                        }
                     }
                 }
                 Ok(RelayMessage::Closed {
@@ -909,6 +1033,9 @@ async fn maybe_route(
         return Ok(());
     }
     if routes.handled_sources.contains(&candidate.id) {
+        return Ok(());
+    }
+    if routes.route_retries.contains_key(&candidate.id) {
         return Ok(());
     }
     let channel_id = event_channel(candidate)
@@ -1045,6 +1172,13 @@ async fn maybe_route(
     let created_at = event.created_at.as_secs();
     let response = live_connection.send_event(event).await?;
     if !response.accepted {
+        if transient_relay_text(&response.message) {
+            bail!(
+                "relay temporarily rejected routed mention for {}: {}",
+                candidate.id.to_hex(),
+                response.message
+            );
+        }
         eprintln!(
             "relay rejected routed mention for {}: {}",
             candidate.id.to_hex(),
@@ -3181,8 +3315,8 @@ async fn expire_thread_statuses(
         }
     }
     for key in changed {
-        if state.agent_turns.contains_key(&key) {
-            reconcile_thread_status(config, connection, state, key).await?;
+        let result = if state.agent_turns.contains_key(&key) {
+            reconcile_thread_status(config, connection, state, key).await
         } else {
             set_thread_status(
                 config,
@@ -3192,7 +3326,20 @@ async fn expire_thread_statuses(
                 AgentThreadState::Failed,
                 None,
             )
-            .await?;
+            .await
+        };
+        if let Err(error) = result {
+            if missing_reaction_target(&error) {
+                state.agent_turns.remove(&key);
+                state.status.remove(&key);
+                state.obsolete_status_events.remove(&key);
+                eprintln!(
+                    "forgot stale thread status {} because its root event is gone",
+                    key.root_event_id.to_hex(),
+                );
+                continue;
+            }
+            return Err(error);
         }
     }
     Ok(())
@@ -3717,6 +3864,55 @@ mod tests {
                 candidate.clone(),
             ]
         }
+    }
+
+    #[test]
+    fn retry_backoff_is_exponential_and_bounded() {
+        assert_eq!(retry_backoff(1), Duration::from_secs(2));
+        assert_eq!(retry_backoff(2), Duration::from_secs(4));
+        assert_eq!(retry_backoff(6), RETRY_BACKOFF_MAX);
+        assert_eq!(retry_backoff(u32::MAX), RETRY_BACKOFF_MAX);
+    }
+
+    #[test]
+    fn relay_admission_failures_are_retryable() {
+        for message in [
+            "rate-limited: shared admission unavailable",
+            "Timeout waiting for relay message",
+            "503 temporarily unavailable",
+        ] {
+            assert!(transient_relay_text(message), "{message}");
+        }
+        assert!(!transient_relay_text("invalid: malformed event"));
+    }
+
+    #[test]
+    fn route_retry_waits_until_due_and_preserves_attempt_count() {
+        let fixture = Fixture::new();
+        let mut routes = RouteState::default();
+        assert_eq!(
+            schedule_route_retry(&mut routes, &fixture.root, 0),
+            Duration::from_secs(2)
+        );
+        assert!(take_due_route_retry(&mut routes, tokio::time::Instant::now()).is_none());
+
+        routes
+            .route_retries
+            .get_mut(&fixture.root.id)
+            .unwrap()
+            .retry_at = tokio::time::Instant::now();
+        let retry = take_due_route_retry(&mut routes, tokio::time::Instant::now()).unwrap();
+        assert_eq!(retry.event.id, fixture.root.id);
+        assert_eq!(retry.failures, 1);
+        assert!(routes.route_retries.is_empty());
+    }
+
+    #[test]
+    fn missing_status_target_is_terminal() {
+        let error = anyhow!(
+            "relay rejected thread turn status reaction: invalid: reaction target event not found"
+        );
+        assert!(missing_reaction_target(&error));
     }
 
     #[test]
