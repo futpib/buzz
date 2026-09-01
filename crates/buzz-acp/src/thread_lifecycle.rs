@@ -7,8 +7,8 @@ use buzz_core::agent_thread_lifecycle::{
 };
 use nostr::{Keys, Tag};
 
-use crate::queue::ConversationKey;
 use crate::relay::{RelayEventPublisher, RestClient};
+use crate::scope::SessionScope;
 
 const QUEUED_EXPIRY: Duration = Duration::from_secs(600);
 const MIN_WORKING_EXPIRY: Duration = Duration::from_secs(45);
@@ -44,9 +44,9 @@ impl ThreadLifecycleReporter {
         }
     }
 
-    pub(crate) fn try_agent_queued(&self, conversation: &ConversationKey, source_id: &str) {
+    pub(crate) fn try_agent_queued(&self, scope: &SessionScope, source_id: &str) {
         self.try_publish(
-            conversation,
+            scope,
             AgentThreadState::Agent,
             &format!("queue:{source_id}"),
             "queued",
@@ -56,7 +56,7 @@ impl ThreadLifecycleReporter {
 
     pub(crate) fn try_agent_working(
         &self,
-        conversation: &ConversationKey,
+        scope: &SessionScope,
         turn_id: &str,
         liveness_interval: Duration,
     ) {
@@ -66,7 +66,7 @@ impl ThreadLifecycleReporter {
             liveness_interval.saturating_mul(3).max(MIN_WORKING_EXPIRY)
         };
         self.try_publish(
-            conversation,
+            scope,
             AgentThreadState::Agent,
             turn_id,
             "working",
@@ -76,13 +76,13 @@ impl ThreadLifecycleReporter {
 
     pub(crate) async fn publish_terminal(
         &self,
-        conversation: &ConversationKey,
+        scope: &SessionScope,
         turn_id: &str,
         state: AgentThreadState,
         phase: &str,
     ) {
         let expiry = (state == AgentThreadState::Agent).then_some(QUEUED_EXPIRY);
-        let Some(event) = self.build(conversation, state, turn_id, phase, expiry) else {
+        let Some(event) = self.build(scope, state, turn_id, phase, expiry) else {
             return;
         };
         let result = if let Some(rest_client) = &self.rest_client {
@@ -91,7 +91,7 @@ impl ThreadLifecycleReporter {
             {
                 Ok(result) => result.map(|_| ()),
                 Err(_) => {
-                    tracing::warn!(conversation = %conversation, state = state.as_str(), phase, "thread lifecycle publish timed out");
+                    tracing::warn!(scope = %scope.telemetry_label(), state = state.as_str(), phase, "thread lifecycle publish timed out");
                     return;
                 }
             }
@@ -101,29 +101,29 @@ impl ThreadLifecycleReporter {
             return;
         };
         if let Err(error) = result {
-            tracing::warn!(conversation = %conversation, state = state.as_str(), phase, %error, "thread lifecycle publish failed");
+            tracing::warn!(scope = %scope.telemetry_label(), state = state.as_str(), phase, %error, "thread lifecycle publish failed");
         }
     }
 
     pub(crate) fn try_terminal(
         &self,
-        conversation: &ConversationKey,
+        scope: &SessionScope,
         turn_id: &str,
         state: AgentThreadState,
         phase: &str,
     ) {
-        self.try_publish(conversation, state, turn_id, phase, None);
+        self.try_publish(scope, state, turn_id, phase, None);
     }
 
     fn try_publish(
         &self,
-        conversation: &ConversationKey,
+        scope: &SessionScope,
         state: AgentThreadState,
         turn_id: &str,
         phase: &str,
         expiry: Option<Duration>,
     ) {
-        let Some(event) = self.build(conversation, state, turn_id, phase, expiry) else {
+        let Some(event) = self.build(scope, state, turn_id, phase, expiry) else {
             return;
         };
         if let Some(rest_client) = &self.rest_client {
@@ -135,24 +135,30 @@ impl ThreadLifecycleReporter {
             });
         } else if let Some(publisher) = &self.publisher {
             if let Err(error) = publisher.try_publish_event(event) {
-                tracing::debug!(conversation = %conversation, state = state.as_str(), phase, %error, "thread lifecycle refresh dropped");
+                tracing::debug!(scope = %scope.telemetry_label(), state = state.as_str(), phase, %error, "thread lifecycle refresh dropped");
             }
         }
     }
 
     fn build(
         &self,
-        conversation: &ConversationKey,
+        scope: &SessionScope,
         state: AgentThreadState,
         turn_id: &str,
         phase: &str,
         expiry: Option<Duration>,
     ) -> Option<nostr::Event> {
-        let root = conversation.thread_root.as_deref()?;
+        let SessionScope::Thread {
+            channel_id,
+            root_event_id: root,
+        } = scope
+        else {
+            return None;
+        };
         let root_event_id = match nostr::EventId::from_hex(root) {
             Ok(root) => root,
             Err(error) => {
-                tracing::warn!(conversation = %conversation, %error, "invalid thread root for lifecycle event");
+                tracing::warn!(scope = %scope.telemetry_label(), %error, "invalid thread root for lifecycle event");
                 return None;
             }
         };
@@ -164,14 +170,11 @@ impl ThreadLifecycleReporter {
             revision: self.next_revision.fetch_add(1, Ordering::Relaxed),
             expires_at: expiry.map(|duration| unix_seconds().saturating_add(duration.as_secs())),
         };
-        let mut builder = match build_agent_thread_lifecycle(
-            conversation.channel_id,
-            root_event_id,
-            &lifecycle,
-        ) {
+        let mut builder = match build_agent_thread_lifecycle(*channel_id, root_event_id, &lifecycle)
+        {
             Ok(builder) => builder,
             Err(error) => {
-                tracing::warn!(conversation = %conversation, %error, "thread lifecycle build failed");
+                tracing::warn!(scope = %scope.telemetry_label(), %error, "thread lifecycle build failed");
                 return None;
             }
         };
@@ -181,7 +184,7 @@ impl ThreadLifecycleReporter {
         match builder.sign_with_keys(&self.keys) {
             Ok(event) => Some(event),
             Err(error) => {
-                tracing::warn!(conversation = %conversation, %error, "thread lifecycle signing failed");
+                tracing::warn!(scope = %scope.telemetry_label(), %error, "thread lifecycle signing failed");
                 None
             }
         }
@@ -219,17 +222,17 @@ mod tests {
         let auth_tag = buzz_sdk::nip_oa::parse_auth_tag(&auth_json).unwrap();
         let reporter = ThreadLifecycleReporter::new(publisher, agent.clone(), Some(auth_tag));
         let root = nostr::EventId::all_zeros();
-        let conversation = ConversationKey {
+        let scope = SessionScope::Thread {
             channel_id: Uuid::new_v4(),
-            thread_root: Some(root.to_hex()),
+            root_event_id: root.to_hex(),
         };
 
-        reporter.try_agent_queued(&conversation, "source-1");
+        reporter.try_agent_queued(&scope, "source-1");
         let event = events.recv().await.unwrap();
         let parsed = parse_agent_thread_lifecycle(&event).unwrap();
 
         assert_eq!(event.pubkey, agent.public_key());
-        assert_eq!(parsed.channel_id, conversation.channel_id);
+        assert_eq!(parsed.channel_id, scope.channel_id());
         assert_eq!(parsed.root_event_id, root);
         assert_eq!(parsed.lifecycle.state, AgentThreadState::Agent);
         assert_eq!(parsed.lifecycle.phase, "queued");
@@ -247,7 +250,12 @@ mod tests {
         let (publisher, mut events) = RelayEventPublisher::test_pair();
         let reporter = ThreadLifecycleReporter::new(publisher, Keys::generate(), None);
 
-        reporter.try_agent_queued(&ConversationKey::channel(Uuid::new_v4()), "source-1");
+        reporter.try_agent_queued(
+            &SessionScope::Conversation {
+                channel_id: Uuid::new_v4(),
+            },
+            "source-1",
+        );
 
         assert!(events.try_recv().is_err());
     }
@@ -256,13 +264,13 @@ mod tests {
     async fn retrying_terminal_snapshot_has_an_expiry() {
         let (publisher, mut events) = RelayEventPublisher::test_pair();
         let reporter = ThreadLifecycleReporter::new(publisher, Keys::generate(), None);
-        let conversation = ConversationKey {
+        let scope = SessionScope::Thread {
             channel_id: Uuid::new_v4(),
-            thread_root: Some(nostr::EventId::all_zeros().to_hex()),
+            root_event_id: nostr::EventId::all_zeros().to_hex(),
         };
 
         reporter
-            .publish_terminal(&conversation, "turn-1", AgentThreadState::Agent, "retrying")
+            .publish_terminal(&scope, "turn-1", AgentThreadState::Agent, "retrying")
             .await;
 
         let event = events.recv().await.unwrap();
