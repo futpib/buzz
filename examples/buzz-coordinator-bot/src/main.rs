@@ -51,7 +51,6 @@ const BOT_NAME: &str = "buzz-coordinator-bot";
 const BOT_DISPLAY_NAME: &str = "Buzz Coordinator";
 const BOT_ABOUT: &str =
     "Routes conversations, coordinates work status, judges agent replies, and reacts to topics.";
-const RECONNECT_DELAY: Duration = Duration::from_secs(3);
 const REACTION_POLL_INTERVAL: Duration = Duration::from_secs(2);
 const STATUS_PERSIST_REFRESH_SECS: u64 = 30;
 const ROUTED_STATUS_EXPIRY_SECS: u64 = 600;
@@ -60,6 +59,7 @@ const ROUTE_ACK_WINDOW_SECS: u64 = 3_600;
 const LIVE_REPLAY_WINDOW_SECS: u64 = ROUTE_ACK_WINDOW_SECS;
 const ROUTE_RETRY_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const RETRY_BACKOFF_MAX: Duration = Duration::from_secs(60);
+const RECONNECT_RESET_AFTER: Duration = Duration::from_secs(30);
 const RECEIVE_TIMEOUT: Duration = Duration::from_secs(60);
 const THREAD_QUERY_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_THREAD_EVENTS: usize = 1_000;
@@ -128,6 +128,7 @@ async fn main() -> Result<()> {
     let shutdown = tokio::signal::ctrl_c();
     tokio::pin!(shutdown);
 
+    let mut bootstrap_failures = 0_u32;
     loop {
         let result = tokio::select! {
             _ = &mut shutdown => return Ok(()),
@@ -135,11 +136,18 @@ async fn main() -> Result<()> {
         };
         match result {
             Ok(()) => break,
-            Err(error) => eprintln!("bootstrap failed: {error:#}; retrying"),
-        }
-        tokio::select! {
-            _ = &mut shutdown => return Ok(()),
-            _ = tokio::time::sleep(RECONNECT_DELAY) => {}
+            Err(error) => {
+                bootstrap_failures = bootstrap_failures.saturating_add(1);
+                let delay = retry_backoff(bootstrap_failures);
+                eprintln!(
+                    "bootstrap failed: {error:#}; retrying in {}s",
+                    delay.as_secs()
+                );
+                tokio::select! {
+                    _ = &mut shutdown => return Ok(()),
+                    _ = tokio::time::sleep(delay) => {}
+                }
+            }
         }
     }
 
@@ -164,7 +172,9 @@ async fn main() -> Result<()> {
         tx
     });
 
+    let mut reconnect_failures = 0_u32;
     loop {
+        let connected_at = tokio::time::Instant::now();
         let result = tokio::select! {
             _ = &mut shutdown => return Ok(()),
             result = listen_once(
@@ -175,12 +185,20 @@ async fn main() -> Result<()> {
                 Arc::clone(&emoji_tracker),
             ) => result,
         };
+        if connected_at.elapsed() >= RECONNECT_RESET_AFTER {
+            reconnect_failures = 0;
+        }
+        reconnect_failures = reconnect_failures.saturating_add(1);
+        let delay = retry_backoff(reconnect_failures);
         if let Err(error) = result {
-            eprintln!("relay listener stopped: {error:#}; reconnecting");
+            eprintln!(
+                "relay listener stopped: {error:#}; reconnecting in {}s",
+                delay.as_secs()
+            );
         }
         tokio::select! {
             _ = &mut shutdown => return Ok(()),
-            _ = tokio::time::sleep(RECONNECT_DELAY) => {}
+            _ = tokio::time::sleep(delay) => {}
         }
     }
 }
