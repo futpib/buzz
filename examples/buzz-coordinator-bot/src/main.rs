@@ -61,6 +61,7 @@ const ROUTE_RETRY_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const RETRY_BACKOFF_MAX: Duration = Duration::from_secs(60);
 const RECONNECT_RESET_AFTER: Duration = Duration::from_secs(30);
 const RECEIVE_TIMEOUT: Duration = Duration::from_secs(60);
+const RELAY_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 const THREAD_QUERY_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_THREAD_EVENTS: usize = 1_000;
 const MAX_CHANNELS: usize = 500;
@@ -790,6 +791,10 @@ async fn listen_once(
                 if channel_refresh_requires_reconnect(&channel_ids, &refreshed_channel_ids) {
                     bail!("accessible channel set changed; refreshing subscriptions");
                 }
+                connection
+                    .ping(RELAY_PROBE_TIMEOUT)
+                    .await
+                    .context("live relay probe failed")?;
                 refresh
                     .as_mut()
                     .reset(tokio::time::Instant::now() + CHANNEL_REFRESH_INTERVAL);

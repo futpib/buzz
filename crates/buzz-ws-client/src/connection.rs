@@ -1,5 +1,5 @@
 use std::collections::VecDeque;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use futures_util::{SinkExt, StreamExt};
 use nostr::{Event, Keys, Tag};
@@ -109,6 +109,49 @@ impl NostrWsConnection {
             return Ok(msg);
         }
         self.recv_one(timeout_dur).await
+    }
+
+    /// Sends a WebSocket ping and waits for its matching pong.
+    ///
+    /// Relay messages received while waiting are buffered for [`Self::next_event`].
+    pub async fn ping(&mut self, timeout_dur: Duration) -> Result<(), WsClientError> {
+        let payload = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+            .to_be_bytes()
+            .to_vec();
+        self.ws.send(Message::Ping(payload.clone().into())).await?;
+        let deadline = tokio::time::Instant::now() + timeout_dur;
+
+        loop {
+            let remaining = deadline
+                .checked_duration_since(tokio::time::Instant::now())
+                .unwrap_or(Duration::ZERO);
+            if remaining.is_zero() {
+                return Err(WsClientError::Timeout);
+            }
+
+            let raw = timeout(remaining, self.ws.next())
+                .await
+                .map_err(|_| WsClientError::Timeout)?
+                .ok_or(WsClientError::ConnectionClosed)?
+                .map_err(WsClientError::WebSocket)?;
+
+            match raw {
+                Message::Text(text) => {
+                    let msg = parse_relay_message(&text)?;
+                    if let RelayMessage::Auth { ref challenge } = msg {
+                        self.pending_challenge = Some(challenge.clone());
+                    }
+                    self.buffer.push_back(msg);
+                }
+                Message::Ping(data) => self.ws.send(Message::Pong(data)).await?,
+                Message::Pong(data) if data.as_ref() == payload.as_slice() => return Ok(()),
+                Message::Close(_) => return Err(WsClientError::ConnectionClosed),
+                _ => {}
+            }
+        }
     }
 
     /// Closes the WebSocket connection gracefully.
@@ -296,6 +339,8 @@ pub async fn publish_event(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::net::TcpListener;
+    use tokio_tungstenite::accept_async;
 
     #[test]
     fn auth_challenge_timeout_meets_floor() {
@@ -310,5 +355,55 @@ mod tests {
     #[test]
     fn publish_ok_timeout_meets_floor() {
         const { assert!(PUBLISH_OK_TIMEOUT_SECS >= 30) };
+    }
+
+    #[tokio::test]
+    async fn ping_preserves_messages_received_before_pong() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = accept_async(stream).await.unwrap();
+            ws.send(Message::Text(r#"["NOTICE","queued"]"#.into()))
+                .await
+                .unwrap();
+            let Some(Ok(Message::Ping(payload))) = ws.next().await else {
+                panic!("expected ping");
+            };
+            ws.send(Message::Pong(payload)).await.unwrap();
+        });
+
+        let mut connection = NostrWsConnection::connect(&format!("ws://{address}"))
+            .await
+            .unwrap();
+        connection.ping(Duration::from_secs(1)).await.unwrap();
+
+        assert!(matches!(
+            connection.next_event(Duration::from_secs(1)).await.unwrap(),
+            RelayMessage::Notice { message } if message == "queued"
+        ));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn ping_times_out_when_socket_stops_answering() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let _ws = accept_async(stream).await.unwrap();
+            std::future::pending::<()>().await;
+        });
+
+        let mut connection = NostrWsConnection::connect(&format!("ws://{address}"))
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            connection.ping(Duration::from_millis(25)).await,
+            Err(WsClientError::Timeout)
+        ));
+        server.abort();
+        assert!(server.await.unwrap_err().is_cancelled());
     }
 }
