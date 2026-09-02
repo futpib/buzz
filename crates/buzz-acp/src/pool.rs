@@ -43,7 +43,7 @@ use crate::queue::{
     PromptChannelInfo, PromptProfile, PromptProfileLookup, ThreadTags,
 };
 use crate::relay::{ChannelInfo, RestClient};
-use crate::scope::SessionScope;
+use crate::scope::{SessionPolicy, SessionScope};
 use crate::thread_lifecycle::ThreadLifecycleReporter;
 
 /// Window within which agent activity before a hard-cap death qualifies
@@ -2244,20 +2244,37 @@ fn send_prompt_result(
 
 async fn publish_successful_thread_completion(
     reporter: Option<&ThreadLifecycleReporter>,
-    source: &PromptSource,
+    scopes: &[SessionScope],
     turn_id: &str,
 ) {
-    let (PromptSource::Channel(conversation), Some(reporter)) = (source, reporter) else {
+    let Some(reporter) = reporter else {
         return;
     };
-    reporter
-        .publish_terminal(
-            conversation,
-            turn_id,
-            buzz_core::agent_thread_lifecycle::AgentThreadState::Human,
-            "completed",
-        )
-        .await;
+    for scope in scopes {
+        reporter
+            .publish_terminal(
+                scope,
+                turn_id,
+                buzz_core::agent_thread_lifecycle::AgentThreadState::Human,
+                "completed",
+            )
+            .await;
+    }
+}
+
+fn lifecycle_scopes_for_batch(batch: &FlushBatch, is_dm: bool) -> Vec<SessionScope> {
+    if is_dm {
+        return Vec::new();
+    }
+    let mut scopes = Vec::new();
+    for event in batch.events.iter().chain(batch.cancelled_events.iter()) {
+        let scope =
+            SessionScope::derive(SessionPolicy::Thread, batch.channel_id, false, &event.event);
+        if !scopes.contains(&scope) {
+            scopes.push(scope);
+        }
+    }
+    scopes
 }
 
 /// Core async function spawned for each prompt.
@@ -2308,21 +2325,6 @@ pub async fn run_prompt_task(
             "triggeringEventIds": triggering_event_ids,
         }),
     );
-
-    let _thread_lifecycle_guard = match (&source, &ctx.thread_lifecycle) {
-        (PromptSource::Channel(conversation), Some(reporter)) => {
-            reporter.try_agent_working(conversation, &turn_id, ctx.turn_liveness_interval);
-            Some(ThreadLifecycleLivenessGuard::new(tokio::spawn(
-                run_thread_lifecycle_liveness(
-                    reporter.clone(),
-                    conversation.clone(),
-                    turn_id.clone(),
-                    ctx.turn_liveness_interval,
-                ),
-            )))
-        }
-        _ => None,
-    };
 
     // Emits `turn_completed` on any exit path. Captures observer handle and
     // metadata now, before the agent is moved into PromptResult. It must be
@@ -2398,6 +2400,31 @@ pub async fn run_prompt_task(
         },
         PromptSource::Heartbeat => None,
     };
+
+    let lifecycle_scopes = batch.as_ref().map_or_else(Vec::new, |batch| {
+        lifecycle_scopes_for_batch(
+            batch,
+            resolved_channel_info
+                .as_ref()
+                .is_none_or(|info| info.channel_type == "dm"),
+        )
+    });
+    let _thread_lifecycle_guard = ctx.thread_lifecycle.as_ref().and_then(|reporter| {
+        if lifecycle_scopes.is_empty() {
+            return None;
+        }
+        for scope in &lifecycle_scopes {
+            reporter.try_agent_working(scope, &turn_id, ctx.turn_liveness_interval);
+        }
+        Some(ThreadLifecycleLivenessGuard::new(tokio::spawn(
+            run_thread_lifecycle_liveness(
+                reporter.clone(),
+                lifecycle_scopes.clone(),
+                turn_id.clone(),
+                ctx.turn_liveness_interval,
+            ),
+        )))
+    });
 
     //
     // Core memory is delivered inside the system prompt the harness already
@@ -3234,6 +3261,12 @@ pub async fn run_prompt_task(
                             Some(buzz_core::agent_turn_metric::StopReason::EndTurn),
                         )
                         .await;
+                        publish_successful_thread_completion(
+                            ctx.thread_lifecycle.as_ref(),
+                            &lifecycle_scopes,
+                            &turn_id,
+                        )
+                        .await;
                         send_prompt_result(
                             &result_tx,
                             &turn_id,
@@ -3252,8 +3285,12 @@ pub async fn run_prompt_task(
     match prompt_result {
         Ok(stop_reason) => {
             log_stop_reason(&source, &stop_reason);
-            publish_successful_thread_completion(ctx.thread_lifecycle.as_ref(), &source, &turn_id)
-                .await;
+            publish_successful_thread_completion(
+                ctx.thread_lifecycle.as_ref(),
+                &lifecycle_scopes,
+                &turn_id,
+            )
+            .await;
 
             if let PromptSource::Channel(scope) = &source {
                 let standing_sent = !agent.has_system_prompt_support();
@@ -4968,7 +5005,7 @@ struct LivenessGuard {
 
 async fn run_thread_lifecycle_liveness(
     reporter: ThreadLifecycleReporter,
-    scope: SessionScope,
+    scopes: Vec<SessionScope>,
     turn_id: String,
     interval: Duration,
 ) {
@@ -4979,7 +5016,9 @@ async fn run_thread_lifecycle_liveness(
     ticker.tick().await;
     loop {
         ticker.tick().await;
-        reporter.try_agent_working(&scope, &turn_id, interval);
+        for scope in &scopes {
+            reporter.try_agent_working(scope, &turn_id, interval);
+        }
     }
 }
 
@@ -5476,12 +5515,12 @@ mod tests {
         let (publisher, mut events) = crate::relay::RelayEventPublisher::test_pair();
         let reporter = ThreadLifecycleReporter::new(publisher, nostr::Keys::generate(), None);
         let root = nostr::EventId::all_zeros();
-        let source = PromptSource::Channel(SessionScope::Thread {
+        let scope = SessionScope::Thread {
             channel_id: Uuid::new_v4(),
             root_event_id: root.to_hex(),
-        });
+        };
 
-        publish_successful_thread_completion(Some(&reporter), &source, "turn-1").await;
+        publish_successful_thread_completion(Some(&reporter), &[scope], "turn-1").await;
 
         let parsed = buzz_core::agent_thread_lifecycle::parse_agent_thread_lifecycle(
             &events.recv().await.unwrap(),
@@ -5495,6 +5534,40 @@ mod tests {
         );
         assert_eq!(parsed.lifecycle.phase, "completed");
         assert_eq!(parsed.lifecycle.expires_at, None);
+    }
+
+    #[test]
+    fn channel_session_keeps_concrete_thread_lifecycle_target() {
+        let channel_id = Uuid::new_v4();
+        let root = nostr::EventId::all_zeros();
+        let parent = "f".repeat(64);
+        let event = nostr::EventBuilder::new(nostr::Kind::Custom(9), "continue")
+            .tags([
+                nostr::Tag::parse(["e", root.to_hex().as_str(), "", "root"]).unwrap(),
+                nostr::Tag::parse(["e", parent.as_str(), "", "reply"]).unwrap(),
+            ])
+            .sign_with_keys(&nostr::Keys::generate())
+            .unwrap();
+        let batch = FlushBatch {
+            channel_id,
+            scope: SessionScope::Conversation { channel_id },
+            events: vec![crate::queue::BatchEvent {
+                event,
+                prompt_tag: "test".into(),
+                received_at: std::time::Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+
+        assert_eq!(
+            lifecycle_scopes_for_batch(&batch, false),
+            vec![SessionScope::Thread {
+                channel_id,
+                root_event_id: root.to_hex(),
+            }]
+        );
+        assert!(lifecycle_scopes_for_batch(&batch, true).is_empty());
     }
 
     #[test]
@@ -7040,6 +7113,31 @@ done"#
 
         let mut ctx = make_prompt_context_no_owner();
         ctx.base_prompt = Some("standing-once".into());
+        ctx.channel_info = ChannelInfoResolver::new(
+            HashMap::from([(
+                channel_id,
+                ChannelInfo {
+                    name: "channel-lifecycle".into(),
+                    channel_type: "stream".into(),
+                    description: None,
+                },
+            )]),
+            ctx.rest_client.clone(),
+        );
+        ctx.channel_info.projects.write().unwrap().insert(
+            channel_id,
+            CachedProjectInfo {
+                fetched_at: std::time::Instant::now(),
+                value: None,
+            },
+        );
+        let (lifecycle_publisher, mut lifecycle_events) =
+            crate::relay::RelayEventPublisher::test_pair();
+        ctx.thread_lifecycle = Some(ThreadLifecycleReporter::new(
+            lifecycle_publisher,
+            nostr::Keys::generate(),
+            None,
+        ));
         let ctx = Arc::new(ctx);
         let (result_tx, mut result_rx) = mpsc::unbounded_channel();
 
@@ -7090,6 +7188,29 @@ done"#
                 "channel event IDs must commit only after ACP success"
             );
             drop(runtime);
+            let working = buzz_core::agent_thread_lifecycle::parse_agent_thread_lifecycle(
+                &lifecycle_events.recv().await.expect("working lifecycle"),
+            )
+            .unwrap();
+            assert_eq!(working.root_event_id.to_hex(), event_id);
+            assert_eq!(
+                working.lifecycle.state,
+                buzz_core::agent_thread_lifecycle::AgentThreadState::Agent
+            );
+            if turn >= 2 {
+                let completed = buzz_core::agent_thread_lifecycle::parse_agent_thread_lifecycle(
+                    &lifecycle_events.recv().await.expect("completion lifecycle"),
+                )
+                .unwrap();
+                assert_eq!(completed.root_event_id.to_hex(), event_id);
+                assert_eq!(
+                    completed.lifecycle.state,
+                    buzz_core::agent_thread_lifecycle::AgentThreadState::Human
+                );
+                assert_eq!(completed.lifecycle.phase, "completed");
+            } else {
+                assert!(lifecycle_events.try_recv().is_err());
+            }
             agent = result.agent;
         }
         agent.acp.shutdown().await;
