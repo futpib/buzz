@@ -61,6 +61,7 @@ const ROUTE_RETRY_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const RETRY_BACKOFF_MAX: Duration = Duration::from_secs(60);
 const RECONNECT_RESET_AFTER: Duration = Duration::from_secs(30);
 const RECEIVE_TIMEOUT: Duration = Duration::from_secs(60);
+const RELAY_PROBE_INTERVAL: Duration = Duration::from_secs(30);
 const RELAY_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 const THREAD_QUERY_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_THREAD_EVENTS: usize = 1_000;
@@ -781,6 +782,8 @@ async fn listen_once(
     status_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut route_retry_poll = tokio::time::interval(ROUTE_RETRY_POLL_INTERVAL);
     route_retry_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut relay_probe = tokio::time::interval(RELAY_PROBE_INTERVAL);
+    relay_probe.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut status_failures = 0_u32;
     let mut status_retry_at = tokio::time::Instant::now();
 
@@ -791,10 +794,6 @@ async fn listen_once(
                 if channel_refresh_requires_reconnect(&channel_ids, &refreshed_channel_ids) {
                     bail!("accessible channel set changed; refreshing subscriptions");
                 }
-                connection
-                    .ping(RELAY_PROBE_TIMEOUT)
-                    .await
-                    .context("live relay probe failed")?;
                 refresh
                     .as_mut()
                     .reset(tokio::time::Instant::now() + CHANNEL_REFRESH_INTERVAL);
@@ -802,6 +801,12 @@ async fn listen_once(
                     "channel safety refresh kept {} live subscription(s)",
                     channel_ids.len()
                 );
+            },
+            _ = relay_probe.tick() => {
+                connection
+                    .ping(RELAY_PROBE_TIMEOUT)
+                    .await
+                    .context("live relay probe failed")?;
             },
             _ = reaction_poll.tick(), if !routes.pending.is_empty() => {
                 if let Err(error) = poll_acknowledged_routes(
