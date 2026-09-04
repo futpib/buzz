@@ -80,7 +80,9 @@ Replace its `CHANGE_ME` values, then install or refresh the launcher and units:
 
 The bridges intentionally use the normal Buzz base prompt and NIP-AE memory.
 Do not add `--no-base-prompt` or `--no-memory`; those switches are for isolated
-diagnostics, not the permanent agents.
+diagnostics, not the permanent agents. The tracked launcher defaults channel
+messages to isolated per-thread ACP sessions; set `BUZZ_ACP_SESSION_POLICY` to
+`channel` only when channel-wide session reuse is intentional.
 
 To authorize the four remote agents with the human Buzz owner key, run:
 

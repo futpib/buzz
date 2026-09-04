@@ -88,6 +88,7 @@ direct_output="$(
 for expected in \
   '--agent-command /usr/bin/opencode' \
   '--agent-args=acp,--pure' \
+  '--session-policy thread' \
   '--session-title z.ai glm-5.2 max'
 do
   if [[ "${direct_output}" != *"${expected}"* ]]; then
@@ -105,11 +106,13 @@ allowlist_output="$(
     BUZZ_AGENT_COMMAND=/usr/bin/opencode \
     BUZZ_AGENT_RESPOND_TO=allowlist \
     BUZZ_AGENT_RESPOND_TO_ALLOWLIST=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd \
+    BUZZ_ACP_SESSION_POLICY=channel \
     BUZZ_AGENT_SESSION_TITLE='z.ai glm-5.2 max' \
     "${launcher}"
 )"
 for expected in \
   '--respond-to allowlist' \
+  '--session-policy channel' \
   '--respond-to-allowlist dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd'
 do
   if [[ "${allowlist_output}" != *"${expected}"* ]]; then

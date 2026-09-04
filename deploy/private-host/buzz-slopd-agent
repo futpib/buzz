@@ -77,6 +77,14 @@ esac
 
 respond_to="${BUZZ_AGENT_RESPOND_TO:-owner-only}"
 respond_to_allowlist="${BUZZ_AGENT_RESPOND_TO_ALLOWLIST:-}"
+session_policy="${BUZZ_ACP_SESSION_POLICY:-thread}"
+case "${session_policy}" in
+  channel|thread) ;;
+  *)
+    echo "buzz-slopd-agent: BUZZ_ACP_SESSION_POLICY must be channel or thread" >&2
+    exit 1
+    ;;
+esac
 if [[ -n "${BUZZ_COORDINATOR_BOT_PUBKEY:-}" ]]; then
   if [[ ! "${BUZZ_COORDINATOR_BOT_PUBKEY}" =~ ^[0-9a-f]{64}$ ]]; then
     echo "buzz-slopd-agent: BUZZ_COORDINATOR_BOT_PUBKEY must be a lowercase hex pubkey" >&2
@@ -114,6 +122,7 @@ fi
 buzz_args+=(
   --respond-to "${respond_to}"
   --agents 1
+  --session-policy "${session_policy}"
   --session-title "${BUZZ_AGENT_SESSION_TITLE}"
 )
 if [[ -n "${respond_to_allowlist}" ]]; then
