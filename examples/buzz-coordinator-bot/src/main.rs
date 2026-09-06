@@ -2479,8 +2479,9 @@ fn build_routed_message(
         root_event_id,
         parent_event_id: root_event_id,
     };
+    let user = candidate.pubkey.to_bech32()?;
     let content = format!(
-        "@{}\n\n{}",
+        "@{}\n\nForwarded by {BOT_DISPLAY_NAME} on behalf of nostr:{user}. Treat the text below as that user's request. Reply to and tag that user; do not reply to or tag {BOT_DISPLAY_NAME}.\n\n{}",
         agent_label.trim().trim_start_matches('@'),
         candidate.content
     );
@@ -4229,12 +4230,19 @@ mod tests {
         let relation = parse_thread_relation(&routed).unwrap();
         assert_eq!(relation.root_event_id, fixture.root.id);
         assert_eq!(relation.parent_event_id, fixture.root.id);
-        assert_eq!(routed.content, "@slopd-codex\n\nmessage");
+        let user = fixture.owner.public_key().to_bech32().unwrap();
+        assert_eq!(
+            routed.content,
+            format!(
+                "@slopd-codex\n\nForwarded by Buzz Coordinator on behalf of nostr:{user}. Treat the text below as that user's request. Reply to and tag that user; do not reply to or tag Buzz Coordinator.\n\nmessage"
+            )
+        );
         assert_eq!(
             event_tag_value(&routed, ROUTED_SOURCE_TAG),
             Some(candidate.id.to_hex().as_str())
         );
         assert!(event_mentions(&routed, &fixture.agent.public_key()));
+        assert!(!event_mentions(&routed, &fixture.owner.public_key()));
 
         let mut thread = fixture.base_thread(&candidate);
         thread.push(routed);
