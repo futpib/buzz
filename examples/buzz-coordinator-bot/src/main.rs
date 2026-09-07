@@ -35,6 +35,7 @@ const JUDGE_TARGET_SUBSCRIPTION_ID: &str = "thread-mention-judge-target";
 const EMOJI_BACKFILL_MESSAGES_ID: &str = "thread-mention-emoji-backfill-messages";
 const EMOJI_BACKFILL_REACTIONS_ID: &str = "thread-mention-emoji-backfill-reactions";
 const ROUTED_SOURCE_TAG: &str = "thread-mention-for";
+const ROUTED_AGENT_TAG: &str = "thread-mention-agent";
 const JUDGED_SOURCE_TAG: &str = "message-judge-for";
 const JUDGED_TARGET_TAG: &str = "message-judge-target";
 const JUDGE_RESULT_TAG: &str = "message-judge-result";
@@ -1145,12 +1146,19 @@ async fn maybe_route(
     };
 
     let agent_hex = agent.to_hex();
-    let label = load_agent_label(config, &agent)
-        .await
-        .unwrap_or_else(|error| {
-            eprintln!("could not resolve agent profile {agent_hex}: {error:#}");
-            "agent".to_string()
-        });
+    let user_hex = candidate.pubkey.to_hex();
+    let (label, user_label) = tokio::join!(
+        load_profile_label(config, &agent),
+        load_profile_label(config, &candidate.pubkey)
+    );
+    let label = label.unwrap_or_else(|error| {
+        eprintln!("could not resolve agent profile {agent_hex}: {error:#}");
+        "agent".to_string()
+    });
+    let user_label = user_label.unwrap_or_else(|error| {
+        eprintln!("could not resolve user profile {user_hex}: {error:#}");
+        format!("user-{}", &user_hex[..8])
+    });
     let latest_thread = load_thread(config, channel_id, root_event_id).await?;
     if let Some((explicit_agent, explicit_event)) = explicit_owner_mention_after(
         &latest_thread,
@@ -1195,6 +1203,7 @@ async fn maybe_route(
         candidate,
         &agent_hex,
         &label,
+        &user_label,
     )?)?;
     let event_id = event.id;
     let created_at = event.created_at.as_secs();
@@ -1925,7 +1934,7 @@ async fn apply_judge_verdict(
             .is_some_and(|delivery| delivery.critique_event_id.is_some());
         if !critiqued {
             let agent_hex = job.target.pubkey.to_hex();
-            let label = load_agent_label(config, &job.target.pubkey)
+            let label = load_profile_label(config, &job.target.pubkey)
                 .await
                 .unwrap_or_else(|_| format!("agent-{}", &agent_hex[..8]));
             let critique = config.sign(build_judge_critique(
@@ -2456,7 +2465,9 @@ fn route_acknowledged_by(reaction: &Event, target_id: EventId, route: PendingRou
 fn routed_message_agent(routed: &Event, bot: &PublicKey) -> Option<PublicKey> {
     (routed.kind == Kind::Custom(9) && routed.pubkey == *bot).then_some(())?;
     routed_source_event_id(routed, bot)?;
-    unique_event_tag_value(routed, "p").and_then(|value| PublicKey::parse(value).ok())
+    unique_event_tag_value(routed, ROUTED_AGENT_TAG)
+        .or_else(|| unique_event_tag_value(routed, "p"))
+        .and_then(|value| PublicKey::parse(value).ok())
 }
 
 fn routed_source_event_id(event: &Event, bot: &PublicKey) -> Option<EventId> {
@@ -2474,22 +2485,24 @@ fn build_routed_message(
     candidate: &Event,
     agent_hex: &str,
     agent_label: &str,
+    user_label: &str,
 ) -> Result<EventBuilder> {
     let thread_ref = ThreadRef {
         root_event_id,
         parent_event_id: root_event_id,
     };
-    let user = candidate.pubkey.to_bech32()?;
+    let user_hex = candidate.pubkey.to_hex();
     let content = format!(
-        "@{}\n\nForwarded by {BOT_DISPLAY_NAME} on behalf of nostr:{user}. Treat the text below as that user's request.\n\n{}",
+        "@{}\n\nForwarded by {BOT_DISPLAY_NAME} on behalf of @{}. Treat the text below as that user's request.\n\n{}",
         agent_label.trim().trim_start_matches('@'),
+        user_label.trim().trim_start_matches('@'),
         candidate.content
     );
     Ok(buzz_sdk::build_message(
         channel_id,
         &content,
         Some(&thread_ref),
-        &[agent_hex],
+        &[agent_hex, &user_hex],
         false,
         &[],
         &[],
@@ -2497,7 +2510,8 @@ fn build_routed_message(
     .tag(Tag::parse([
         ROUTED_SOURCE_TAG,
         candidate.id.to_hex().as_str(),
-    ])?))
+    ])?)
+    .tag(Tag::parse([ROUTED_AGENT_TAG, agent_hex])?))
 }
 
 fn build_routed_deletion(
@@ -2513,7 +2527,7 @@ fn build_routed_deletion(
     )
 }
 
-async fn load_agent_label(config: &Config, agent: &PublicKey) -> Result<String> {
+async fn load_profile_label(config: &Config, agent: &PublicKey) -> Result<String> {
     let mut connection = NostrWsConnection::connect_authenticated(
         &config.relay_url,
         &config.bot_keys,
@@ -4223,6 +4237,7 @@ mod tests {
             &candidate,
             &agent_hex,
             "slopd-codex",
+            "futpib",
         )
         .unwrap()
         .sign_with_keys(&fixture.bot)
@@ -4230,19 +4245,24 @@ mod tests {
         let relation = parse_thread_relation(&routed).unwrap();
         assert_eq!(relation.root_event_id, fixture.root.id);
         assert_eq!(relation.parent_event_id, fixture.root.id);
-        let user = fixture.owner.public_key().to_bech32().unwrap();
         assert_eq!(
             routed.content,
-            format!(
-                "@slopd-codex\n\nForwarded by Buzz Coordinator on behalf of nostr:{user}. Treat the text below as that user's request.\n\nmessage"
-            )
+            "@slopd-codex\n\nForwarded by Buzz Coordinator on behalf of @futpib. Treat the text below as that user's request.\n\nmessage"
         );
         assert_eq!(
             event_tag_value(&routed, ROUTED_SOURCE_TAG),
             Some(candidate.id.to_hex().as_str())
         );
         assert!(event_mentions(&routed, &fixture.agent.public_key()));
-        assert!(!event_mentions(&routed, &fixture.owner.public_key()));
+        assert!(event_mentions(&routed, &fixture.owner.public_key()));
+        assert_eq!(
+            event_tag_value(&routed, ROUTED_AGENT_TAG),
+            Some(agent_hex.as_str())
+        );
+        assert_eq!(
+            routed_message_agent(&routed, &fixture.bot.public_key()),
+            Some(fixture.agent.public_key())
+        );
 
         let mut thread = fixture.base_thread(&candidate);
         thread.push(routed);
@@ -4256,6 +4276,30 @@ mod tests {
     }
 
     #[test]
+    fn routed_message_agent_supports_legacy_single_mentions() {
+        let fixture = Fixture::new();
+        let agent_hex = fixture.agent.public_key().to_hex();
+        let legacy = buzz_sdk::build_message(
+            fixture.channel,
+            "@agent\n\nmessage",
+            None,
+            &[&agent_hex],
+            false,
+            &[],
+            &[],
+        )
+        .unwrap()
+        .tag(Tag::parse([ROUTED_SOURCE_TAG, fixture.root.id.to_hex().as_str()]).unwrap())
+        .sign_with_keys(&fixture.bot)
+        .unwrap();
+
+        assert_eq!(
+            routed_message_agent(&legacy, &fixture.bot.public_key()),
+            Some(fixture.agent.public_key())
+        );
+    }
+
+    #[test]
     fn deleted_route_keeps_its_source_handled_after_reconnect() {
         let fixture = Fixture::new();
         let candidate = fixture.candidate(&[]);
@@ -4265,6 +4309,7 @@ mod tests {
             &candidate,
             &fixture.agent.public_key().to_hex(),
             "agent",
+            "user",
         )
         .unwrap()
         .sign_with_keys(&fixture.bot)
@@ -4301,6 +4346,7 @@ mod tests {
             &candidate,
             &fixture.agent.public_key().to_hex(),
             "agent",
+            "user",
         )
         .unwrap()
         .sign_with_keys(&fixture.bot)
@@ -4327,6 +4373,7 @@ mod tests {
             &candidate,
             &fixture.agent.public_key().to_hex(),
             "agent",
+            "user",
         )
         .unwrap()
         .sign_with_keys(&fixture.bot)
