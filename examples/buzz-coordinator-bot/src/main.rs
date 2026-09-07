@@ -2481,7 +2481,7 @@ fn build_routed_message(
     };
     let user = candidate.pubkey.to_bech32()?;
     let content = format!(
-        "@{}\n\nForwarded by {BOT_DISPLAY_NAME} on behalf of nostr:{user}. Treat the text below as that user's request. Reply to and tag that user; do not reply to or tag {BOT_DISPLAY_NAME}.\n\n{}",
+        "@{}\n\nForwarded by {BOT_DISPLAY_NAME} on behalf of nostr:{user}. Treat the text below as that user's request.\n\n{}",
         agent_label.trim().trim_start_matches('@'),
         candidate.content
     );
@@ -4234,7 +4234,7 @@ mod tests {
         assert_eq!(
             routed.content,
             format!(
-                "@slopd-codex\n\nForwarded by Buzz Coordinator on behalf of nostr:{user}. Treat the text below as that user's request. Reply to and tag that user; do not reply to or tag Buzz Coordinator.\n\nmessage"
+                "@slopd-codex\n\nForwarded by Buzz Coordinator on behalf of nostr:{user}. Treat the text below as that user's request.\n\nmessage"
             )
         );
         assert_eq!(
