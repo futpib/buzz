@@ -65,7 +65,9 @@ const RECEIVE_TIMEOUT: Duration = Duration::from_secs(60);
 const RELAY_PROBE_INTERVAL: Duration = Duration::from_secs(30);
 const RELAY_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 const THREAD_QUERY_TIMEOUT: Duration = Duration::from_secs(15);
-const MAX_THREAD_EVENTS: usize = 1_000;
+const THREAD_PAGE_SIZE: usize = 1_000;
+const MAX_THREAD_EVENTS: usize = 100_000;
+const ROUTE_STATE_EVENT_LIMIT: usize = 1_000;
 const MAX_CHANNELS: usize = 500;
 const EMOJI_BACKFILL_PAGE_SIZE: usize = 200;
 const EMOJI_BACKFILL_MAX_EVENTS: usize = 100_000;
@@ -2630,7 +2632,7 @@ fn route_state_filters(channel: &str, bot: PublicKey, since: Timestamp) -> Route
                 SingleLetterTag::lowercase(Alphabet::T),
                 [STATUS_DISCOVERY_VALUE],
             )
-            .limit(MAX_THREAD_EVENTS)
+            .limit(ROUTE_STATE_EVENT_LIMIT)
     };
     RouteStateFilters {
         recent_bot_history: Filter::new()
@@ -2643,11 +2645,11 @@ fn route_state_filters(channel: &str, bot: PublicKey, since: Timestamp) -> Route
             .author(bot)
             .since(since)
             .custom_tags(SingleLetterTag::lowercase(Alphabet::H), [channel])
-            .limit(MAX_THREAD_EVENTS),
+            .limit(ROUTE_STATE_EVENT_LIMIT),
         messages: Filter::new()
             .kind(Kind::Custom(9))
             .custom_tags(SingleLetterTag::lowercase(Alphabet::H), [channel])
-            .limit(MAX_THREAD_EVENTS),
+            .limit(ROUTE_STATE_EVENT_LIMIT),
         status_reactions: status_scope().kind(Kind::Reaction),
         status_deletions: status_scope().kinds([Kind::EventDeletion, Kind::Custom(9005)]),
     }
@@ -3485,6 +3487,47 @@ async fn load_reaction(
     Ok(found)
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ThreadPageCursor {
+    created_at: u64,
+    event_id: String,
+}
+
+fn update_thread_page_cursor(
+    cursor: &mut Option<ThreadPageCursor>,
+    created_at: u64,
+    event_id: String,
+) {
+    let replace = cursor.as_ref().is_none_or(|current| {
+        created_at < current.created_at
+            || (created_at == current.created_at && event_id > current.event_id)
+    });
+    if replace {
+        *cursor = Some(ThreadPageCursor {
+            created_at,
+            event_id,
+        });
+    }
+}
+
+fn thread_replies_filter(
+    channel: &str,
+    root: &str,
+    cursor: Option<&ThreadPageCursor>,
+) -> Result<serde_json::Value> {
+    let filter = Filter::new()
+        .kind(Kind::Custom(9))
+        .custom_tags(SingleLetterTag::lowercase(Alphabet::E), [root])
+        .custom_tags(SingleLetterTag::lowercase(Alphabet::H), [channel])
+        .limit(THREAD_PAGE_SIZE);
+    let mut filter = serde_json::to_value(filter).context("serialize thread filter")?;
+    if let Some(cursor) = cursor {
+        filter["until"] = json!(cursor.created_at);
+        filter["before_id"] = json!(cursor.event_id);
+    }
+    Ok(filter)
+}
+
 async fn load_thread(config: &Config, channel_id: Uuid, root_id: EventId) -> Result<Vec<Event>> {
     let mut connection = NostrWsConnection::connect_authenticated(
         &config.relay_url,
@@ -3499,47 +3542,77 @@ async fn load_thread(config: &Config, channel_id: Uuid, root_id: EventId) -> Res
         .id(root_id)
         .kind(Kind::Custom(9))
         .custom_tags(h_tag, [channel.as_str()]);
-    let replies_filter = Filter::new()
-        .kind(Kind::Custom(9))
-        .custom_tags(SingleLetterTag::lowercase(Alphabet::E), [root.as_str()])
-        .custom_tags(SingleLetterTag::lowercase(Alphabet::H), [channel.as_str()])
-        .limit(MAX_THREAD_EVENTS);
-    connection
-        .send_raw(&json!([
-            "REQ",
-            THREAD_SUBSCRIPTION_ID,
-            root_filter,
-            replies_filter
-        ]))
-        .await?;
-
     let mut events = HashMap::new();
+    let mut cursor = None;
     loop {
-        match connection.next_event(THREAD_QUERY_TIMEOUT).await? {
-            RelayMessage::Event {
-                subscription_id,
-                event,
-            } if subscription_id == THREAD_SUBSCRIPTION_ID => {
-                event
-                    .verify()
-                    .context("relay returned an event with an invalid signature")?;
-                if events.len() >= MAX_THREAD_EVENTS && !events.contains_key(&event.id.to_hex()) {
-                    bail!("thread exceeds {MAX_THREAD_EVENTS} events; refusing incomplete routing");
-                }
-                events.insert(event.id.to_hex(), *event);
-            }
-            RelayMessage::Eose { subscription_id } if subscription_id == THREAD_SUBSCRIPTION_ID => {
-                break;
-            }
-            RelayMessage::Closed {
-                subscription_id,
-                message,
-            } if subscription_id == THREAD_SUBSCRIPTION_ID => {
-                bail!("relay closed thread query: {message}");
-            }
-            RelayMessage::Notice { message } => eprintln!("relay notice during query: {message}"),
-            _ => {}
+        let replies_filter = thread_replies_filter(&channel, &root, cursor.as_ref())?;
+        if cursor.is_none() {
+            connection
+                .send_raw(&json!([
+                    "REQ",
+                    THREAD_SUBSCRIPTION_ID,
+                    root_filter.clone(),
+                    replies_filter
+                ]))
+                .await?;
+        } else {
+            connection
+                .send_raw(&json!(["REQ", THREAD_SUBSCRIPTION_ID, replies_filter]))
+                .await?;
         }
+
+        let mut page_size = 0usize;
+        let mut next_cursor = None;
+        loop {
+            match connection.next_event(THREAD_QUERY_TIMEOUT).await? {
+                RelayMessage::Event {
+                    subscription_id,
+                    event,
+                } if subscription_id == THREAD_SUBSCRIPTION_ID => {
+                    event
+                        .verify()
+                        .context("relay returned an event with an invalid signature")?;
+                    let event_id = event.id.to_hex();
+                    if event.id != root_id {
+                        page_size += 1;
+                        update_thread_page_cursor(
+                            &mut next_cursor,
+                            event.created_at.as_secs(),
+                            event_id.clone(),
+                        );
+                    }
+                    if events.len() >= MAX_THREAD_EVENTS && !events.contains_key(&event_id) {
+                        bail!(
+                            "thread exceeds {MAX_THREAD_EVENTS} events; refusing incomplete routing"
+                        );
+                    }
+                    events.insert(event_id, *event);
+                }
+                RelayMessage::Eose { subscription_id }
+                    if subscription_id == THREAD_SUBSCRIPTION_ID =>
+                {
+                    break;
+                }
+                RelayMessage::Closed {
+                    subscription_id,
+                    message,
+                } if subscription_id == THREAD_SUBSCRIPTION_ID => {
+                    bail!("relay closed thread query: {message}");
+                }
+                RelayMessage::Notice { message } => {
+                    eprintln!("relay notice during query: {message}")
+                }
+                _ => {}
+            }
+        }
+        if page_size < THREAD_PAGE_SIZE {
+            break;
+        }
+        let next_cursor = next_cursor.context("full thread page had no pagination cursor")?;
+        if cursor.as_ref() == Some(&next_cursor) {
+            bail!("thread pagination cursor did not advance");
+        }
+        cursor = Some(next_cursor);
     }
     let _ = connection
         .send_raw(&json!(["CLOSE", THREAD_SUBSCRIPTION_ID]))
@@ -5347,6 +5420,25 @@ mod tests {
     }
 
     #[test]
+    fn thread_pagination_uses_a_dense_second_cursor() {
+        let mut cursor = None;
+        update_thread_page_cursor(&mut cursor, 20, "a".repeat(64));
+        update_thread_page_cursor(&mut cursor, 10, "b".repeat(64));
+        update_thread_page_cursor(&mut cursor, 10, "c".repeat(64));
+        update_thread_page_cursor(&mut cursor, 11, "f".repeat(64));
+
+        let cursor = cursor.unwrap();
+        assert_eq!(cursor.created_at, 10);
+        assert_eq!(cursor.event_id, "c".repeat(64));
+        let channel = Uuid::new_v4().to_string();
+        let root = "d".repeat(64);
+        let filter = thread_replies_filter(&channel, &root, Some(&cursor)).unwrap();
+        assert_eq!(filter["limit"], THREAD_PAGE_SIZE);
+        assert_eq!(filter["until"], 10);
+        assert_eq!(filter["before_id"], "c".repeat(64));
+    }
+
+    #[test]
     fn status_reactions_have_a_separate_recovery_budget_from_deletions() {
         let fixture = Fixture::new();
         let filters = route_state_filters(
@@ -5362,8 +5454,14 @@ mod tests {
         assert_eq!(deletion_kinds.len(), 2);
         assert!(deletion_kinds.contains(&Kind::EventDeletion));
         assert!(deletion_kinds.contains(&Kind::Custom(9005)));
-        assert_eq!(filters.status_reactions.limit, Some(MAX_THREAD_EVENTS));
-        assert_eq!(filters.status_deletions.limit, Some(MAX_THREAD_EVENTS));
+        assert_eq!(
+            filters.status_reactions.limit,
+            Some(ROUTE_STATE_EVENT_LIMIT)
+        );
+        assert_eq!(
+            filters.status_deletions.limit,
+            Some(ROUTE_STATE_EVENT_LIMIT)
+        );
     }
 
     #[test]
