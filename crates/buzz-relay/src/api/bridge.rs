@@ -988,7 +988,9 @@ async fn submit_event_authed(
                     "message": "",
                 })),
             },
-            Err(message) if message.starts_with("restricted:") => {
+            Err(crate::handlers::ingest::IngestError::Rejected(message))
+                if message.starts_with("restricted:") =>
+            {
                 crate::handlers::ingest::reject_with_transport("http", "auth");
                 let response = api_error(StatusCode::FORBIDDEN, &message);
                 SubmitOutcome::Err {
@@ -996,7 +998,15 @@ async fn submit_event_authed(
                     response,
                 }
             }
-            Err(message) if message.starts_with("error:") => {
+            Err(crate::handlers::ingest::IngestError::AuthFailed(message)) => {
+                crate::handlers::ingest::reject_with_transport("http", "auth");
+                let response = api_error(StatusCode::FORBIDDEN, &message);
+                SubmitOutcome::Err {
+                    status: response.0,
+                    response,
+                }
+            }
+            Err(crate::handlers::ingest::IngestError::Internal(message)) => {
                 crate::handlers::ingest::reject_with_transport("http", "error");
                 let response = internal_error(&message);
                 SubmitOutcome::Err {
@@ -1004,7 +1014,7 @@ async fn submit_event_authed(
                     response,
                 }
             }
-            Err(message) => {
+            Err(crate::handlers::ingest::IngestError::Rejected(message)) => {
                 crate::handlers::ingest::reject_with_transport("http", "invalid");
                 SubmitOutcome::Rejected {
                     kind: kind_u32,
