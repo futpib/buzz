@@ -5,6 +5,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import '../../shared/mentions/agent_identity_provider.dart';
 import '../../shared/mentions/mention_tags.dart';
+import '../../shared/relay/nostr_models.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/buzz_loading_indicator.dart';
@@ -942,7 +943,7 @@ class _MessageTile extends ConsumerWidget {
   void _navigateToHit(BuildContext context, SearchHit hit, Channel? channel) {
     if (channel == null) return;
 
-    if (hit.kind == 45001) {
+    if (hit.kind == EventKind.forumPost) {
       Navigator.of(context).push(
         MaterialPageRoute<void>(
           builder: (_) => ForumThreadPage(
@@ -954,13 +955,46 @@ class _MessageTile extends ConsumerWidget {
           ),
         ),
       );
-    } else {
-      Navigator.of(context).push(
-        MaterialPageRoute<void>(
-          builder: (_) => ChannelDetailPage(channel: channel),
-        ),
-      );
+      return;
     }
+
+    if (hit.kind == EventKind.forumComment) {
+      final thread = threadReferenceFromTags(hit.tags);
+      final postId = thread.rootId ?? thread.parentId;
+      if (postId != null) {
+        Navigator.of(context).push(
+          MaterialPageRoute<void>(
+            builder: (_) => ForumThreadPage(
+              channelId: channel.id,
+              postEventId: postId,
+              currentPubkey: currentPubkey,
+              isMember: channel.isMember,
+              isArchived: channel.isArchived,
+            ),
+          ),
+        );
+        return;
+      }
+    }
+
+    final thread = threadReferenceFromTags(hit.tags);
+    final directParentId = isBroadcastReplyTags(hit.tags)
+        ? null
+        : thread.parentId;
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => ChannelDetailPage(
+          channel: channel,
+          initialMessageId: hit.eventId,
+          // A reply opens in its direct parent's thread. A top-level or
+          // broadcast message is itself the head users would open by tapping
+          // the same row in the channel timeline.
+          initialThreadRootId: directParentId ?? hit.eventId,
+          initialThreadRouteBehavior:
+              InitialThreadRouteBehavior.replaceCurrentRoute,
+        ),
+      ),
+    );
   }
 }
 

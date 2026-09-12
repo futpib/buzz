@@ -1,8 +1,10 @@
 import 'package:buzz/features/channels/channel.dart';
+import 'package:buzz/features/channels/channel_detail_page.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/features/channels/message_content.dart';
 import 'package:buzz/features/channels/small_avatar.dart';
+import 'package:buzz/features/forum/forum_thread_page.dart';
 import 'package:buzz/features/profile/profile_provider.dart';
 import 'package:buzz/shared/profile/user_cache_provider.dart';
 import 'package:buzz/shared/profile/user_profile.dart';
@@ -932,6 +934,161 @@ void main() {
     expect(find.byIcon(LucideIcons.bot), findsOneWidget);
   });
 
+  testWidgets('opens a message search hit in its direct-parent thread', (
+    tester,
+  ) async {
+    _ignoreUnsupportedListTileAssertion();
+    final navigatorObserver = _TrackingNavigatorObserver();
+    final channel = Channel(
+      id: 'channel-1',
+      name: 'general',
+      channelType: 'stream',
+      visibility: 'open',
+      description: '',
+      createdBy: 'test',
+      createdAt: DateTime(2025),
+      memberCount: 2,
+      isMember: true,
+    );
+    final state = SearchState(
+      query: 'needle',
+      messageResults: [
+        SearchHit(
+          eventId: 'matching-reply',
+          content: 'The matching reply',
+          kind: 9,
+          pubkey: 'alice',
+          channelId: channel.id,
+          channelName: channel.name,
+          createdAt: 1,
+          score: 1,
+          tags: const [
+            ['h', 'channel-1'],
+            ['e', 'outer-root', '', 'root'],
+            ['e', 'direct-parent', '', 'reply'],
+          ],
+        ),
+      ],
+    );
+
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        navigatorObservers: [navigatorObserver],
+        overrides: [
+          searchProvider.overrideWith(() => _FakeSearchNotifier(state)),
+          recentSearchesProvider.overrideWith(
+            () => _FakeRecentSearchesNotifier(const []),
+          ),
+          profileProvider.overrideWith(() => _FakeProfileNotifier()),
+          channelsProvider.overrideWith(() => _FakeChannelsNotifier([channel])),
+          userCacheProvider.overrideWith(
+            () => _FakeUserCacheNotifier(
+              const UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            ),
+          ),
+        ],
+        child: const SearchPage(),
+      ),
+    );
+    await tester.pumpAndSettle();
+    navigatorObserver.pushedRoutes.clear();
+
+    final row = find.byKey(const ValueKey('search-message-row-matching-reply'));
+    await tester.tap(row);
+
+    expect(navigatorObserver.pushedRoutes, hasLength(1));
+    final route = navigatorObserver.pushedRoutes.single;
+    expect(route, isA<MaterialPageRoute<void>>());
+    final page = (route as MaterialPageRoute<void>).builder(
+      tester.element(row),
+    );
+    expect(page, isA<ChannelDetailPage>());
+    final channelPage = page as ChannelDetailPage;
+    expect(channelPage.channel.id, channel.id);
+    expect(channelPage.initialMessageId, 'matching-reply');
+    expect(channelPage.initialThreadRootId, 'direct-parent');
+    expect(
+      channelPage.initialThreadRouteBehavior,
+      InitialThreadRouteBehavior.replaceCurrentRoute,
+    );
+  });
+
+  testWidgets('opens a forum comment search hit in its post thread', (
+    tester,
+  ) async {
+    _ignoreUnsupportedListTileAssertion();
+    final navigatorObserver = _TrackingNavigatorObserver();
+    final channel = Channel(
+      id: 'forum-1',
+      name: 'announcements',
+      channelType: 'forum',
+      visibility: 'open',
+      description: '',
+      createdBy: 'test',
+      createdAt: DateTime(2025),
+      memberCount: 2,
+      isMember: true,
+    );
+    final state = SearchState(
+      query: 'answer',
+      messageResults: [
+        SearchHit(
+          eventId: 'matching-comment',
+          content: 'The matching answer',
+          kind: 45003,
+          pubkey: 'alice',
+          channelId: channel.id,
+          channelName: channel.name,
+          createdAt: 1,
+          score: 1,
+          tags: const [
+            ['h', 'forum-1'],
+            ['e', 'forum-post', '', 'root'],
+            ['e', 'parent-comment', '', 'reply'],
+          ],
+        ),
+      ],
+    );
+
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        navigatorObservers: [navigatorObserver],
+        overrides: [
+          searchProvider.overrideWith(() => _FakeSearchNotifier(state)),
+          recentSearchesProvider.overrideWith(
+            () => _FakeRecentSearchesNotifier(const []),
+          ),
+          profileProvider.overrideWith(() => _FakeProfileNotifier()),
+          channelsProvider.overrideWith(() => _FakeChannelsNotifier([channel])),
+          userCacheProvider.overrideWith(
+            () => _FakeUserCacheNotifier(
+              const UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            ),
+          ),
+        ],
+        child: const SearchPage(),
+      ),
+    );
+    await tester.pumpAndSettle();
+    navigatorObserver.pushedRoutes.clear();
+
+    final row = find.byKey(
+      const ValueKey('search-message-row-matching-comment'),
+    );
+    await tester.tap(row);
+
+    expect(navigatorObserver.pushedRoutes, hasLength(1));
+    final route = navigatorObserver.pushedRoutes.single;
+    expect(route, isA<MaterialPageRoute<void>>());
+    final page = (route as MaterialPageRoute<void>).builder(
+      tester.element(row),
+    );
+    expect(page, isA<ForumThreadPage>());
+    final forumPage = page as ForumThreadPage;
+    expect(forumPage.channelId, channel.id);
+    expect(forumPage.postEventId, 'forum-post');
+  });
+
   testWidgets('does not label an unjoined channel as having zero members', (
     tester,
   ) async {
@@ -1036,4 +1193,29 @@ class _FakeUserCacheNotifier extends UserCacheNotifier {
 
   @override
   Map<String, UserProfile> build() => {profile.pubkey: profile};
+}
+
+class _TrackingNavigatorObserver extends NavigatorObserver {
+  final pushedRoutes = <Route<dynamic>>[];
+
+  @override
+  void didPush(Route<dynamic> route, Route<dynamic>? previousRoute) {
+    pushedRoutes.add(route);
+    super.didPush(route, previousRoute);
+  }
+}
+
+void _ignoreUnsupportedListTileAssertion() {
+  final originalFlutterErrorHandler = FlutterError.onError;
+  FlutterError.onError = (details) {
+    // Flutter 3.44 added this debug assertion; the repository-pinned SDK does
+    // not emit it. Keep unexpected framework failures visible.
+    if (details.exceptionAsString().contains(
+      'ListTile background color or ink splashes may be invisible',
+    )) {
+      return;
+    }
+    originalFlutterErrorHandler?.call(details);
+  };
+  addTearDown(() => FlutterError.onError = originalFlutterErrorHandler);
 }

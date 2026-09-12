@@ -2,6 +2,32 @@ import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 
+/// Extract thread parent and root IDs from NIP-10 `e` tags.
+///
+/// Tags with marker `reply` identify the direct parent. Tags with marker
+/// `root` identify the outermost thread root. Unmarked event tags are not
+/// treated as replies.
+({String? parentId, String? rootId}) threadReferenceFromTags(
+  List<List<String>> tags,
+) {
+  List<String>? rootTag;
+  List<String>? replyTag;
+  for (final tag in tags) {
+    if (tag.length < 4 || tag[0] != 'e') continue;
+    if (tag[3] == 'root') rootTag = tag;
+    if (tag[3] == 'reply') replyTag = tag;
+  }
+
+  if (replyTag == null) return (parentId: null, rootId: null);
+  final parentId = replyTag[1];
+  return (parentId: parentId, rootId: rootTag?[1] ?? parentId);
+}
+
+/// Whether tags mark a reply as a channel-level broadcast.
+bool isBroadcastReplyTags(List<List<String>> tags) => tags.any(
+  (tag) => tag.length >= 2 && tag[0] == 'broadcast' && tag[1] == '1',
+);
+
 /// Nostr event kind constants.
 ///
 /// Keep in sync with `desktop/src/shared/constants/kinds.ts`.
@@ -162,30 +188,8 @@ class NostrEvent {
   /// - Tags with marker `"reply"` identify the direct parent.
   /// - Tags with marker `"root"` identify the thread root.
   /// - If no markers are present, falls back to null (top-level message).
-  ({String? parentId, String? rootId}) get threadReference {
-    final eTags = [
-      for (final tag in tags)
-        if (tag.length >= 2 && tag[0] == 'e') tag,
-    ];
-
-    if (eTags.isEmpty) return (parentId: null, rootId: null);
-
-    // Find tagged root and reply markers (desktop convention).
-    List<String>? rootTag;
-    List<String>? replyTag;
-    for (final tag in eTags) {
-      if (tag.length >= 4) {
-        if (tag[3] == 'root') rootTag = tag;
-        if (tag[3] == 'reply') replyTag = tag;
-      }
-    }
-
-    if (replyTag == null) return (parentId: null, rootId: null);
-
-    final parentId = replyTag[1];
-    final rootId = rootTag?[1] ?? parentId;
-    return (parentId: parentId, rootId: rootId);
-  }
+  ({String? parentId, String? rootId}) get threadReference =>
+      threadReferenceFromTags(tags);
 
   /// The parent event ID from the `e` tag.
   String? get parentEventId => threadReference.parentId;
