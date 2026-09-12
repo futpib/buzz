@@ -138,6 +138,11 @@ _UnreadChannelState _computeUnreadChannelState({
     if (channelReadAt != null && latestObserved <= channelReadAt) continue;
 
     final observedEvents = observedEventsByChannel[channel.id];
+    if ((observedEvents == null || observedEvents.isEmpty) &&
+        channel.cachedUnreadCount > 0) {
+      ids.add(channel.id);
+      continue;
+    }
     int? readAtForObservedEvent(ObservedUnreadEvent event) =>
         observedUnreadEventReadAt(
           event,

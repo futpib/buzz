@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
+import '../../shared/client_state/client_state_projection.dart';
 import '../../shared/relay/relay.dart';
 import '../channels/channel.dart';
 import '../channels/channel_management_provider.dart';
@@ -89,12 +90,126 @@ class ActivityNotifier extends AsyncNotifier<HomeFeedResponse> {
       _clearLiveSubscriptions();
     });
 
-    final response = await _fetch();
+    final authoritativeRefresh = sessionState.status == SessionStatus.connected
+        ? _captureAuthoritativeRefresh()
+        : null;
+    final projected = await _readProjectedActivity();
+    if (projected != null && !projected.isEmpty) {
+      if (authoritativeRefresh != null) {
+        unawaited(
+          _refreshAfterProjectedActivity(authoritativeRefresh, generation),
+        );
+      }
+      return projected;
+    }
+
+    final response = authoritativeRefresh == null
+        ? await _fetch()
+        : await _unwrapAuthoritativeRefresh(authoritativeRefresh);
     if (sessionState.status == SessionStatus.connected &&
         generation == _subscriptionGeneration) {
       unawaited(_subscribeLive(generation));
     }
     return response;
+  }
+
+  Future<HomeFeedResponse?> _readProjectedActivity() async {
+    final rows = await ClientStateProjection.instance.activity();
+    if (rows == null) return null;
+    final channelsById = {
+      for (final channel
+          in ref.read(channelsProvider).asData?.value ?? const <Channel>[])
+        channel.id: channel.name,
+    };
+    final items = <FeedItem>[];
+    for (final row in rows) {
+      final message = row['message'];
+      final category = row['category'];
+      if (message is! Map || category is! String) continue;
+      final value = Map<String, dynamic>.from(message);
+      final channelId = value['channel_id'] as String?;
+      items.add(
+        FeedItem(
+          id: value['event_id'] as String,
+          kind: value['kind'] as int,
+          pubkey: value['pubkey'] as String,
+          content: value['content'] as String? ?? '',
+          createdAt: value['created_at'] as int,
+          channelId: channelId,
+          channelName: channelId == null ? '' : channelsById[channelId] ?? '',
+          tags: (value['tags'] as List<dynamic>? ?? const [])
+              .map(
+                (tag) => (tag as List<dynamic>)
+                    .map((item) => item as String)
+                    .toList(),
+              )
+              .toList(),
+          category: category,
+        ),
+      );
+    }
+    return HomeFeedResponse(
+      mentions: [
+        for (final item in items)
+          if (item.category == 'mention') item,
+      ],
+      needsAction: [
+        for (final item in items)
+          if (item.category == 'needs_action') item,
+      ],
+      activity: [
+        for (final item in items)
+          if (item.category == 'activity') item,
+      ],
+      agentActivity: [
+        for (final item in items)
+          if (item.category == 'agent_activity') item,
+      ],
+    );
+  }
+
+  Future<({HomeFeedResponse? response, Object? error, StackTrace? stackTrace})>
+  _captureAuthoritativeRefresh() async {
+    try {
+      return (response: await _fetch(), error: null, stackTrace: null);
+    } catch (error, stackTrace) {
+      return (response: null, error: error, stackTrace: stackTrace);
+    }
+  }
+
+  Future<HomeFeedResponse> _unwrapAuthoritativeRefresh(
+    Future<
+      ({HomeFeedResponse? response, Object? error, StackTrace? stackTrace})
+    >
+    refresh,
+  ) async {
+    final outcome = await refresh;
+    if (outcome.error case final error?) {
+      Error.throwWithStackTrace(error, outcome.stackTrace!);
+    }
+    return outcome.response!;
+  }
+
+  Future<void> _refreshAfterProjectedActivity(
+    Future<
+      ({HomeFeedResponse? response, Object? error, StackTrace? stackTrace})
+    >
+    refresh,
+    int generation,
+  ) async {
+    try {
+      final response = await _unwrapAuthoritativeRefresh(refresh);
+      if (generation != _subscriptionGeneration) return;
+      state = AsyncData(response);
+      unawaited(_subscribeLive(generation));
+    } catch (error, stackTrace) {
+      if (generation == _subscriptionGeneration) {
+        debugPrint(
+          '[ActivityNotifier] background refresh after local projection failed: '
+          '$error\n$stackTrace',
+        );
+      }
+    }
   }
 
   Future<void> _subscribeLive(int generation) async {

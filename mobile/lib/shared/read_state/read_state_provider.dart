@@ -4,6 +4,7 @@ import 'package:flutter/widgets.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../relay/relay.dart';
+import '../client_state/client_state_projection.dart';
 import '../theme/theme_provider.dart';
 import '../community/community_provider.dart';
 import 'read_state_manager.dart';
@@ -212,7 +213,7 @@ class ReadStateNotifier extends Notifier<ReadStateState> {
     required bool isReady,
     int? previousVersion,
   }) {
-    return ReadStateState(
+    final next = ReadStateState(
       isReady: isReady,
       pubkey: manager.pubkey,
       contexts: manager.effectiveContexts,
@@ -221,6 +222,8 @@ class ReadStateNotifier extends Notifier<ReadStateState> {
         Map<String, String>.from(_forcedUnreadContexts),
       ),
     );
+    unawaited(ClientStateProjection.instance.applyReadMarkers(next.contexts));
+    return next;
   }
 }
 

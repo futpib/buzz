@@ -81,6 +81,8 @@ async fn projects_the_android_hot_path_and_persists_it() {
         vec![tag(&["h", channel_id]), tag(&["e", &root_id])],
         203,
     );
+    let reply_id = reply.id.to_hex();
+    let edit_id = edit.id.to_hex();
 
     let state = ClientState::open(&path, scope(&viewer))
         .await
@@ -101,9 +103,33 @@ async fn projects_the_android_hot_path_and_persists_it() {
     assert_eq!(stats.duplicates, 0);
     assert_eq!(stats.revision, 1);
 
+    let channel_event_ids = state
+        .channel_events(channel_id, 50)
+        .await
+        .expect("query raw channel events")
+        .into_iter()
+        .map(|event| event.id.to_hex())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(channel_event_ids.len(), 6);
+    let thread_event_ids = state
+        .thread_events(&root_id, 50)
+        .await
+        .expect("query raw thread events")
+        .into_iter()
+        .map(|event| event.id.to_hex())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        thread_event_ids,
+        [root_id.clone(), reply_id, reaction_id.clone(), edit_id]
+            .into_iter()
+            .collect()
+    );
+
     let channels = state.channels(true).await.expect("query channels");
     assert_eq!(channels.len(), 1);
     assert_eq!(channels[0].name, "Fast lane");
+    assert_eq!(channels[0].created_by, relay.public_key().to_hex());
+    assert_eq!(channels[0].created_at, 100);
     assert_eq!(channels[0].member_count, 2);
     assert!(channels[0].is_member);
     assert_eq!(channels[0].unread_count, 2);

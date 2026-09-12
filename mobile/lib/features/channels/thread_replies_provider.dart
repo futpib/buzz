@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
+import '../../shared/client_state/client_state_projection.dart';
 import '../../shared/relay/relay.dart';
 import 'channel_event_order.dart';
 import 'pending_local_messages_provider.dart';
@@ -29,6 +30,13 @@ class _ThreadCursor {
 
   const _ThreadCursor({required this.createdAt, required this.eventId});
 }
+
+/// Disposable local snapshot used while the authoritative relay query is in
+/// flight. It includes edits, reactions, and deletions as well as replies.
+final projectedThreadEventsProvider = FutureProvider.autoDispose
+    .family<List<NostrEvent>?, ThreadRepliesArgs>(
+      (ref, args) => ClientStateProjection.instance.threadEvents(args.rootId),
+    );
 
 final threadRepliesProvider = FutureProvider.autoDispose
     .family<List<NostrEvent>, ThreadRepliesArgs>((ref, args) async {

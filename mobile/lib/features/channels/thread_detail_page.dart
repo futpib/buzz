@@ -119,6 +119,9 @@ class ThreadDetailPage extends HookConsumerWidget {
     );
     final relayReplyState = ref.watch(threadRepliesProvider(repliesArgs));
     final repliesState = ref.watch(threadRepliesWithLocalProvider(repliesArgs));
+    final projectedThreadState = ref.watch(
+      projectedThreadEventsProvider(repliesArgs),
+    );
     final relayRepliesAvailable = relayReplyState.value != null;
     // The thread query is one-shot and asks only for content kinds, so a
     // reaction, edit, or deletion that lands while the thread is open never
@@ -128,12 +131,28 @@ class ThreadDetailPage extends HookConsumerWidget {
     final liveChannelEvents =
         ref.watch(channelMessagesProvider(channelId)).value ??
         const <NostrEvent>[];
-    final replyMessages = repliesState.whenData((events) {
-      return formatTimeline(
-        mergeThreadEvents(events, liveChannelEvents),
-        currentPubkey: currentPubkey,
-      );
-    });
+    final projectedThreadEvents = projectedThreadState.value;
+    final projectedReplyEvents = relayRepliesAvailable
+        ? repliesState.value
+        : (repliesState.value != null || projectedThreadEvents != null)
+        ? mergeThreadEvents(
+            repliesState.value ?? const <NostrEvent>[],
+            projectedThreadEvents ?? const <NostrEvent>[],
+          )
+        : (liveChannelEvents.isNotEmpty ? liveChannelEvents : null);
+    final replyMessages = projectedReplyEvents == null
+        ? repliesState.whenData(
+            (events) => formatTimeline(
+              mergeThreadEvents(events, liveChannelEvents),
+              currentPubkey: currentPubkey,
+            ),
+          )
+        : AsyncData(
+            formatTimeline(
+              mergeThreadEvents(projectedReplyEvents, liveChannelEvents),
+              currentPubkey: currentPubkey,
+            ),
+          );
 
     final fetchedReplies = replyMessages.value;
     final hasFetchedReplies = fetchedReplies != null;

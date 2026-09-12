@@ -26,6 +26,7 @@ class Channel {
   final bool isMember;
   final int? ttlSeconds;
   final DateTime? ttlDeadline;
+  final int cachedUnreadCount;
 
   const Channel({
     required this.id,
@@ -45,6 +46,7 @@ class Channel {
     this.isMember = false,
     this.ttlSeconds,
     this.ttlDeadline,
+    this.cachedUnreadCount = 0,
   });
 
   factory Channel.fromJson(Map<String, dynamic> json) => Channel(
@@ -74,6 +76,7 @@ class Channel {
     ttlDeadline: json['ttl_deadline'] != null
         ? DateTime.parse(json['ttl_deadline'] as String)
         : null,
+    cachedUnreadCount: json['unread_count'] as int? ?? 0,
   );
 
   bool get isEphemeral => ttlSeconds != null || ttlDeadline != null;
@@ -139,6 +142,7 @@ class Channel {
     isMember: isMember,
     ttlSeconds: details.ttlSeconds,
     ttlDeadline: details.ttlDeadline,
+    cachedUnreadCount: cachedUnreadCount,
   );
 
   Channel copyWith({
@@ -148,6 +152,7 @@ class Channel {
     Object? archivedAt = _sentinel,
     int? memberCount,
     bool? isMember,
+    int? cachedUnreadCount,
   }) => Channel(
     id: id,
     name: name ?? this.name,
@@ -170,6 +175,7 @@ class Channel {
     isMember: isMember ?? this.isMember,
     ttlSeconds: ttlSeconds,
     ttlDeadline: ttlDeadline,
+    cachedUnreadCount: cachedUnreadCount ?? this.cachedUnreadCount,
   );
 }
 

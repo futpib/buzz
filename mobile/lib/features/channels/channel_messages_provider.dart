@@ -1,7 +1,10 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/relay/relay.dart';
+import '../../shared/client_state/client_state_projection.dart';
 import 'channel_event_order.dart';
 import 'pending_local_messages_provider.dart';
 import 'channel_window.dart';
@@ -24,6 +27,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
   bool _usingChannelWindow = false;
   bool _initialWindowQueryInFlight = false;
   int _initVersion = 0;
+  int _authoritativeVersion = 0;
   ChannelWindowStore _windowStore = const ChannelWindowStore.empty();
   final Set<String> _liveSummaryRootsDuringInitialWindowQuery = {};
   final Map<String, NostrEvent> _deepLinkEvents = {};
@@ -53,10 +57,11 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     });
 
     if (sessionState.status != SessionStatus.connected) {
-      _initVersion++;
+      final initVersion = ++_initVersion;
       _initInFlight = false;
       _initialWindowQueryInFlight = false;
       _liveSummaryRootsDuringInitialWindowQuery.clear();
+      unawaited(_loadProjectedMessages(initVersion));
       return AsyncData(_lastKnownMessages ?? const []);
     }
 
@@ -77,6 +82,8 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     _initInFlight = true;
     _clearSubscription();
     try {
+      unawaited(_loadProjectedMessages(initVersion));
+
       final session = ref.read(relaySessionProvider.notifier);
 
       try {
@@ -113,6 +120,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
         ...existing,
         ...history.where((event) => existingIds.add(event.id)),
       ]);
+      _authoritativeVersion = initVersion;
       _lastKnownMessages = merged;
       state = AsyncData(merged);
     } catch (e, st) {
@@ -131,6 +139,20 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
         _initInFlight = false;
       }
     }
+  }
+
+  Future<void> _loadProjectedMessages(int initVersion) async {
+    final projected = await ClientStateProjection.instance.channelEvents(
+      channelId,
+    );
+    if (!_isCurrentInit(initVersion) ||
+        _authoritativeVersion == initVersion ||
+        projected == null ||
+        projected.isEmpty) {
+      return;
+    }
+    _lastKnownMessages = projected;
+    state = AsyncData(projected);
   }
 
   Future<List<NostrEvent>> _fetchNewestHistory(

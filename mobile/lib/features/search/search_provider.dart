@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
+import '../../shared/client_state/client_state_projection.dart';
 import '../../shared/relay/relay.dart';
 import '../channels/channel.dart';
 import '../channels/channel_management_provider.dart';
@@ -115,10 +116,49 @@ class SearchNotifier extends Notifier<SearchState> {
     }
 
     state = SearchState(query: trimmed, isLoading: true);
+    unawaited(_searchProjectedMessages(trimmed));
 
     _debounce = Timer(const Duration(milliseconds: 300), () {
       _executeSearch(trimmed);
     });
+  }
+
+  Future<void> _searchProjectedMessages(String query) async {
+    final rows = await ClientStateProjection.instance.search(query);
+    if (rows == null || state.query != query) return;
+    final channelsById = {
+      for (final channel
+          in ref.read(channelsProvider).value ?? const <Channel>[])
+        channel.id: channel.name,
+    };
+    final hits = <SearchHit>[];
+    for (final row in rows) {
+      final message = row['message'];
+      if (message is! Map) continue;
+      final value = Map<String, dynamic>.from(message);
+      final channelId = value['channel_id'] as String?;
+      hits.add(
+        SearchHit(
+          eventId: value['event_id'] as String,
+          content: value['content'] as String? ?? '',
+          kind: value['kind'] as int,
+          pubkey: value['pubkey'] as String,
+          channelId: channelId,
+          channelName: channelId == null ? null : channelsById[channelId],
+          createdAt: value['created_at'] as int,
+          score: (row['score'] as num?)?.toDouble() ?? 0,
+          tags: (value['tags'] as List<dynamic>? ?? const [])
+              .map(
+                (tag) => (tag as List<dynamic>)
+                    .map((item) => item as String)
+                    .toList(),
+              )
+              .toList(),
+        ),
+      );
+    }
+    if (state.query != query) return;
+    state = state.copyWith(messageResults: hits, isLoading: true);
   }
 
   Future<void> _executeSearch(String query) async {

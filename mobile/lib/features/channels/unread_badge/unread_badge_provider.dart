@@ -40,6 +40,17 @@ final unreadBadgeProvider = Provider<UnreadBadgeState>((ref) {
 
         final observedEvents = observedEventsByChannel[channel.id];
         final channelReadAt = readState.effectiveTimestamp(channel.id);
+        if ((observedEvents == null || observedEvents.isEmpty) &&
+            channel.cachedUnreadCount > 0 &&
+            (channel.lastMessageAt?.millisecondsSinceEpoch ?? 0) ~/ 1000 >
+                (channelReadAt ?? 0)) {
+          if (channel.isDm) {
+            highPriority += channel.cachedUnreadCount;
+          } else {
+            general += channel.cachedUnreadCount;
+          }
+          continue;
+        }
         int? readAtForObservedEvent(ObservedUnreadEvent event) =>
             observedUnreadEventReadAt(
               event,

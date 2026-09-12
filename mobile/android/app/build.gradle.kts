@@ -1,4 +1,5 @@
 import java.util.Properties
+import org.gradle.api.tasks.Exec
 
 plugins {
     id("com.android.application")
@@ -154,7 +155,49 @@ android {
             }
         }
     }
+
+    sourceSets.getByName("main").jniLibs.srcDir(
+        layout.buildDirectory.dir("generated/clientStateJniLibs"),
+    )
 }
+
+val repositoryRoot = rootProject.projectDir.parentFile.parentFile.canonicalFile
+val clientStateJniDirectory = layout.buildDirectory.dir("generated/clientStateJniLibs")
+
+val buildClientStateRust =
+    tasks.register<Exec>("buildClientStateRust") {
+        val buildScript = repositoryRoot.resolve("scripts/build-mobile-client-state.sh")
+        inputs.property("profile", "release")
+        inputs.files(
+            repositoryRoot.resolve("Cargo.toml"),
+            fileTree(repositoryRoot.resolve("crates/buzz-core")) {
+                include("Cargo.toml", "src/**")
+            },
+            fileTree(repositoryRoot.resolve("crates/buzz-client-state")) {
+                include("Cargo.toml", "src/**")
+            },
+            fileTree(repositoryRoot.resolve("crates/buzz-client-state-android")) {
+                include("Cargo.toml", "src/**")
+            },
+            repositoryRoot.resolve("Cargo.lock"),
+            buildScript,
+        )
+        outputs.dir(clientStateJniDirectory)
+        commandLine(
+            buildScript.absolutePath,
+            "release",
+            clientStateJniDirectory.get().asFile.absolutePath,
+        )
+    }
+
+tasks.matching {
+    it.name.matches(
+        Regex("merge(Debug|Profile|Release)(JniLibFolders|NativeLibs)"),
+    )
+}
+    .configureEach {
+        dependsOn(buildClientStateRust)
+    }
 
 dependencies {
     implementation("androidx.appcompat:appcompat:1.6.1")

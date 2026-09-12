@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use buzz_core::Event;
 use rusqlite::{params, params_from_iter, Connection};
 
 use crate::{
@@ -21,13 +22,15 @@ pub(crate) fn channels(
     members_only: bool,
 ) -> Result<Vec<ChannelListItem>, ClientStateError> {
     let mut statement = conn.prepare(
-        "SELECT channel_id, name, channel_type, visibility, description, topic,
-                archived, is_member, member_count, last_event_id, last_event_at, unread_count
-         FROM channels
-         WHERE scope=?1 AND (?2=0 OR is_member=1)
-         ORDER BY archived ASC,
-                  COALESCE(last_event_at, metadata_created_at) DESC,
-                  name COLLATE NOCASE ASC, channel_id ASC",
+        "SELECT c.channel_id, c.name, c.channel_type, c.visibility, c.description, c.topic,
+                c.archived, c.is_member, c.member_count, c.last_event_id, c.last_event_at,
+                c.unread_count, e.pubkey, c.metadata_created_at
+         FROM channels c
+         JOIN events e ON e.scope=c.scope AND e.event_id=c.metadata_event_id
+         WHERE c.scope=?1 AND (?2=0 OR c.is_member=1)
+         ORDER BY c.archived ASC,
+                  COALESCE(c.last_event_at, c.metadata_created_at) DESC,
+                  c.name COLLATE NOCASE ASC, c.channel_id ASC",
     )?;
     let mut rows = statement.query(params![scope.key(), members_only])?;
     let mut result = Vec::new();
@@ -45,7 +48,82 @@ pub(crate) fn channels(
             last_event_id: row.get(9)?,
             last_event_at: row.get(10)?,
             unread_count: row.get(11)?,
+            created_by: row.get(12)?,
+            created_at: row.get(13)?,
         });
+    }
+    Ok(result)
+}
+
+pub(crate) fn channel_events(
+    conn: &Connection,
+    scope: &ProjectionScope,
+    channel_id: &str,
+    limit: u32,
+) -> Result<Vec<Event>, ClientStateError> {
+    related_events(conn, scope, "e.channel_id=?2", channel_id, limit)
+}
+
+pub(crate) fn thread_events(
+    conn: &Connection,
+    scope: &ProjectionScope,
+    root_id: &str,
+    limit: u32,
+) -> Result<Vec<Event>, ClientStateError> {
+    related_events(conn, scope, "e.event_id=?2 OR e.root_id=?2", root_id, limit)
+}
+
+fn related_events(
+    conn: &Connection,
+    scope: &ProjectionScope,
+    seed_predicate: &str,
+    seed: &str,
+    limit: u32,
+) -> Result<Vec<Event>, ClientStateError> {
+    let sql = format!(
+        "WITH RECURSIVE related(event_id) AS (
+           SELECT e.event_id FROM events e
+           WHERE e.scope=?1 AND ({seed_predicate})
+           UNION
+           SELECT e.event_id FROM events e
+           JOIN related r ON e.target_id=r.event_id
+           WHERE e.scope=?1
+         ), latest AS (
+           SELECT e.event_id, e.pubkey, e.created_at, e.kind, e.tags_json,
+                  e.content, e.sig
+           FROM events e
+           JOIN related r ON r.event_id=e.event_id
+           WHERE e.scope=?1
+           ORDER BY e.created_at DESC, e.event_id ASC
+           LIMIT ?3
+         )
+         SELECT event_id, pubkey, created_at, kind, tags_json, content, sig
+         FROM latest ORDER BY created_at ASC, event_id ASC"
+    );
+    let mut statement = conn.prepare(&sql)?;
+    let rows = statement.query_map(params![scope.key(), seed, i64::from(limit)], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, i64>(2)?,
+            row.get::<_, u32>(3)?,
+            row.get::<_, String>(4)?,
+            row.get::<_, String>(5)?,
+            row.get::<_, String>(6)?,
+        ))
+    })?;
+    let mut result = Vec::new();
+    for row in rows {
+        let (id, pubkey, created_at, kind, tags_json, content, sig) = row?;
+        result.push(serde_json::from_value(serde_json::json!({
+            "id": id,
+            "pubkey": pubkey,
+            "created_at": created_at,
+            "kind": kind,
+            "tags": serde_json::from_str::<serde_json::Value>(&tags_json)?,
+            "content": content,
+            "sig": sig,
+        }))?);
     }
     Ok(result)
 }

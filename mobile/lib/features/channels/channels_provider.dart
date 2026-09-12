@@ -6,6 +6,7 @@ import 'package:flutter/widgets.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/community/community_provider.dart';
+import '../../shared/client_state/client_state_projection.dart';
 import '../../shared/push/push_presentation_cache.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme_provider.dart';
@@ -23,6 +24,7 @@ import 'unread_badge/should_notify_for_event.dart';
 
 part 'channel_directory.dart';
 part 'channel_member_snapshots.dart';
+part 'client_state_channels.dart';
 part 'channels_provider_lifecycle.dart';
 
 const _channelTypeOrder = {'stream': 0, 'forum': 1, 'dm': 2};
@@ -86,6 +88,10 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
 
   bool get hasLoaded => _hasLoaded;
 
+  void _installProjectedRefresh(List<Channel> channels) {
+    state = AsyncData(channels);
+  }
+
   Map<String, Map<String, ObservedUnreadEvent>>
   get observedUnreadEventsByChannel =>
       Map<String, Map<String, ObservedUnreadEvent>>.unmodifiable({
@@ -141,6 +147,28 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       _backstopTimer?.cancel();
       _backstopTimer = null;
     });
+
+    final authoritativeRefresh = sessionState.status == SessionStatus.connected
+        ? _captureAuthoritativeRefresh()
+        : null;
+    final projectedChannels = await _readProjectedChannels();
+    if (projectedChannels != null && projectedChannels.isNotEmpty) {
+      _hasLoaded = true;
+      if (authoritativeRefresh != null) {
+        unawaited(
+          _refreshAfterProjectedChannels(
+            authoritativeRefresh,
+            relayBaseUrl,
+            pubkey,
+          ),
+        );
+      }
+      return projectedChannels;
+    }
+
+    if (authoritativeRefresh != null) {
+      return _unwrapAuthoritativeRefresh(authoritativeRefresh);
+    }
 
     if (sessionState.status != SessionStatus.connected) {
       // Keep the prior community's cache visible until the new relay connects.

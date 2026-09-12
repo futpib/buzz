@@ -11,6 +11,7 @@ import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../auth/auth.dart';
+import '../client_state/client_state_projection.dart';
 import 'nostr_models.dart';
 import 'relay_client.dart';
 import 'relay_closed_policy.dart';
@@ -132,6 +133,11 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   SessionState build() {
     final config = ref.watch(relayConfigProvider);
     final authState = ref.watch(authProvider);
+    final viewerPubkey = ref.watch(myPubkeyProvider);
+
+    unawaited(
+      ClientStateProjection.instance.configure(config.baseUrl, viewerPubkey),
+    );
 
     // Reset disposed flag — build() may re-run on the same Notifier instance
     // after a provider dependency changes (e.g. auth completing).
@@ -184,13 +190,15 @@ class RelaySessionNotifier extends Notifier<SessionState> {
       throw const FormatException('relay returned malformed query response');
     }
     try {
-      return [
+      final events = [
         for (final eventJson in decoded)
           if (eventJson is Map<String, dynamic>)
             NostrEvent.fromJson(eventJson)
           else
             throw const FormatException('relay returned malformed query event'),
       ];
+      unawaited(ClientStateProjection.instance.applyEvents(events));
+      return events;
     } catch (error) {
       if (error is FormatException) rethrow;
       throw FormatException('relay returned malformed query event: $error');
@@ -672,6 +680,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     final historySub = _historySubscriptions.remove(subId);
     if (historySub != null) {
       historySub.timeout.cancel();
+      unawaited(ClientStateProjection.instance.applyEvents(historySub.events));
       if (!historySub.completer.isCompleted) {
         historySub.completer.complete(historySub.events);
       }
@@ -864,6 +873,13 @@ class RelaySessionNotifier extends Notifier<SessionState> {
 
     final batch = List<_BufferedEvent>.from(_eventBuffer);
     _eventBuffer.clear();
+    unawaited(
+      ClientStateProjection.instance.applyEvents(
+        {
+          for (final buffered in batch) buffered.event.id: buffered.event,
+        }.values,
+      ),
+    );
 
     for (final buffered in batch) {
       final sub = _liveSubscriptions[buffered.subId];

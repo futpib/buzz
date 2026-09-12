@@ -67,6 +67,10 @@ pub struct ChannelListItem {
     pub visibility: String,
     /// Channel description.
     pub description: String,
+    /// Public key that authored the current metadata event.
+    pub created_by: String,
+    /// Timestamp of the current metadata event.
+    pub created_at: u64,
     /// Optional current topic.
     pub topic: Option<String>,
     /// Whether the channel metadata marks it archived.

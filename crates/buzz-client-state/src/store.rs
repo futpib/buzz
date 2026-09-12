@@ -297,6 +297,40 @@ impl ClientState {
         .await
     }
 
+    /// Return a bounded chronological raw-event snapshot for one channel.
+    ///
+    /// The snapshot includes recursively related edits, reactions, and
+    /// deletions so an existing client-side formatter can paint directly from
+    /// SQLite before the relay refresh completes.
+    pub async fn channel_events(
+        &self,
+        channel_id: impl Into<String>,
+        limit: u32,
+    ) -> Result<Vec<Event>, ClientStateError> {
+        let inner = self.inner.clone();
+        let channel_id = channel_id.into();
+        run_query(move || {
+            let conn = schema::open(&inner.path)?;
+            query::channel_events(&conn, &inner.scope, &channel_id, bounded_event_limit(limit))
+        })
+        .await
+    }
+
+    /// Return a bounded chronological raw-event snapshot for one thread.
+    pub async fn thread_events(
+        &self,
+        root_id: impl Into<String>,
+        limit: u32,
+    ) -> Result<Vec<Event>, ClientStateError> {
+        let inner = self.inner.clone();
+        let root_id = root_id.into();
+        run_query(move || {
+            let conn = schema::open(&inner.path)?;
+            query::thread_events(&conn, &inner.scope, &root_id, bounded_event_limit(limit))
+        })
+        .await
+    }
+
     /// Return a root and its chronologically ordered reply projection.
     pub async fn thread(
         &self,
@@ -394,6 +428,10 @@ fn validate_scope(scope: &ProjectionScope) -> Result<(), ClientStateError> {
 
 fn bounded_limit(limit: u32) -> u32 {
     limit.clamp(1, 500)
+}
+
+fn bounded_event_limit(limit: u32) -> u32 {
+    limit.clamp(1, 5_000)
 }
 
 fn check_batch(
