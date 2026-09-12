@@ -81,6 +81,11 @@ run_unit_tests() {
   run_test_step "buzz-core tests" \
     cargo test -p buzz-core --lib -- --nocapture
 
+  # Keep the portable SQLite read-model regressions in the no-nextest fallback
+  # path as well as `just test-unit`.
+  run_test_step "buzz-client-state tests" \
+    cargo test -p buzz-client-state -- --nocapture
+
   run_test_step "buzz-auth unit tests" \
     cargo test -p buzz-auth --lib -- --nocapture
 

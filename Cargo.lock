@@ -1008,6 +1008,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "buzz-client-state"
+version = "0.1.0"
+dependencies = [
+ "buzz-core",
+ "nostr 0.44.7",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
 name = "buzz-conformance"
 version = "0.1.0"
 dependencies = [

@@ -2,6 +2,7 @@
 members = [
     "crates/buzz-relay",
     "crates/buzz-core",
+    "crates/buzz-client-state",
     "crates/ifc-core",
     "crates/buzz-conformance",
     "crates/buzz-push-gateway",
@@ -58,6 +59,7 @@ tower-http  = { version = "0.6", features = ["trace", "cors", "compression-gzip"
 sqlx = { version = "0.9", features = [
     "runtime-tokio", "tls-rustls", "postgres", "uuid", "chrono", "json"
 ] }
+rusqlite = { version = "0.37", features = ["bundled"] }
 
 # Redis
 redis        = { version = "1.0", features = ["tokio-comp", "connection-manager", "tokio-rustls-comp"] }
@@ -139,6 +141,7 @@ schemars = { version = "1", default-features = false }
 
 # Internal crates
 buzz-core = { path = "crates/buzz-core" }
+buzz-client-state = { path = "crates/buzz-client-state" }
 buzz-conformance = { path = "crates/buzz-conformance" }
 buzz-db = { path = "crates/buzz-db" }
 buzz-deletion = { path = "crates/buzz-deletion" }

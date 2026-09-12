@@ -369,6 +369,9 @@ test-unit:
     ./scripts/test-ensure-local-relay-key.sh
     if command -v cargo-nextest &>/dev/null; then
         cargo nextest run -p buzz-core -p buzz-auth --lib
+        # Portable client read-model tests are infra-free and cover SQLite
+        # projection/query behavior, including out-of-order relay delivery.
+        cargo nextest run -p buzz-client-state
         # buzz-auth NIP-FI verifier doctests. The sealed-authority
         # `compile_fail` doctests prove the default-feature public API alone
         # cannot forge the issuer→JWKS authority; nextest does not run
