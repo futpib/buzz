@@ -433,9 +433,9 @@ pub const KIND_NIP29_GROUP_ROLES: u32 = 39003;
 /// Thread summary overlay: `e`/`d` tag = root event id, content =
 /// `{reply_count, descendant_count, last_reply_at, participants}`.
 pub const KIND_THREAD_SUMMARY: u32 = 39005;
-/// Window bounds overlay: `d` tag = `<channel_id>:<request-cursor-or-head>`,
-/// content = `{has_more, next_cursor}`. The only authority on exhaustion —
-/// clients must not infer `has_more` from row counts.
+/// Window bounds overlay: the `d` tag binds the channel/thread and request
+/// cursor; content = `{has_more, next_cursor}`. The only authority on
+/// exhaustion — clients must not infer `has_more` from row counts.
 pub const KIND_WINDOW_BOUNDS: u32 = 39006;
 
 /// Workflow definition (parameterized replaceable, d=workflow_uuid).

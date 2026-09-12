@@ -702,7 +702,7 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 44);
+        assert_eq!(migrations.len(), 45);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -1287,6 +1287,16 @@ mod postgres_tests {
             desired_schema.contains("'rate_limit_violations'\n    ]::TEXT[])"),
             "schema.sql exclusion list must match the pre-0041 body after ledger removal"
         );
+
+        // The newest-first thread-window covering index is additive for
+        // brownfield databases and part of the desired schema for fresh ones.
+        assert_eq!(migrations[44].version, 45);
+        let thread_window_index = migrations[44].sql.as_str();
+        assert!(thread_window_index.contains("idx_thread_metadata_root_window"));
+        assert!(thread_window_index.contains("parent_event_id"));
+        assert!(thread_window_index.contains("event_created_at DESC"));
+        assert!(thread_window_index.contains("event_id ASC"));
+        assert!(desired_schema.contains("idx_thread_metadata_root_window"));
     }
 
     #[test]

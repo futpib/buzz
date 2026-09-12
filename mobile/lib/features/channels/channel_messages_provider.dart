@@ -265,19 +265,23 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
 
     final rootId = thread.rootId;
     if (rootId != null) {
-      ref.invalidate(
-        threadRepliesProvider(
-          ThreadRepliesArgs(channelId: channelId, rootId: rootId),
-        ),
+      final args = ThreadRepliesArgs(
+        channelId: channelId,
+        rootId: rootId,
+        threadHeadId: rootId,
       );
+      ref.invalidate(threadWindowProvider(args));
+      ref.invalidate(threadRepliesProvider(args));
     }
     final parentId = thread.parentId;
     if (parentId != null && parentId != rootId) {
-      ref.invalidate(
-        threadRepliesProvider(
-          ThreadRepliesArgs(channelId: channelId, rootId: parentId),
-        ),
+      final args = ThreadRepliesArgs(
+        channelId: channelId,
+        rootId: rootId ?? parentId,
+        threadHeadId: parentId,
       );
+      ref.invalidate(threadWindowProvider(args));
+      ref.invalidate(threadRepliesProvider(args));
     }
   }
 

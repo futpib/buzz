@@ -9,6 +9,11 @@ class _ThreadMessageList extends StatelessWidget {
   final ItemPositionsListener itemPositionsListener;
   final double bottomInset;
   final List<TimelineMessage> replies;
+  final Map<String, ChannelWindowThreadSummary> relayThreadSummaries;
+  final bool hasEarlierReplies;
+  final bool isLoadingEarlierReplies;
+  final Object? earlierRepliesError;
+  final VoidCallback onLoadEarlierReplies;
   final Map<String, DateTime> localSendAnimations;
   final Widget Function(Widget child) trackActiveScrollPosition;
   final bool headIsDeleted;
@@ -34,6 +39,11 @@ class _ThreadMessageList extends StatelessWidget {
     required this.itemPositionsListener,
     required this.bottomInset,
     required this.replies,
+    required this.relayThreadSummaries,
+    required this.hasEarlierReplies,
+    required this.isLoadingEarlierReplies,
+    required this.earlierRepliesError,
+    required this.onLoadEarlierReplies,
     required this.localSendAnimations,
     required this.trackActiveScrollPosition,
     required this.headIsDeleted,
@@ -137,7 +147,7 @@ class _ThreadMessageList extends StatelessWidget {
                             child: Row(
                               children: [
                                 Text(
-                                  '${replies.length} ${replies.length == 1 ? 'reply' : 'replies'}',
+                                  '${replies.length}${hasEarlierReplies ? '+' : ''} ${replies.length == 1 && !hasEarlierReplies ? 'reply' : 'replies'}',
                                   style: context.textTheme.labelMedium
                                       ?.copyWith(
                                         color: context.colors.onSurfaceVariant,
@@ -153,6 +163,25 @@ class _ThreadMessageList extends StatelessWidget {
                               ],
                             ),
                           ),
+                          if (hasEarlierReplies || earlierRepliesError != null)
+                            Align(
+                              alignment: Alignment.center,
+                              child: TextButton(
+                                key: const ValueKey(
+                                  'thread-load-earlier-replies',
+                                ),
+                                onPressed: isLoadingEarlierReplies
+                                    ? null
+                                    : onLoadEarlierReplies,
+                                child: Text(
+                                  isLoadingEarlierReplies
+                                      ? 'Loading…'
+                                      : earlierRepliesError == null
+                                      ? 'Load earlier replies'
+                                      : 'Retry earlier replies',
+                                ),
+                              ),
+                            ),
                         ],
                       ),
                     ),
@@ -179,10 +208,11 @@ class _ThreadMessageList extends StatelessWidget {
 
                 // Check if this reply itself has children (nested thread).
                 final nestedChildren = childrenByParent[reply.id];
-                final nestedSummary =
-                    nestedChildren != null && nestedChildren.isNotEmpty
-                    ? _buildNestedSummary(reply.id, nestedChildren)
-                    : null;
+                final nestedSummary = _buildNestedSummary(
+                  reply.id,
+                  nestedChildren ?? const [],
+                  relayThreadSummaries[reply.id],
+                );
 
                 return trackActiveScrollPosition(
                   LocalMessageSendTransition(

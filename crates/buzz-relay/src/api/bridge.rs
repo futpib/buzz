@@ -25,6 +25,8 @@ fn is_http_ephemeral_publish_kind(kind: u32) -> bool {
     kind == buzz_core::kind::KIND_AGENT_THREAD_LIFECYCLE
 }
 
+mod thread_window;
+
 pub(crate) async fn enforce_http_admission(
     state: &AppState,
     tenant: &TenantContext,
@@ -306,7 +308,8 @@ fn extract_buzz_channel(raw: &Value) -> Option<&str> {
 }
 
 /// True when the raw filter opts into a bridge extension flag (`top_level`,
-/// `include_summaries`, `include_aux`). Absent or non-boolean = false.
+/// `thread_window`, `include_summaries`, `include_aux`). Absent or non-boolean
+/// = false.
 fn extension_flag(raw: &Value, key: &str) -> bool {
     raw.get(key).and_then(Value::as_bool).unwrap_or(false)
 }
@@ -1268,6 +1271,25 @@ async fn query_events_authed(
             raw,
             filter,
             &accessible_channels,
+            &mut events,
+        )
+        .await?;
+        handled.insert(idx);
+    }
+
+    // Newest-first thread windows — bounded pages for UI rendering. This is
+    // separate from the legacy oldest-first `depth_limit` replay surface.
+    for (idx, (raw, filter)) in raw_filters.iter().zip(filters.iter()).enumerate() {
+        if handled.contains(&idx) || !extension_flag(raw, "thread_window") {
+            continue;
+        }
+        thread_window::handle(
+            state,
+            tenant,
+            raw,
+            filter,
+            &accessible_channels,
+            &authed_pubkey_hex,
             &mut events,
         )
         .await?;

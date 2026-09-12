@@ -20,6 +20,7 @@ import '../../shared/profile/user_profile.dart';
 import 'android_ime_lift.dart';
 import 'channel_link_navigation.dart';
 import 'channel_messages_provider.dart';
+import 'channel_window.dart';
 import 'channel_typing_provider.dart';
 import 'channel_typing_indicator.dart';
 import 'thread_replies_provider.dart';
@@ -116,18 +117,24 @@ class ThreadDetailPage extends HookConsumerWidget {
     final repliesArgs = ThreadRepliesArgs(
       channelId: channelId,
       rootId: queryRootId,
+      threadHeadId: threadHead.id,
     );
     final relayReplyState = ref.watch(threadRepliesProvider(repliesArgs));
+    final threadPagination = ref.watch(
+      threadReplyPaginationProvider(repliesArgs),
+    );
+    final relayThreadSummaries = threadReplySummaries(
+      relayReplyState.value,
+      threadPagination,
+    );
     final repliesState = ref.watch(threadRepliesWithLocalProvider(repliesArgs));
     final projectedThreadState = ref.watch(
       projectedThreadEventsProvider(repliesArgs),
     );
     final relayRepliesAvailable = relayReplyState.value != null;
-    // The thread query is one-shot and asks only for content kinds, so a
-    // reaction, edit, or deletion that lands while the thread is open never
-    // reaches it — a new pill (and its burst) only showed up after leaving and
-    // re-entering, which refetched. The channel socket already receives those
-    // events, so union the two sources and format once.
+    // The initial thread window includes current auxiliary events, but a
+    // reaction, edit, or deletion that lands after that snapshot still arrives
+    // through the channel socket. Union the two sources and format once.
     final liveChannelEvents =
         ref.watch(channelMessagesProvider(channelId)).value ??
         const <NostrEvent>[];
@@ -166,6 +173,12 @@ class ThreadDetailPage extends HookConsumerWidget {
       liveChannelEvents,
       threadHead.id,
     );
+    final hydratedInitialTarget =
+        initialMessageId == null || !relayRepliesAvailable
+        ? null
+        : allMessages
+              .where((message) => message.id == initialMessageId)
+              .firstOrNull;
     final allMsgs = fetchedReplies == null
         ? allMessages
         : [
@@ -176,6 +189,11 @@ class ThreadDetailPage extends HookConsumerWidget {
             if (!liveDeletionHidesHead &&
                 !fetchedReplies.any((message) => message.id == threadHead.id))
               threadHead,
+            if (hydratedInitialTarget != null &&
+                !fetchedReplies.any(
+                  (message) => message.id == hydratedInitialTarget.id,
+                ))
+              hydratedInitialTarget,
             ...fetchedReplies,
           ];
     final routeAnimation = ModalRoute.of(context)?.animation;
@@ -249,7 +267,6 @@ class ThreadDetailPage extends HookConsumerWidget {
       if (pid == null) continue;
       childrenByParent.putIfAbsent(pid, () => []).add(msg);
     }
-
     final replies = childrenByParent[threadHead.id] ?? const [];
     final liveHead =
         allMsgs.where((m) => m.id == threadHead.id).firstOrNull ?? threadHead;
@@ -911,6 +928,20 @@ class ThreadDetailPage extends HookConsumerWidget {
                   itemPositionsListener: itemPositionsListener,
                   bottomInset: timelineBottomInset,
                   replies: replies,
+                  relayThreadSummaries: relayThreadSummaries,
+                  hasEarlierReplies: threadHasOlderReplies(
+                    relayReplyState.value,
+                    threadPagination,
+                  ),
+                  isLoadingEarlierReplies: threadPagination.isLoading,
+                  earlierRepliesError: threadPagination.error,
+                  onLoadEarlierReplies: () => unawaited(
+                    ref
+                        .read(
+                          threadReplyPaginationProvider(repliesArgs).notifier,
+                        )
+                        .loadOlder(),
+                  ),
                   localSendAnimations: localSendAnimations,
                   trackActiveScrollPosition: trackActiveScrollPosition,
                   headIsDeleted: liveDeletionHidesHead,

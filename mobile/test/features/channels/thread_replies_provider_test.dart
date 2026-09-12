@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:buzz/features/channels/pending_local_messages_provider.dart';
 import 'package:buzz/features/channels/thread_replies_provider.dart';
@@ -9,6 +10,8 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 class _FakeRelaySession extends RelaySessionNotifier {
   int queryCount = 0;
   List<NostrEvent> replies = const [];
+  final List<List<NostrEvent>> queryResponses = [];
+  final List<NostrFilter> requestedFilters = [];
   Completer<List<NostrEvent>>? nextQueryGate;
 
   @override
@@ -24,11 +27,13 @@ class _FakeRelaySession extends RelaySessionNotifier {
     Duration timeout = const Duration(seconds: 8),
   }) async {
     queryCount++;
+    requestedFilters.addAll(filters);
     final gate = nextQueryGate;
     if (gate != null) {
       nextQueryGate = null;
       return gate.future;
     }
+    if (queryResponses.isNotEmpty) return queryResponses.removeAt(0);
     return replies;
   }
 }
@@ -43,6 +48,29 @@ NostrEvent _reply(String id, int createdAt) => NostrEvent(
     ['e', 'root', '', 'reply'],
   ],
   content: 'reply $id',
+  sig: '',
+);
+
+NostrEvent _bounds({
+  String suffix = 'head',
+  String threadHeadId = 'root',
+  bool hasMore = false,
+  int? nextCreatedAt,
+  String? nextId,
+}) => NostrEvent(
+  id: 'bounds-$suffix',
+  pubkey: 'relay',
+  createdAt: 1000,
+  kind: EventKind.channelWindowBounds,
+  tags: [
+    ['d', 'thread:chan:root:$threadHeadId:$suffix'],
+    ['e', 'root'],
+    ['h', 'chan'],
+  ],
+  content: jsonEncode({
+    'has_more': hasMore,
+    'next_cursor': hasMore ? {'created_at': nextCreatedAt, 'id': nextId} : null,
+  }),
   sig: '',
 );
 
@@ -74,6 +102,112 @@ void main() {
       ['a', 'm', 'z'],
     );
   });
+
+  test('paints the newest window then loads one bounded older page', () async {
+    const cursorId =
+        'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+    final fakeSession = _FakeRelaySession();
+    fakeSession.queryResponses.addAll([
+      [
+        _reply('newest', 2000),
+        _bounds(hasMore: true, nextCreatedAt: 2000, nextId: cursorId),
+      ],
+      [_reply('older', 1000), _bounds(suffix: '2000:$cursorId')],
+    ]);
+    final container = ProviderContainer(
+      overrides: [relaySessionProvider.overrideWith(() => fakeSession)],
+    );
+    addTearDown(container.dispose);
+    final subscription = container.listen(
+      threadRepliesWithLocalProvider(args),
+      (_, _) {},
+    );
+    addTearDown(subscription.close);
+
+    expect(
+      (await container.read(
+        threadRepliesProvider(args).future,
+      )).map((event) => event.id),
+      ['newest'],
+    );
+    expect(fakeSession.queryCount, 1);
+    expect(fakeSession.requestedFilters.single.limit, 100);
+    expect(
+      fakeSession.requestedFilters.single.extensions['thread_window'],
+      isTrue,
+    );
+    expect(
+      fakeSession.requestedFilters.single.extensions['thread_parent'],
+      'root',
+    );
+
+    await container
+        .read(threadReplyPaginationProvider(args).notifier)
+        .loadOlder();
+
+    expect(
+      container
+          .read(threadRepliesWithLocalProvider(args))
+          .value
+          ?.map((event) => event.id),
+      ['older', 'newest'],
+    );
+    expect(fakeSession.queryCount, 2);
+    expect(fakeSession.requestedFilters.last.until, 2000);
+    expect(fakeSession.requestedFilters.last.extensions['before_id'], cursorId);
+    expect(
+      threadHasOlderReplies(
+        container.read(threadRepliesProvider(args)).value,
+        container.read(threadReplyPaginationProvider(args)),
+      ),
+      isFalse,
+    );
+  });
+
+  test('scopes a nested page to the displayed thread head', () async {
+    const nestedArgs = ThreadRepliesArgs(
+      channelId: 'chan',
+      rootId: 'root',
+      threadHeadId: 'nested-head',
+    );
+    final fakeSession = _FakeRelaySession()
+      ..replies = [_bounds(threadHeadId: 'nested-head')];
+    final container = ProviderContainer(
+      overrides: [relaySessionProvider.overrideWith(() => fakeSession)],
+    );
+    addTearDown(container.dispose);
+
+    await container.read(threadRepliesProvider(nestedArgs).future);
+
+    expect(
+      fakeSession.requestedFilters.single.extensions['thread_parent'],
+      'nested-head',
+    );
+  });
+
+  test(
+    'does not downgrade a malformed modern window to legacy replay',
+    () async {
+      final fakeSession = _FakeRelaySession()
+        ..replies = [_bounds(threadHeadId: 'wrong-head')];
+      final container = ProviderContainer(
+        retry: (_, _) => null,
+        overrides: [relaySessionProvider.overrideWith(() => fakeSession)],
+      );
+      addTearDown(container.dispose);
+      final subscription = container.listen(
+        threadRepliesProvider(args),
+        (_, _) {},
+      );
+      addTearDown(subscription.close);
+
+      await expectLater(
+        container.read(threadRepliesProvider(args).future),
+        throwsFormatException,
+      );
+      expect(fakeSession.queryCount, 1);
+    },
+  );
 
   test('does not refetch on the disconnect edge', () async {
     final (container, fakeSession, _) = makeHarness([_reply('r1', 1000)]);

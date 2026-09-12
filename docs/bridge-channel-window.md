@@ -135,5 +135,6 @@ Both kinds are relay-only: client submission is rejected at ingest.
 ## Siblings
 
 `before_id` (requires `until`), `thread_cursor`/`thread_cursor_id`,
-`depth_limit`, `feed_types` — see `bridge.rs`. All are bridge-only raw
-filter extensions invisible to vanilla relays and clients.
+`thread_window` ([contract](bridge-thread-window.md)), `depth_limit`,
+`feed_types` — see `bridge.rs`. All are bridge-only raw filter extensions
+invisible to vanilla relays and clients.

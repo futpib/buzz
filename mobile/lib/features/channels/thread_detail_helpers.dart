@@ -92,9 +92,10 @@ bool _isDeletedBy(Iterable<NostrEvent> events, String messageId) {
 /// Build a lightweight summary for a nested thread (reply that has its own
 /// replies). Same logic as the top-level [ThreadSummary] but kept local to
 /// avoid coupling.
-ThreadSummary _buildNestedSummary(
+ThreadSummary? _buildNestedSummary(
   String messageId,
   List<TimelineMessage> children,
+  ChannelWindowThreadSummary? relay,
 ) {
   final seen = <String>{};
   final participants = <String>[];
@@ -102,11 +103,40 @@ ThreadSummary _buildNestedSummary(
     final pk = children[i].pubkey.toLowerCase();
     if (seen.add(pk)) participants.add(pk);
   }
+  final local = children.isEmpty
+      ? null
+      : ThreadSummary(
+          threadHeadId: messageId,
+          replyCount: children.length,
+          participantPubkeys: participants.reversed.toList(),
+          lastReplyAt: children.last.createdAt,
+        );
+  if (relay == null) return local;
+  final relaySummary = ThreadSummary(
+    threadHeadId: messageId,
+    replyCount: relay.replyCount,
+    participantPubkeys: relay.participantPubkeys.take(3).toList(),
+    lastReplyAt: relay.lastReplyAt,
+  );
+  if (local == null) return relaySummary;
+  final participantPubkeys = <String>[];
+  for (final pubkey in [
+    ...relaySummary.participantPubkeys,
+    ...local.participantPubkeys,
+  ]) {
+    if (!participantPubkeys.contains(pubkey) && participantPubkeys.length < 3) {
+      participantPubkeys.add(pubkey);
+    }
+  }
   return ThreadSummary(
     threadHeadId: messageId,
-    replyCount: children.length,
-    participantPubkeys: participants.reversed.toList(),
-    lastReplyAt: children.last.createdAt,
+    replyCount: local.replyCount > relaySummary.replyCount
+        ? local.replyCount
+        : relaySummary.replyCount,
+    participantPubkeys: participantPubkeys,
+    lastReplyAt: (local.lastReplyAt ?? -1) > (relaySummary.lastReplyAt ?? -1)
+        ? local.lastReplyAt
+        : relaySummary.lastReplyAt,
   );
 }
 

@@ -320,14 +320,41 @@ Widget _buildTestable({
         threadRepliesProvider(
           ThreadRepliesArgs(channelId: _channelId, rootId: entry.key),
         ).overrideWith((ref) async => entry.value),
+      for (final entry in threadReplies.entries)
+        if (initialThreadRootId != null && initialThreadRootId != entry.key)
+          threadRepliesProvider(
+            ThreadRepliesArgs(
+              channelId: _channelId,
+              rootId: entry.key,
+              threadHeadId: initialThreadRootId,
+            ),
+          ).overrideWith((ref) async => entry.value),
       for (final entry in pendingThreadReplies.entries)
         threadRepliesProvider(
           ThreadRepliesArgs(channelId: _channelId, rootId: entry.key),
         ).overrideWith((ref) => entry.value),
+      for (final entry in pendingThreadReplies.entries)
+        if (initialThreadRootId != null && initialThreadRootId != entry.key)
+          threadRepliesProvider(
+            ThreadRepliesArgs(
+              channelId: _channelId,
+              rootId: entry.key,
+              threadHeadId: initialThreadRootId,
+            ),
+          ).overrideWith((ref) => entry.value),
       for (final entry in threadReplyLoaders.entries)
         threadRepliesProvider(
           ThreadRepliesArgs(channelId: _channelId, rootId: entry.key),
         ).overrideWith((ref) => entry.value()),
+      for (final entry in threadReplyLoaders.entries)
+        if (initialThreadRootId != null && initialThreadRootId != entry.key)
+          threadRepliesProvider(
+            ThreadRepliesArgs(
+              channelId: _channelId,
+              rootId: entry.key,
+              threadHeadId: initialThreadRootId,
+            ),
+          ).overrideWith((ref) => entry.value()),
       for (final entry in localThreadReplies.entries)
         threadLocalRepliesProvider(
           ThreadRepliesArgs(channelId: _channelId, rootId: entry.key),
@@ -10663,8 +10690,8 @@ void main() {
           initialMessageId: 'target',
           initialThreadRootId: 'parent',
           threadReplies: {
-            // Relay subtree filtering is keyed by thread_metadata.root_event_id,
-            // so nested replies are returned by the outer-root query.
+            // The outer root remains the scope key, while the test harness
+            // also binds this response to the displayed direct-parent window.
             'root': [parent, target],
           },
           users: const {

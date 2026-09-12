@@ -821,11 +821,145 @@ async fn insert_thread_reply(
     .expect("insert reply");
 }
 
+async fn insert_nested_thread_reply(
+    pool: &PgPool,
+    community: Uuid,
+    channel: Uuid,
+    root: &nostr::Event,
+    parent: &nostr::Event,
+    reply: &nostr::Event,
+) {
+    let reply_ts =
+        chrono::DateTime::from_timestamp(reply.created_at.as_secs() as i64, 0).expect("valid ts");
+    let parent_ts =
+        chrono::DateTime::from_timestamp(parent.created_at.as_secs() as i64, 0).expect("valid ts");
+    let root_ts =
+        chrono::DateTime::from_timestamp(root.created_at.as_secs() as i64, 0).expect("valid ts");
+    event::insert_event_with_thread_metadata(
+        pool,
+        CommunityId::from_uuid(community),
+        reply,
+        Some(channel),
+        Some(event::ThreadMetadataParams {
+            event_id: reply.id.as_bytes(),
+            event_created_at: reply_ts,
+            channel_id: channel,
+            parent_event_id: Some(parent.id.as_bytes()),
+            parent_event_created_at: Some(parent_ts),
+            root_event_id: Some(root.id.as_bytes()),
+            root_event_created_at: Some(root_ts),
+            depth: 2,
+            broadcast: false,
+        }),
+    )
+    .await
+    .expect("insert nested reply");
+}
+
 /// Composite thread cursor: 8-byte BE seconds + raw event id.
 fn thread_cursor(reply: &crate::thread::ThreadReply) -> Vec<u8> {
     let mut cur = reply.created_at.timestamp().to_be_bytes().to_vec();
     cur.extend_from_slice(&reply.event_id);
     cur
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn thread_window_serves_newest_first_with_authoritative_bounds() {
+    let admin = PgPool::connect(&admin_url().await)
+        .await
+        .expect("connect admin");
+    let (writer, name) = create_scratch_db(&admin, "thread_window").await;
+    let author = nostr::Keys::generate();
+    let community = Uuid::new_v4();
+    let channel = Uuid::new_v4();
+    seed_community_channel(&writer, community, channel, &author).await;
+
+    let base = 1_700_000_000u64;
+    let root = signed_event_at(&author, "root", base);
+    insert_top_level(&writer, community, channel, &root).await;
+    let mut replies = Vec::new();
+    for index in 1..=5 {
+        let reply = signed_event_at(&author, &format!("r{index}"), base + 10 * index as u64);
+        insert_thread_reply(&writer, community, channel, &root, &reply).await;
+        replies.push(reply);
+    }
+    let nested = signed_event_at(&author, "nested-newest", base + 100);
+    insert_nested_thread_reply(&writer, community, channel, &root, &replies[4], &nested).await;
+
+    let db = Db::from_pool(writer.clone());
+    let cid = CommunityId::from_uuid(community);
+    let (head, _session) = db
+        .get_thread_window_with_session(crate::thread_window::ThreadWindowQuery {
+            community_id: cid,
+            channel_id: channel,
+            root_event_id: root.id.as_bytes(),
+            parent_event_id: root.id.as_bytes(),
+            depth_limit: Some(64),
+            limit: 2,
+            cursor: None,
+            kind_filter: Some(&[9]),
+        })
+        .await
+        .expect("head window");
+    let contents = head
+        .rows
+        .iter()
+        .map(|row| row.stored_event.event.content.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(contents, ["r5", "r4"]);
+    let r5_summary = head.rows[0]
+        .thread_summary
+        .as_ref()
+        .expect("nested reply count");
+    assert_eq!(r5_summary.reply_count, 1);
+    assert_eq!(r5_summary.descendant_count, 0);
+    assert_eq!(
+        r5_summary.participants,
+        [author.public_key().to_bytes().to_vec()]
+    );
+    assert!(head.has_more);
+
+    let (page, _session) = db
+        .get_thread_window_with_session(crate::thread_window::ThreadWindowQuery {
+            community_id: cid,
+            channel_id: channel,
+            root_event_id: root.id.as_bytes(),
+            parent_event_id: root.id.as_bytes(),
+            depth_limit: Some(64),
+            limit: 2,
+            cursor: head.next_cursor,
+            kind_filter: Some(&[9]),
+        })
+        .await
+        .expect("older window");
+    let contents = page
+        .rows
+        .iter()
+        .map(|row| row.stored_event.event.content.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(contents, ["r3", "r2"]);
+    assert!(page.has_more);
+
+    let (tail, _session) = db
+        .get_thread_window_with_session(crate::thread_window::ThreadWindowQuery {
+            community_id: cid,
+            channel_id: channel,
+            root_event_id: root.id.as_bytes(),
+            parent_event_id: root.id.as_bytes(),
+            depth_limit: Some(64),
+            limit: 2,
+            cursor: page.next_cursor,
+            kind_filter: Some(&[9]),
+        })
+        .await
+        .expect("terminal window");
+    assert_eq!(tail.rows.len(), 1);
+    assert_eq!(tail.rows[0].stored_event.event.content, "r1");
+    assert!(!tail.has_more);
+    assert!(tail.next_cursor.is_none());
+
+    drop_scratch_db(&admin, writer, &name).await;
 }
 
 #[tokio::test]
