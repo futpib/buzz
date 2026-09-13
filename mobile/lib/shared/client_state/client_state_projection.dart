@@ -1,88 +1,145 @@
 import 'dart:async';
-import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
-import 'package:flutter/services.dart';
+import 'package:path_provider/path_provider.dart';
 
 import '../relay/nostr_models.dart';
+import 'client_state_worker.dart';
+
+typedef ClientStateDatabasePath = Future<String> Function();
 
 /// Android-local, disposable read model used as an instant startup cache.
 ///
-/// Relay queries remain authoritative and continue in the background. Native
-/// failures therefore degrade to the existing network path instead of making
-/// the application unusable.
+/// The projection and SQLite queries run in long-lived Dart isolates. Relay
+/// queries remain authoritative and continue in the background, so projection
+/// failures degrade to the existing network path.
 class ClientStateProjection {
   ClientStateProjection({
-    MethodChannel channel = const MethodChannel('buzz/client_state'),
     bool Function()? supportsPlatform,
-  }) : _channel = channel,
-       _supportsPlatform = supportsPlatform ?? (() => Platform.isAndroid);
+    ClientStateDatabasePath? databasePath,
+    int maxPendingWorkerRequests = 128,
+  }) : _supportsPlatform = supportsPlatform ?? (() => Platform.isAndroid),
+       _databasePath = databasePath ?? _defaultDatabasePath,
+       _maxPendingWorkerRequests = maxPendingWorkerRequests;
 
   static final instance = ClientStateProjection();
 
   static const _eventBatchSize = 512;
-  final MethodChannel _channel;
   final bool Function() _supportsPlatform;
-  Future<void> _tail = Future.value();
-  String? _scope;
-  bool _unavailable = false;
+  final ClientStateDatabasePath _databasePath;
+  final int _maxPendingWorkerRequests;
+  Future<void> _configuration = Future.value();
+  _ClientStatePair? _active;
+  int _generation = 0;
+  String? _requestedScope;
 
-  Future<bool> configure(String relayUrl, String? viewerPubkey) async {
-    final normalizedPubkey = viewerPubkey?.trim().toLowerCase();
-    if (!_supportsPlatform()) {
-      return false;
+  Future<bool> configure(String relayUrl, String? viewerPubkey) {
+    final requestedPubkey = viewerPubkey?.trim().toLowerCase();
+    final requestedRelay = relayUrl.trim().replaceFirst(RegExp(r'/+$'), '');
+    final requestedScope = requestedPubkey == null || requestedPubkey.isEmpty
+        ? null
+        : '$requestedRelay\n$requestedPubkey';
+    if (_requestedScope != requestedScope) {
+      _requestedScope = requestedScope;
+      _generation += 1;
     }
-    if (normalizedPubkey == null || normalizedPubkey.isEmpty) {
-      await _schedule<void>(() async {
-        if (_scope != null) await _channel.invokeMethod<void>('close');
-        _scope = null;
-        _unavailable = false;
-      });
-      return false;
-    }
-    final nextScope = '${relayUrl.trim()}/\u0000$normalizedPubkey';
-    if (_scope == nextScope && !_unavailable) return true;
-
-    final result = await _schedule<bool>(() async {
-      final supported =
-          await _channel.invokeMethod<bool>('isSupported') ?? false;
-      if (!supported) return false;
-      final opened = await _channel.invokeMethod<bool>('open', {
-        'relayUrl': relayUrl.trim(),
-        'viewerPubkey': normalizedPubkey,
-      });
-      if (opened != true) return false;
-      _scope = nextScope;
-      _unavailable = false;
-      return true;
+    final completer = Completer<bool>();
+    _configuration = _configuration.then((_) async {
+      try {
+        completer.complete(await _configureNow(relayUrl, viewerPubkey));
+      } catch (error, stackTrace) {
+        debugPrint(
+          '[ClientStateProjection] configure failed: $error\n$stackTrace',
+        );
+        completer.complete(false);
+      }
     });
-    if (result != true) _unavailable = true;
-    return result ?? false;
+    return completer.future;
+  }
+
+  Future<bool> _configureNow(String relayUrl, String? viewerPubkey) async {
+    if (!_supportsPlatform()) return false;
+    final normalizedPubkey = viewerPubkey?.trim().toLowerCase();
+    if (normalizedPubkey == null || normalizedPubkey.isEmpty) {
+      final previous = _active;
+      _active = null;
+      await previous?.retire();
+      return false;
+    }
+    final normalizedRelay = relayUrl.trim().replaceFirst(RegExp(r'/+$'), '');
+    final nextScope = '$normalizedRelay\n$normalizedPubkey';
+    if (_active?.scope == nextScope) return true;
+
+    final previous = _active;
+    _active = null;
+    ClientStateWorkerLane? writer;
+    try {
+      if (!_isHexPubkey(normalizedPubkey)) {
+        throw const FormatException(
+          'viewer pubkey must be 64 hexadecimal characters',
+        );
+      }
+      if (normalizedRelay.isEmpty ||
+          normalizedRelay.contains(RegExp(r'[\r\n]'))) {
+        throw const FormatException(
+          'relay URL must be non-empty and single-line',
+        );
+      }
+      final path = await _databasePath();
+      writer = await ClientStateWorkerLane.start(
+        path: path,
+        scope: nextScope,
+        viewerPubkey: normalizedPubkey,
+        name: 'buzz-client-state-writer',
+        maxPendingRequests: _maxPendingWorkerRequests,
+      );
+      final reader = await ClientStateWorkerLane.start(
+        path: path,
+        scope: nextScope,
+        viewerPubkey: normalizedPubkey,
+        name: 'buzz-client-state-reader',
+        maxPendingRequests: _maxPendingWorkerRequests,
+      );
+      _active = _ClientStatePair(nextScope, writer, reader);
+    } catch (_) {
+      await writer?.close();
+      await previous?.retire();
+      rethrow;
+    }
+    await previous?.retire();
+    return true;
   }
 
   Future<void> applyEvents(Iterable<NostrEvent> events) async {
+    final generation = _generation;
+    final configuration = _configuration;
     final pending = events.toList(growable: false);
-    for (var start = 0; start < pending.length; start += _eventBatchSize) {
-      final end = (start + _eventBatchSize).clamp(0, pending.length);
-      await _command({
-        'op': 'apply',
-        'events': [
-          for (final event in pending.sublist(start, end)) event.toJson(),
-        ],
-      });
-    }
+    if (pending.isEmpty) return;
+    await _withActive<void>(generation, configuration, (active) async {
+      for (var start = 0; start < pending.length; start += _eventBatchSize) {
+        final end = (start + _eventBatchSize).clamp(0, pending.length);
+        await active.writer.request({
+          'op': 'apply',
+          'events': pending.sublist(start, end),
+        });
+      }
+    }, invalidateOnBackpressure: true);
   }
 
   Future<void> applyReadMarkers(Map<String, int> contexts) async {
+    final generation = _generation;
+    final configuration = _configuration;
     if (contexts.isEmpty) return;
-    await _command({
-      'op': 'apply_read_markers',
-      'markers': [
-        for (final entry in contexts.entries)
-          {'context_id': entry.key, 'read_at': entry.value},
-      ],
-    });
+    await _withActive<void>(generation, configuration, (active) async {
+      await active.writer.request({
+        'op': 'apply_read_markers',
+        'markers': [
+          for (final entry in contexts.entries)
+            {'context_id': entry.key, 'read_at': entry.value},
+        ],
+      });
+    }, invalidateOnBackpressure: true);
   }
 
   Future<List<Map<String, dynamic>>?> channels() =>
@@ -120,10 +177,27 @@ class ClientStateProjection {
   Future<List<Map<String, dynamic>>?> search(String text, {int limit = 20}) =>
       _mapListCommand({'op': 'search', 'text': text, 'limit': limit});
 
+  /// Stop worker isolates. Production keeps the singleton alive for the app.
+  @visibleForTesting
+  Future<void> dispose() async {
+    _generation += 1;
+    _requestedScope = null;
+    await _configuration;
+    final previous = _active;
+    _active = null;
+    await previous?.retire();
+  }
+
   Future<List<Map<String, dynamic>>?> _mapListCommand(
     Map<String, Object?> command,
   ) async {
-    final value = await _command(command);
+    final generation = _generation;
+    final configuration = _configuration;
+    final value = await _withActive<Object?>(
+      generation,
+      configuration,
+      (active) => active.reader.request(command),
+    );
     if (value is! List) return null;
     return [
       for (final row in value)
@@ -131,52 +205,96 @@ class ClientStateProjection {
     ];
   }
 
-  Future<Object?> _command(Map<String, Object?> command) {
-    if (!_supportsPlatform()) return Future.value();
-    return _schedule<Object?>(() async {
-      if (_scope == null || _unavailable) return null;
-      final response = await _channel.invokeMethod<String>(
-        'execute',
-        jsonEncode(command),
+  Future<T?> _withActive<T>(
+    int generation,
+    Future<void> configuration,
+    Future<T> Function(_ClientStatePair active) work, {
+    bool invalidateOnBackpressure = false,
+  }) async {
+    await configuration;
+    if (generation != _generation) return null;
+    final active = _active;
+    if (active == null || !_supportsPlatform()) return null;
+    active.acquire();
+    var released = false;
+    try {
+      final value = await work(active);
+      return generation == _generation && identical(active, _active)
+          ? value
+          : null;
+    } on ClientStateWorkerQueueFull catch (error, stackTrace) {
+      if (invalidateOnBackpressure) {
+        if (identical(active, _active)) _active = null;
+        active.release();
+        released = true;
+        await active.retire(clearScope: true);
+      }
+      debugPrint(
+        '[ClientStateProjection] cache queue full: $error\n$stackTrace',
       );
-      if (response == null) {
-        throw const FormatException('empty native response');
-      }
-      final envelope = jsonDecode(response);
-      if (envelope is! Map<String, dynamic>) {
-        throw const FormatException('malformed native response');
-      }
-      if (envelope['ok'] != true) {
-        throw StateError(
-          envelope['error'] as String? ?? 'client-state command failed',
+      return null;
+    } catch (error, stackTrace) {
+      debugPrint(
+        '[ClientStateProjection] cache miss after failure: $error\n$stackTrace',
+      );
+      return null;
+    } finally {
+      if (!released) active.release();
+    }
+  }
+
+  static Future<String> _defaultDatabasePath() async {
+    final directory = await getApplicationSupportDirectory();
+    return '${directory.path}${Platform.pathSeparator}buzz-client-state-dart-v1.sqlite';
+  }
+
+  static bool _isHexPubkey(String value) =>
+      value.length == 64 && RegExp(r'^[0-9a-f]+$').hasMatch(value);
+}
+
+class _ClientStatePair {
+  _ClientStatePair(this.scope, this.writer, this.reader);
+
+  final String scope;
+  final ClientStateWorkerLane writer;
+  final ClientStateWorkerLane reader;
+  int _users = 0;
+  bool _retired = false;
+  Completer<void>? _drained;
+  bool _clearScope = false;
+  Future<void>? _retirement;
+
+  void acquire() {
+    if (_retired) throw StateError('client-state scope is retired');
+    _users += 1;
+  }
+
+  void release() {
+    _users -= 1;
+    if (_users == 0) _drained?.complete();
+  }
+
+  Future<void> retire({bool clearScope = false}) {
+    _retired = true;
+    _clearScope = _clearScope || clearScope;
+    return _retirement ??= _retire();
+  }
+
+  Future<void> _retire() async {
+    if (_users > 0) {
+      _drained ??= Completer<void>();
+      await _drained!.future;
+    }
+    if (_clearScope) {
+      try {
+        await writer.request(const {'op': 'clear_scope'});
+      } catch (error, stackTrace) {
+        debugPrint(
+          '[ClientStateProjection] failed to clear stale cache: '
+          '$error\n$stackTrace',
         );
       }
-      return envelope['value'];
-    });
-  }
-
-  Future<T?> _schedule<T>(Future<T> Function() work) {
-    final completer = Completer<T?>();
-    _tail = _tail.then((_) async {
-      try {
-        completer.complete(await work());
-      } on MissingPluginException catch (error) {
-        _disable(error);
-        completer.complete(null);
-      } on PlatformException catch (error) {
-        _disable(error);
-        completer.complete(null);
-      } catch (error, stackTrace) {
-        debugPrint('[ClientStateProjection] $error\n$stackTrace');
-        completer.complete(null);
-      }
-    });
-    return completer.future;
-  }
-
-  void _disable(Object error) {
-    _unavailable = true;
-    _scope = null;
-    debugPrint('[ClientStateProjection] native projection unavailable: $error');
+    }
+    await Future.wait([writer.close(), reader.close()]);
   }
 }
