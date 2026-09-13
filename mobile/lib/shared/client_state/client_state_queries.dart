@@ -62,7 +62,7 @@ List<Map<String, Object?>> queryClientStateChannelEvents(
   int limit,
 ) => _relatedEvents(database, scope, 'e.channel_id=?', [
   channelId,
-], limit.clamp(1, 5000));
+], limit.clamp(1, 200));
 
 /// Returns raw events and overlays needed to paint a thread snapshot.
 List<Map<String, Object?>> queryClientStateThreadEvents(
@@ -73,7 +73,7 @@ List<Map<String, Object?>> queryClientStateThreadEvents(
 ) => _relatedEvents(database, scope, '(e.event_id=? OR e.root_id=?)', [
   rootId,
   rootId,
-], limit.clamp(1, 5000));
+], limit.clamp(1, 200));
 
 List<Map<String, Object?>> _relatedEvents(
   Database database,

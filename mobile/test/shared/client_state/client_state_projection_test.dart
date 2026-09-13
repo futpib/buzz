@@ -1,6 +1,7 @@
 import 'dart:io';
 
 import 'package:buzz/shared/client_state/client_state_projection.dart';
+import 'package:buzz/shared/client_state/client_state_database.dart';
 import 'package:buzz/shared/client_state/client_state_worker.dart';
 import 'package:buzz/shared/relay/nostr_models.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -539,6 +540,79 @@ void main() {
       await expectLater(rejected, throwsA(isA<ClientStateWorkerQueueFull>()));
       expect(await first, isEmpty);
       await lane.close();
+    },
+  );
+
+  test(
+    'bounds a 5k warm channel before crossing the isolate boundary',
+    () async {
+      final viewerPubkey = _pubkey(_viewerSecret);
+      final authorPubkey = _pubkey(_authorSecret);
+      final scope = 'https://relay.test\n$viewerPubkey';
+      final database = initializeClientStateDatabase(databasePath);
+      database.execute('BEGIN');
+      final insert = database.prepare('''INSERT INTO events(
+           scope, event_id, pubkey, created_at, kind, channel_id, target_id,
+           root_id, parent_id, broadcast, content, tags_json, sig, deleted
+         ) VALUES(?, ?, ?, ?, 9, ?, NULL, NULL, NULL, 0, ?, ?, ?, 0)''');
+      try {
+        for (var index = 0; index < 5000; index += 1) {
+          insert.execute([
+            scope,
+            index.toRadixString(16).padLeft(64, '0'),
+            authorPubkey,
+            10000 + index,
+            _channelId,
+            'message $index',
+            '[["h","$_channelId"]]',
+            '0' * 128,
+          ]);
+        }
+        database.execute('COMMIT');
+      } catch (_) {
+        database.execute('ROLLBACK');
+        rethrow;
+      } finally {
+        insert.close();
+        database.close();
+      }
+
+      await projection.configure('https://relay.test', viewerPubkey);
+      final events = await projection.channelEvents(_channelId, limit: 5000);
+
+      expect(events, hasLength(ClientStateProjection.eventPageSize));
+      expect(events!.first.createdAt, 14800);
+      expect(events.last.createdAt, 14999);
+    },
+  );
+
+  test(
+    'does not enumerate a relay batch synchronously on the UI isolate',
+    () async {
+      final viewerPubkey = _pubkey(_viewerSecret);
+      final event = _signed(
+        _authorSecret,
+        kind: 9,
+        content: 'background batch',
+        createdAt: 100,
+        tags: const [
+          ['h', _channelId],
+        ],
+      );
+      await projection.configure('https://relay.test', viewerPubkey);
+      var enumerated = 0;
+      final events = () sync* {
+        for (var index = 0; index < 256; index += 1) {
+          enumerated += 1;
+          yield event;
+        }
+      }();
+
+      final applying = projection.applyEvents(events);
+
+      expect(enumerated, 0);
+      await applying;
+      expect(enumerated, 256);
     },
   );
 }

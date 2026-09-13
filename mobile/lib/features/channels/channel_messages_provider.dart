@@ -144,6 +144,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
   Future<void> _loadProjectedMessages(int initVersion) async {
     final projected = await ClientStateProjection.instance.channelEvents(
       channelId,
+      limit: ClientStateProjection.eventPageSize,
     );
     if (!_isCurrentInit(initVersion) ||
         _authoritativeVersion == initVersion ||

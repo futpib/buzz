@@ -25,7 +25,14 @@ class ClientStateProjection {
 
   static final instance = ClientStateProjection();
 
-  static const _eventBatchSize = 512;
+  /// Keep isolate message copies short enough that relay catch-up cannot starve
+  /// Flutter's platform-message and frame handling on the caller isolate.
+  static const _eventBatchSize = 128;
+
+  /// A warm cache is a first-paint page, not a replacement for timeline
+  /// pagination. Returning thousands of event maps across an isolate boundary
+  /// can itself block Android's UI thread while Dart reconstructs the objects.
+  static const eventPageSize = 200;
   final bool Function() _supportsPlatform;
   final ClientStateDatabasePath _databasePath;
   final int _maxPendingWorkerRequests;
@@ -114,15 +121,15 @@ class ClientStateProjection {
   Future<void> applyEvents(Iterable<NostrEvent> events) async {
     final generation = _generation;
     final configuration = _configuration;
-    final pending = events.toList(growable: false);
-    if (pending.isEmpty) return;
     await _withActive<void>(generation, configuration, (active) async {
-      for (var start = 0; start < pending.length; start += _eventBatchSize) {
-        final end = (start + _eventBatchSize).clamp(0, pending.length);
-        await active.writer.request({
-          'op': 'apply',
-          'events': pending.sublist(start, end),
-        });
+      final iterator = events.iterator;
+      while (true) {
+        final batch = <NostrEvent>[];
+        while (batch.length < _eventBatchSize && iterator.moveNext()) {
+          batch.add(iterator.current);
+        }
+        if (batch.isEmpty) return;
+        await active.writer.request({'op': 'apply', 'events': batch});
       }
     }, invalidateOnBackpressure: true);
   }
@@ -147,12 +154,12 @@ class ClientStateProjection {
 
   Future<List<NostrEvent>?> channelEvents(
     String channelId, {
-    int limit = 5000,
+    int limit = eventPageSize,
   }) async {
     final rows = await _mapListCommand({
       'op': 'channel_events',
       'channel_id': channelId,
-      'limit': limit,
+      'limit': limit.clamp(1, eventPageSize),
     });
     if (rows == null) return null;
     return [for (final row in rows) NostrEvent.fromJson(row)];
@@ -160,12 +167,12 @@ class ClientStateProjection {
 
   Future<List<NostrEvent>?> threadEvents(
     String rootId, {
-    int limit = 5000,
+    int limit = eventPageSize,
   }) async {
     final rows = await _mapListCommand({
       'op': 'thread_events',
       'root_id': rootId,
-      'limit': limit,
+      'limit': limit.clamp(1, eventPageSize),
     });
     if (rows == null) return null;
     return [for (final row in rows) NostrEvent.fromJson(row)];
