@@ -164,6 +164,91 @@ void main() {
     );
   });
 
+  test('legacy relay never replays a 5k thread before first paint', () async {
+    final newest = [
+      for (var index = 0; index < 100; index += 1)
+        _reply('new-$index', 5000 - index),
+    ];
+    final older = [
+      for (var index = 0; index < 200; index += 1)
+        _reply('old-$index', 4000 - index),
+    ];
+    final fakeSession = _FakeRelaySession()
+      ..queryResponses.addAll([newest, older]);
+    final container = ProviderContainer(
+      overrides: [relaySessionProvider.overrideWith(() => fakeSession)],
+    );
+    addTearDown(container.dispose);
+    final subscription = container.listen(
+      threadRepliesWithLocalProvider(args),
+      (_, _) {},
+    );
+    addTearDown(subscription.close);
+
+    final first = await container.read(threadRepliesProvider(args).future);
+
+    expect(first, hasLength(100));
+    expect(fakeSession.queryCount, 1);
+    expect(
+      fakeSession.requestedFilters.single.extensions['depth_limit'],
+      isNull,
+    );
+    expect(
+      threadHasOlderReplies(
+        first,
+        container.read(threadReplyPaginationProvider(args)),
+      ),
+      isTrue,
+    );
+
+    await container
+        .read(threadReplyPaginationProvider(args).notifier)
+        .loadOlder();
+
+    expect(fakeSession.queryCount, 2);
+    expect(fakeSession.requestedFilters.last.limit, 200);
+    expect(
+      fakeSession.requestedFilters.last.extensions['thread_window'],
+      isNull,
+    );
+    expect(fakeSession.requestedFilters.last.until, newest.last.createdAt);
+    expect(
+      fakeSession.requestedFilters.last.extensions['before_id'],
+      newest.last.id,
+    );
+    expect(
+      container.read(threadRepliesWithLocalProvider(args)).value,
+      hasLength(300),
+    );
+  });
+
+  test('legacy nested thread retries with the displayed parent', () async {
+    const nestedArgs = ThreadRepliesArgs(
+      channelId: 'chan',
+      rootId: 'root',
+      threadHeadId: 'nested-head',
+    );
+    final fakeSession = _FakeRelaySession()
+      ..queryResponses.addAll([
+        [_reply('outer-result', 2000)],
+        [_reply('nested-result', 1000)],
+      ]);
+    final container = ProviderContainer(
+      overrides: [relaySessionProvider.overrideWith(() => fakeSession)],
+    );
+    addTearDown(container.dispose);
+
+    final replies = await container.read(
+      threadRepliesProvider(nestedArgs).future,
+    );
+
+    expect(replies.map((event) => event.id), ['nested-result']);
+    expect(fakeSession.queryCount, 2);
+    expect(fakeSession.requestedFilters.first.tags['#e'], ['root']);
+    expect(fakeSession.requestedFilters.last.tags['#e'], ['nested-head']);
+    expect(fakeSession.requestedFilters.last.extensions, isEmpty);
+  });
+
   test('scopes a nested page to the displayed thread head', () async {
     const nestedArgs = ThreadRepliesArgs(
       channelId: 'chan',

@@ -184,6 +184,86 @@ void main() {
 
     expect(manager.getEffectiveTimestamp('channel-1'), 100);
   });
+
+  test('marks a visible thread page with one state publication', () async {
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+    final keychain = nostr.Keys.generate();
+    final crypto = ReadStateCrypto.tryCreate(
+      nsec: keychain.nsec,
+      pubkey: keychain.public,
+    )!;
+    var publications = 0;
+    final manager = ReadStateManager(
+      pubkey: keychain.public,
+      prefs: prefs,
+      crypto: crypto,
+      relaySession: null,
+      signedEventRelay: null,
+      remoteEnabled: false,
+      onChanged: () => publications += 1,
+    );
+
+    final changed = manager.markContextsRead({
+      for (var index = 0; index < 200; index += 1)
+        msgContextKey('reply-$index'): index + 1,
+    });
+
+    expect(changed, isTrue);
+    expect(publications, 1);
+    expect(manager.effectiveContexts, hasLength(200));
+  });
+
+  test(
+    'bulk read-state decryption does not block the caller isolate',
+    () async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final keychain = nostr.Keys.generate();
+      final crypto = ReadStateCrypto.tryCreate(
+        nsec: keychain.nsec,
+        pubkey: keychain.public,
+      )!;
+      final relay = _FakeRelaySession()
+        ..historyEvents = [
+          for (var index = 0; index < 32; index += 1)
+            _readStateEvent(
+              pubkey: keychain.public,
+              crypto: crypto,
+              clientId: 'remote-$index',
+              slotId: 'slot-$index',
+              contexts: {'channel-$index': index + 1},
+              createdAt: index + 1,
+            ),
+        ];
+      final manager = ReadStateManager(
+        pubkey: keychain.public,
+        prefs: prefs,
+        crypto: crypto,
+        relaySession: relay,
+        signedEventRelay: _FakeSignedEventRelay(),
+        remoteEnabled: true,
+        onChanged: () {},
+      );
+      var initializationCompleted = false;
+
+      final initialization = manager.initialize().whenComplete(() {
+        initializationCompleted = true;
+      });
+      final eventLoopTurn = Completer<void>();
+      Timer.run(eventLoopTurn.complete);
+      await eventLoopTurn.future;
+
+      expect(
+        initializationCompleted,
+        isFalse,
+        reason:
+            'bulk NIP-44 decryption ran synchronously on the caller isolate',
+      );
+      await initialization;
+      expect(manager.effectiveContexts, hasLength(32));
+    },
+  );
 }
 
 class _SubmittedEvent {

@@ -2715,6 +2715,13 @@ class _FakeReadStateNotifier extends ReadStateNotifier {
   }
 
   @override
+  void seedContextsRead(Map<String, int> contexts) {
+    for (final entry in contexts.entries) {
+      seedContextRead(entry.key, entry.value);
+    }
+  }
+
+  @override
   void markContextRead(
     String contextId,
     int unixTimestamp, {

@@ -170,6 +170,18 @@ class ReadStateNotifier extends Notifier<ReadStateState> {
     }
   }
 
+  void markContextsRead(Map<String, int> contexts) {
+    if (contexts.isEmpty) return;
+    var removed = false;
+    for (final contextId in contexts.keys) {
+      removed = _forcedUnreadContexts.remove(contextId) != null || removed;
+    }
+    final changed = _manager?.markContextsRead(contexts) ?? false;
+    if (removed && !changed) {
+      _refreshForcedState();
+    }
+  }
+
   /// Force a context unread for the rest of the session. [contextId] is a
   /// channel id (channel-tile action) or a `msg:` key (message actions
   /// sheet); [channelId] is the channel the context belongs to, so tiles and
@@ -193,6 +205,10 @@ class ReadStateNotifier extends Notifier<ReadStateState> {
 
   void seedContextRead(String contextId, int unixTimestamp) {
     _manager?.seedContextRead(contextId, unixTimestamp);
+  }
+
+  void seedContextsRead(Map<String, int> contexts) {
+    _manager?.seedContextsRead(contexts);
   }
 
   void _emitManagerState(ReadStateManager manager) {

@@ -10974,6 +10974,66 @@ void main() {
       expect(observer.pushCount, initialPushCount + 1);
     });
 
+    testWidgets('marks a visible reply page in one read-state batch', (
+      tester,
+    ) async {
+      final rootEvent = _textMsg(
+        id: 'thread-root',
+        pubkey: 'alice',
+        content: 'Thread root',
+        createdAt: 1000,
+      );
+      final replies = [
+        for (var index = 0; index < 20; index += 1)
+          _textMsg(
+            id: 'reply-$index',
+            pubkey: 'bob',
+            content: 'Reply $index',
+            createdAt: 1001 + index,
+            extraTags: const [
+              ['e', 'thread-root', '', 'reply'],
+            ],
+          ),
+      ];
+      final readState = _SynchronousReadStateNotifier(
+        const ReadStateState(
+          isReady: true,
+          pubkey: 'self',
+          contexts: {},
+          version: 0,
+        ),
+      );
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [rootEvent],
+          threadReplies: {'thread-root': replies},
+          readStateNotifier: readState,
+        ),
+      );
+      await tester.pumpAndSettle();
+      final threadHead = formatTimeline([rootEvent]).single;
+
+      Navigator.of(tester.element(find.byType(ChannelDetailPage))).push(
+        MaterialPageRoute<void>(
+          builder: (_) => ThreadDetailPage(
+            threadHead: threadHead,
+            allMessages: [threadHead],
+            channelId: _channelId,
+            currentPubkey: 'self',
+            isMember: true,
+            isArchived: false,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(readState.batchMarkCalls, 1);
+      expect(
+        readState.markedContexts.keys.where((key) => key.startsWith('msg:')),
+        hasLength(20),
+      );
+    });
+
     testWidgets('thread shows day dividers when replies cross days', (
       tester,
     ) async {
@@ -14733,6 +14793,7 @@ class _FakeTypingNotifier extends ChannelTypingNotifier {
 class _SynchronousReadStateNotifier extends ReadStateNotifier {
   final ReadStateState _initialState;
   final Map<String, int> markedContexts = {};
+  int batchMarkCalls = 0;
 
   _SynchronousReadStateNotifier(this._initialState);
 
@@ -14747,6 +14808,17 @@ class _SynchronousReadStateNotifier extends ReadStateNotifier {
   }) {
     markedContexts[contextId] = unixTimestamp;
     state = state.copyWithContext(contextId, unixTimestamp);
+  }
+
+  @override
+  void markContextsRead(Map<String, int> contexts) {
+    batchMarkCalls += 1;
+    markedContexts.addAll(contexts);
+    var next = state;
+    for (final entry in contexts.entries) {
+      next = next.copyWithContext(entry.key, entry.value);
+    }
+    state = next;
   }
 }
 

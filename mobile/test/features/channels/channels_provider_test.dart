@@ -1709,6 +1709,41 @@ void main() {
     },
   );
 
+  test('bounds channel-history query batches before decoding', () async {
+    final channelIds = [
+      for (var index = 0; index < 17; index += 1) _generatedChannelId(index),
+    ];
+    final session = _FakeRelaySession(
+      memberships: [
+        for (final channelId in channelIds) _membership(channelId, myPk),
+      ],
+      metadata: [
+        for (final channelId in channelIds)
+          _meta(id: channelId, name: channelId),
+      ],
+    );
+    final container = _buildContainer(session: session);
+    addTearDown(container.dispose);
+
+    await container.read(channelsProvider.future);
+    await _waitUntil(
+      () =>
+          session.queryBatches
+              .where((batch) => batch.first.since != null)
+              .length ==
+          5,
+    );
+
+    final latestBatches = session.queryBatches
+        .where((batch) => batch.first.since == null)
+        .toList();
+    final unreadBatches = session.queryBatches
+        .where((batch) => batch.first.since != null)
+        .toList();
+    expect(latestBatches.map((batch) => batch.length), [16, 1]);
+    expect(unreadBatches.map((batch) => batch.length), [4, 4, 4, 4, 1]);
+  });
+
   test('ephemeral (TTL) channels appear in the list', () async {
     // Regression: previously the provider unconditionally dropped any channel
     // with a `ttl` tag, which made TTL channels invisible on iOS even when the

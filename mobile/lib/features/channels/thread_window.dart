@@ -17,12 +17,17 @@ class ThreadWindowPage {
   final ThreadPageCursor? nextCursor;
   final bool hasMore;
 
+  /// Whether this page came from a relay that does not implement the
+  /// view-shaped thread window extension.
+  final bool isLegacyFallback;
+
   const ThreadWindowPage({
     required this.startCursor,
     required this.events,
     this.threadSummaries = const {},
     required this.nextCursor,
     required this.hasMore,
+    this.isLegacyFallback = false,
   });
 }
 

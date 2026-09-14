@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:isolate';
 import 'dart:math';
 
 import 'package:flutter/foundation.dart';
@@ -11,6 +12,19 @@ import '../relay/relay.dart';
 import 'read_state_format.dart';
 import 'read_state_storage.dart';
 import 'read_state_time.dart';
+
+const _backgroundReadStateDecodeThreshold = 8;
+
+List<DecodedReadStateEvent> _decodeReadStateBatch(
+  ({List<NostrEvent> events, String pubkey, Uint8List conversationKey}) input,
+) => [
+  for (final event in input.events)
+    ?decodeReadStateEvent(
+      event,
+      pubkey: input.pubkey,
+      decrypt: (ciphertext) => nip44Decrypt(input.conversationKey, ciphertext),
+    ),
+];
 
 class ReadStateCrypto {
   final Uint8List conversationKey;
@@ -116,15 +130,50 @@ class ReadStateManager {
   }
 
   void markContextRead(String contextId, int unixTimestamp) {
-    _advanceContext(contextId, unixTimestamp, publishable: true);
-    _contextSourceCreatedAt[contextId] = max(
-      currentUnixSeconds(),
-      _maxFetchedCreatedAt + 1,
-    );
+    markContextsRead({contextId: unixTimestamp});
+  }
+
+  bool markContextsRead(Map<String, int> contexts) {
+    if (_disposed || contexts.isEmpty) return false;
+    final sourceCreatedAt = max(currentUnixSeconds(), _maxFetchedCreatedAt + 1);
+    var stateChanged = false;
+    var storageChanged = false;
+    for (final entry in contexts.entries) {
+      if (entry.value < 0) continue;
+      if (_applyContextTimestamp(entry.key, entry.value, publishable: true)) {
+        stateChanged = true;
+        storageChanged = true;
+      }
+      if (_contextSourceCreatedAt[entry.key] != sourceCreatedAt) {
+        _contextSourceCreatedAt[entry.key] = sourceCreatedAt;
+        storageChanged = true;
+      }
+    }
+    if (storageChanged) _persistLocalState();
+    if (stateChanged) {
+      _onChanged();
+      _schedulePublish();
+    }
+    return stateChanged;
   }
 
   void seedContextRead(String contextId, int unixTimestamp) {
-    _advanceContext(contextId, unixTimestamp, publishable: false);
+    seedContextsRead({contextId: unixTimestamp});
+  }
+
+  bool seedContextsRead(Map<String, int> contexts) {
+    if (_disposed || contexts.isEmpty) return false;
+    var changed = false;
+    for (final entry in contexts.entries) {
+      if (_applyContextTimestamp(entry.key, entry.value, publishable: false)) {
+        changed = true;
+      }
+    }
+    if (changed) {
+      _persistLocalState();
+      _onChanged();
+    }
+    return changed;
   }
 
   Future<void> flush() async {
@@ -169,35 +218,28 @@ class ReadStateManager {
     _unsubscribeLive = null;
   }
 
-  void _advanceContext(
+  bool _applyContextTimestamp(
     String contextId,
     int unixTimestamp, {
     required bool publishable,
   }) {
-    if (_disposed || unixTimestamp < 0) return;
+    if (_disposed || unixTimestamp < 0) return false;
 
     final current = _effectiveState[contextId] ?? 0;
     if (unixTimestamp <= current) {
       if (!publishable || _publishableContextIds.contains(contextId)) {
-        return;
+        return false;
       }
 
       _publishableContextIds.add(contextId);
-      _persistLocalState();
-      _onChanged();
-      _schedulePublish();
-      return;
+      return true;
     }
 
     _effectiveState[contextId] = unixTimestamp;
     if (publishable) {
       _publishableContextIds.add(contextId);
     }
-    _persistLocalState();
-    _onChanged();
-    if (publishable) {
-      _schedulePublish();
-    }
+    return true;
   }
 
   Future<void> _fetchAndMerge() async {
@@ -213,7 +255,7 @@ class ReadStateManager {
           limit: readStateFetchLimit,
         ),
       );
-      _mergeEvents(events);
+      await _mergeEvents(events);
       _persistLocalState();
       _onChanged();
     } catch (e) {
@@ -221,17 +263,20 @@ class ReadStateManager {
     }
   }
 
-  void _mergeEvents(List<NostrEvent> events) {
+  Future<void> _mergeEvents(List<NostrEvent> events) async {
+    final input = (
+      events: events,
+      pubkey: pubkey,
+      conversationKey: _crypto.conversationKey,
+    );
+    final decodedEvents = events.length >= _backgroundReadStateDecodeThreshold
+        ? await Isolate.run(() => _decodeReadStateBatch(input))
+        : _decodeReadStateBatch(input);
     ReadStateBlob? ownBlob;
     var ownBlobCreatedAt = 0;
 
-    for (final event in events) {
-      final decoded = decodeReadStateEvent(
-        event,
-        pubkey: pubkey,
-        decrypt: _crypto.decrypt,
-      );
-      if (decoded == null) continue;
+    for (final decoded in decodedEvents) {
+      final event = decoded.event;
 
       if (_isPlausibleCreatedAt(event.createdAt)) {
         _maxFetchedCreatedAt = max(_maxFetchedCreatedAt, event.createdAt);
@@ -467,7 +512,7 @@ class ReadStateManager {
           limit: readStateFetchLimit,
         ),
       );
-      _mergeEvents(events);
+      await _mergeEvents(events);
       _persistLocalState();
       if (!_disposed) {
         _onChanged();

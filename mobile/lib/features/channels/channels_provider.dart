@@ -29,6 +29,8 @@ part 'channels_provider_lifecycle.dart';
 
 const _channelTypeOrder = {'stream': 0, 'forum': 1, 'dm': 2};
 const _unreadCatchUpLimit = 1000;
+const _latestMessageFilterBatchSize = 16;
+const _unreadFilterBatchSize = 4;
 const _participatedRootIdsPrefix = 'buzz-thread-participation.v1';
 const _authoredRootIdsPrefix = 'buzz-thread-authored.v1';
 
@@ -465,6 +467,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       session,
       filters,
       operation: 'latest-message query',
+      filterBatchSize: _latestMessageFilterBatchSize,
     );
   }
 
@@ -472,24 +475,68 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     RelaySessionNotifier session,
     List<NostrFilter> filters, {
     required String operation,
+    required int filterBatchSize,
   }) async {
     if (filters.isEmpty) return const [];
+    if (filters.length <= filterBatchSize) {
+      try {
+        return await session.queryRelay(filters);
+      } catch (error) {
+        _logChannelHistoryFallback(operation, error);
+        return _fetchChannelHistoryFallback(session, filters);
+      }
+    }
+    final events = <NostrEvent>[];
+    for (var start = 0; start < filters.length; start += filterBatchSize) {
+      final end = min(start + filterBatchSize, filters.length);
+      events.addAll(
+        await _fetchChannelHistoryPage(
+          session,
+          filters.sublist(start, end),
+          operation: operation,
+        ),
+      );
+    }
+    return events;
+  }
 
+  Future<List<NostrEvent>> _fetchChannelHistoryPage(
+    RelaySessionNotifier session,
+    List<NostrFilter> filters, {
+    required String operation,
+  }) async {
     try {
       return await session.queryRelay(filters);
     } catch (error) {
-      debugPrint(
-        '[ChannelsNotifier] batched $operation failed; '
-        'using bounded websocket fallback: $error',
-      );
+      _logChannelHistoryFallback(operation, error);
+      return _fetchChannelHistoryFallback(session, filters);
     }
+  }
 
+  void _logChannelHistoryFallback(String operation, Object error) {
+    debugPrint(
+      '[ChannelsNotifier] batched $operation failed; '
+      'using bounded websocket fallback: $error',
+    );
+  }
+
+  Future<List<NostrEvent>> _fetchChannelHistoryFallback(
+    RelaySessionNotifier session,
+    List<NostrFilter> filters,
+  ) async {
     const fallbackConcurrency = 4;
-    final events = <NostrEvent>[];
-    for (var start = 0; start < filters.length; start += fallbackConcurrency) {
-      final end = min(start + fallbackConcurrency, filters.length);
+    final page = <NostrEvent>[];
+    for (
+      var fallbackStart = 0;
+      fallbackStart < filters.length;
+      fallbackStart += fallbackConcurrency
+    ) {
+      final fallbackEnd = min(
+        fallbackStart + fallbackConcurrency,
+        filters.length,
+      );
       final results = await Future.wait(
-        filters.sublist(start, end).map((filter) async {
+        filters.sublist(fallbackStart, fallbackEnd).map((filter) async {
           try {
             return await session.fetchHistory(filter);
           } catch (_) {
@@ -498,10 +545,10 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
         }),
       );
       for (final result in results) {
-        events.addAll(result);
+        page.addAll(result);
       }
     }
-    return events;
+    return page;
   }
 
   /// Build a [Channel] from a kind:39000 metadata event.
@@ -608,52 +655,65 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     ];
 
     try {
-      final events = await _fetchChannelHistoryBatch(
-        session,
-        filters,
-        operation: 'unread catch-up',
-      );
-      // The relay round-trip above is the window Jed's probes park in: a newer
-      // refresh, a community switch or an identity switch here means every
-      // write below belongs to a channel list the user has left.
-      if (!ref.mounted || _isCatchUpRetired(fence, subscriptionGeneration)) {
-        return;
-      }
-
-      for (final event in events) {
-        if (event.pubkey.toLowerCase() == myPk.toLowerCase()) {
-          _recordSelfThreadInterest(event, myPk);
-        }
-      }
-
       var recorded = false;
-      for (final event in events) {
-        final channelId = event.channelId;
-        if (channelId == null) continue;
-        final channel = channelById[channelId];
-        if (channel == null) continue;
-        final readAt = readAtByChannel[channelId];
-        if (event.pubkey.toLowerCase() == myPk.toLowerCase()) continue;
-        if (readAt != null && event.createdAt <= readAt) continue;
-        if (!shouldNotifyForEvent(
-          event,
-          myPk,
-          participatedRootIds: _participatedRootIds,
-          followedRootIds: _followedRootIds(),
-          authoredRootIds: _authoredRootIds,
-          mutedChannelIds: mutedChannelIds,
-          channelId: channel.id,
-        )) {
-          continue;
+      for (
+        var start = 0;
+        start < filters.length;
+        start += _unreadFilterBatchSize
+      ) {
+        final end = min(start + _unreadFilterBatchSize, filters.length);
+        final events = filters.length <= _unreadFilterBatchSize
+            ? await _fetchChannelHistoryBatch(
+                session,
+                filters,
+                operation: 'unread catch-up',
+                filterBatchSize: _unreadFilterBatchSize,
+              )
+            : await _fetchChannelHistoryPage(
+                session,
+                filters.sublist(start, end),
+                operation: 'unread catch-up',
+              );
+        // Every page is an await boundary. A newer refresh, community switch
+        // or identity switch means the page belongs to a list the user left.
+        if (!ref.mounted || _isCatchUpRetired(fence, subscriptionGeneration)) {
+          return;
         }
-        _recordUnreadEvent(channel, event, myPk);
-        recorded = true;
+
+        var threadInterestChanged = false;
+        for (final event in events) {
+          if (event.pubkey.toLowerCase() == myPk.toLowerCase()) {
+            threadInterestChanged =
+                _recordSelfThreadInterest(event, myPk, persist: false) ||
+                threadInterestChanged;
+          }
+        }
+        if (threadInterestChanged) _writeThreadInterestStores(myPk);
+
+        for (final event in events) {
+          final channelId = event.channelId;
+          if (channelId == null) continue;
+          final channel = channelById[channelId];
+          if (channel == null) continue;
+          final readAt = readAtByChannel[channelId];
+          if (event.pubkey.toLowerCase() == myPk.toLowerCase()) continue;
+          if (readAt != null && event.createdAt <= readAt) continue;
+          if (!shouldNotifyForEvent(
+            event,
+            myPk,
+            participatedRootIds: _participatedRootIds,
+            followedRootIds: _followedRootIds(),
+            authoredRootIds: _authoredRootIds,
+            mutedChannelIds: mutedChannelIds,
+            channelId: channel.id,
+          )) {
+            continue;
+          }
+          _recordUnreadEvent(channel, event, myPk);
+          recorded = true;
+        }
       }
-      // Republish only when this catch-up actually changed unread state. A
-      // batch that recorded nothing has nothing to show, and a failed or
-      // superseded batch must not repaint another refresh's list: the retired
-      // check above already returned in that case, and no await separates it
-      // from here, so a second check would be dead code.
+      // Republish only when this catch-up actually changed unread state.
       if (recorded) {
         state = state.whenData((channels) => List<Channel>.of(channels));
       }
@@ -734,12 +794,17 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     }
   }
 
-  void _recordSelfThreadInterest(NostrEvent event, String pubkey) {
+  bool _recordSelfThreadInterest(
+    NostrEvent event,
+    String pubkey, {
+    bool persist = true,
+  }) {
     final ref = event.threadReference;
     final target = ref.rootId != null ? _participatedRootIds : _authoredRootIds;
     final id = ref.rootId ?? event.id;
-    if (!target.add(id)) return;
-    _writeThreadInterestStores(pubkey);
+    if (!target.add(id)) return false;
+    if (persist) _writeThreadInterestStores(pubkey);
+    return true;
   }
 
   void _writeThreadInterestStores(String pubkey) {

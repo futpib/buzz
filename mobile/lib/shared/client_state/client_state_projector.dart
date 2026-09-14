@@ -77,15 +77,17 @@ Map<String, Object?> applyClientStateEvents(
   database.execute('BEGIN IMMEDIATE');
   try {
     _ensureScope(database, scope);
+    final invalidations = _ProjectionInvalidations();
     var inserted = 0;
     var duplicates = 0;
     for (final event in events) {
-      if (_insertEvent(database, scope, viewerPubkey, event)) {
+      if (_insertEvent(database, scope, viewerPubkey, event, invalidations)) {
         inserted += 1;
       } else {
         duplicates += 1;
       }
     }
+    invalidations.flush(database, scope, viewerPubkey);
     if (inserted > 0) {
       database.execute(
         'UPDATE projection_meta SET revision=revision+1 WHERE scope=?',
@@ -99,6 +101,9 @@ Map<String, Object?> applyClientStateEvents(
       'duplicates': duplicates,
       'ignored': ignored,
       'revision': revision,
+      'thread_rebuilds': invalidations.threadRoots.length,
+      'unread_recomputes': invalidations.unreadChannels.length,
+      'channel_rollups': invalidations.channelRollups.length,
     };
   } catch (_) {
     _rollback(database);
@@ -184,6 +189,7 @@ bool _insertEvent(
   String scope,
   String viewerPubkey,
   _ProjectedEvent event,
+  _ProjectionInvalidations invalidations,
 ) {
   final channelId = event.kind == 39000 || event.kind == 39002
       ? event.firstTag('d')
@@ -235,19 +241,19 @@ bool _insertEvent(
 
   switch (event.kind) {
     case 39000:
-      _projectChannelMetadata(database, scope, event);
+      _projectChannelMetadata(database, scope, event, invalidations);
     case 39002:
       _projectMembership(database, scope, viewerPubkey, event);
     case 5:
     case 9005:
-      _projectDeletion(database, scope, viewerPubkey, event);
+      _projectDeletion(database, scope, viewerPubkey, event, invalidations);
     case 40003:
       _projectEdit(database, scope, event);
     case 7:
       _projectReaction(database, scope, event);
     default:
       if (_messageKinds.contains(event.kind)) {
-        _projectMessage(database, scope, viewerPubkey, event);
+        _projectMessage(database, scope, viewerPubkey, event, invalidations);
       }
   }
   return true;
@@ -257,6 +263,7 @@ void _projectChannelMetadata(
   Database database,
   String scope,
   _ProjectedEvent event,
+  _ProjectionInvalidations invalidations,
 ) {
   final channelId = event.firstTag('d');
   if (channelId == null) return;
@@ -312,7 +319,7 @@ void _projectChannelMetadata(
       membership?['created_at'],
     ],
   );
-  _refreshChannelRollup(database, scope, channelId);
+  invalidations.channelRollups.add(channelId);
 }
 
 void _projectMembership(
@@ -364,6 +371,7 @@ void _projectMessage(
   String scope,
   String viewerPubkey,
   _ProjectedEvent event,
+  _ProjectionInvalidations invalidations,
 ) {
   final channelId = event.firstTag('h');
   if (channelId == null) return;
@@ -387,8 +395,8 @@ void _projectMessage(
     );
   }
   _replaceSearchRow(database, scope, event.id);
-  if (rootId != null) _rebuildThreadSummary(database, scope, rootId);
-  _refreshChannelRollup(database, scope, channelId);
+  if (rootId != null) invalidations.threadRoots.add(rootId);
+  invalidations.channelRollups.add(channelId);
 }
 
 void _projectEdit(Database database, String scope, _ProjectedEvent event) {
@@ -445,6 +453,7 @@ void _projectDeletion(
   String scope,
   String viewerPubkey,
   _ProjectedEvent event,
+  _ProjectionInvalidations invalidations,
 ) {
   for (final targetId in event.tagValues('e')) {
     if (!_isHexId(targetId)) continue;
@@ -485,15 +494,15 @@ void _projectDeletion(
       _rebuildEdit(database, scope, target['target_id'] as String);
     }
     if (kind == 39000 && channelId != null) {
-      _rebuildChannelMetadata(database, scope, channelId);
+      _rebuildChannelMetadata(database, scope, channelId, invalidations);
     }
     if (kind == 39002 && channelId != null) {
       _rebuildMembership(database, scope, channelId, viewerPubkey);
     }
-    if (rootId != null) _rebuildThreadSummary(database, scope, rootId);
+    if (rootId != null) invalidations.threadRoots.add(rootId);
     if (channelId != null) {
-      _recomputeUnread(database, scope, viewerPubkey, channelId);
-      _refreshChannelRollup(database, scope, channelId);
+      invalidations.unreadChannels.add(channelId);
+      invalidations.channelRollups.add(channelId);
     }
   }
 }
@@ -532,6 +541,7 @@ void _rebuildChannelMetadata(
   Database database,
   String scope,
   String channelId,
+  _ProjectionInvalidations invalidations,
 ) {
   database.execute('DELETE FROM channels WHERE scope=? AND channel_id=?', [
     scope,
@@ -548,7 +558,26 @@ void _rebuildChannelMetadata(
       database,
       scope,
       _ProjectedEvent.fromRow(candidates.first),
+      invalidations,
     );
+  }
+}
+
+class _ProjectionInvalidations {
+  final Set<String> threadRoots = {};
+  final Set<String> unreadChannels = {};
+  final Set<String> channelRollups = {};
+
+  void flush(Database database, String scope, String viewerPubkey) {
+    for (final rootId in threadRoots) {
+      _rebuildThreadSummary(database, scope, rootId);
+    }
+    for (final channelId in unreadChannels) {
+      _recomputeUnread(database, scope, viewerPubkey, channelId);
+    }
+    for (final channelId in channelRollups) {
+      _refreshChannelRollup(database, scope, channelId);
+    }
   }
 }
 

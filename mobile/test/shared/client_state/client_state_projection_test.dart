@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:buzz/shared/client_state/client_state_projection.dart';
 import 'package:buzz/shared/client_state/client_state_database.dart';
+import 'package:buzz/shared/client_state/client_state_projector.dart';
 import 'package:buzz/shared/client_state/client_state_worker.dart';
 import 'package:buzz/shared/relay/nostr_models.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -542,6 +543,51 @@ void main() {
       await lane.close();
     },
   );
+
+  test('rebuilds one thread and channel once per projection batch', () {
+    final viewerPubkey = _pubkey(_viewerSecret);
+    final scope = 'https://relay.test\n$viewerPubkey';
+    final root = _signed(
+      _authorSecret,
+      kind: 9,
+      createdAt: 100,
+      tags: const [
+        ['h', _channelId],
+      ],
+    );
+    final replies = [
+      for (var index = 0; index < 128; index += 1)
+        _signed(
+          _authorSecret,
+          kind: 9,
+          createdAt: 101 + index,
+          content: 'reply $index',
+          tags: [
+            ['h', _channelId],
+            ['e', root.id, '', 'root'],
+            ['e', root.id, '', 'reply'],
+          ],
+        ),
+    ];
+    final database = initializeClientStateDatabase(databasePath);
+    addTearDown(database.close);
+
+    final result = applyClientStateEvents(database, scope, viewerPubkey, [
+      root,
+      ...replies,
+    ]);
+
+    expect(result['inserted'], 129);
+    expect(result['thread_rebuilds'], 1);
+    expect(result['channel_rollups'], 1);
+    expect(
+      database.select(
+        'SELECT reply_count FROM thread_summaries WHERE scope=? AND root_id=?',
+        [scope, root.id],
+      ).single['reply_count'],
+      128,
+    );
+  });
 
   test(
     'bounds a 5k warm channel before crossing the isolate boundary',

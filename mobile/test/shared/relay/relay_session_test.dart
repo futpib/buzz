@@ -105,6 +105,39 @@ void main() {
     );
   });
 
+  test('queryRelay decodes a large response off the caller isolate', () async {
+    final event = {
+      'id': '0' * 64,
+      'pubkey': '1' * 64,
+      'created_at': 1,
+      'kind': 9,
+      'tags': <List<String>>[],
+      'content': 'x' * 1024,
+      'sig': '2' * 128,
+    };
+    final body = jsonEncode([for (var i = 0; i < 2000; i += 1) event]);
+    final harness = _queryHarness(
+      gate: RelayRateLimitGate(),
+      client: http_testing.MockClient((_) async => http.Response(body, 200)),
+    );
+    addTearDown(harness.container.dispose);
+    var queryCompleted = false;
+
+    final query = harness.session.queryRelay(const []).whenComplete(() {
+      queryCompleted = true;
+    });
+    final eventLoopTurn = Completer<void>();
+    Timer.run(eventLoopTurn.complete);
+    await eventLoopTurn.future;
+
+    expect(
+      queryCompleted,
+      isFalse,
+      reason: 'large JSON was decoded synchronously on the caller isolate',
+    );
+    expect(await query, hasLength(2000));
+  });
+
   test('queryRelay rotates the client after a timeout', () async {
     final clients = <_ControlledHttpClient>[];
     final session = RelaySessionNotifier(

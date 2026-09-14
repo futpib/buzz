@@ -721,11 +721,9 @@ class ThreadDetailPage extends HookConsumerWidget {
     useEffect(() {
       if (!readState.isReady || replies.isEmpty) return null;
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        for (final reply in replies) {
-          ref
-              .read(readStateProvider.notifier)
-              .markContextRead(msgContextKey(reply.id), reply.createdAt);
-        }
+        ref.read(readStateProvider.notifier).markContextsRead({
+          for (final reply in replies) msgContextKey(reply.id): reply.createdAt,
+        });
       });
       return null;
     }, [threadHead.id, readState.isReady, visibleReplyReadKey]);

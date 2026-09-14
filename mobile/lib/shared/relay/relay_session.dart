@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:isolate';
 import 'dart:math';
 
 import 'package:http/http.dart' as http;
@@ -70,6 +71,44 @@ class _BufferedEvent {
   final NostrEvent event;
 
   _BufferedEvent(this.subId, this.event);
+}
+
+const _backgroundQueryDecodeThresholdBytes = 64 * 1024;
+
+typedef _RelayQueryDecodeResult = ({List<NostrEvent>? events, String? error});
+
+_RelayQueryDecodeResult _decodeRelayQueryBytes(List<int> bodyBytes) {
+  try {
+    final decoded = jsonDecode(utf8.decode(bodyBytes));
+    if (decoded is! List) {
+      return (events: null, error: 'relay returned malformed query response');
+    }
+    return (
+      events: [
+        for (final eventJson in decoded)
+          if (eventJson is Map<String, dynamic>)
+            NostrEvent.fromJson(eventJson)
+          else
+            throw const FormatException('relay returned malformed query event'),
+      ],
+      error: null,
+    );
+  } catch (error) {
+    return (
+      events: null,
+      error: error is FormatException
+          ? error.message
+          : 'relay returned malformed query event: $error',
+    );
+  }
+}
+
+Future<List<NostrEvent>> _decodeRelayQueryResponse(List<int> bodyBytes) async {
+  final result = bodyBytes.length >= _backgroundQueryDecodeThresholdBytes
+      ? await Isolate.run(() => _decodeRelayQueryBytes(bodyBytes))
+      : _decodeRelayQueryBytes(bodyBytes);
+  if (result.error case final error?) throw FormatException(error);
+  return result.events!;
 }
 
 class RelaySessionNotifier extends Notifier<SessionState> {
@@ -185,24 +224,9 @@ class RelaySessionNotifier extends Notifier<SessionState> {
       _activateRateLimitGateFromHttpError(response.body);
       throw RelayException(response.statusCode, response.body);
     }
-    final decoded = jsonDecode(response.body);
-    if (decoded is! List) {
-      throw const FormatException('relay returned malformed query response');
-    }
-    try {
-      final events = [
-        for (final eventJson in decoded)
-          if (eventJson is Map<String, dynamic>)
-            NostrEvent.fromJson(eventJson)
-          else
-            throw const FormatException('relay returned malformed query event'),
-      ];
-      unawaited(ClientStateProjection.instance.applyEvents(events));
-      return events;
-    } catch (error) {
-      if (error is FormatException) rethrow;
-      throw FormatException('relay returned malformed query event: $error');
-    }
+    final events = await _decodeRelayQueryResponse(response.bodyBytes);
+    unawaited(ClientStateProjection.instance.applyEvents(events));
+    return events;
   }
 
   void _activateRateLimitGateFromHttpError(String body) {

@@ -37,13 +37,6 @@ class ThreadRepliesArgs {
   int get hashCode => Object.hash(channelId, rootId, threadHeadId);
 }
 
-class _ThreadCursor {
-  final int createdAt;
-  final String eventId;
-
-  const _ThreadCursor({required this.createdAt, required this.eventId});
-}
-
 ThreadRepliesArgs _localReplyArgs(ThreadRepliesArgs args) =>
     ThreadRepliesArgs(channelId: args.channelId, rootId: args.rootId);
 
@@ -58,7 +51,7 @@ final projectedThreadEventsProvider = FutureProvider.autoDispose
     );
 
 /// The authoritative newest thread page. Modern relays return a bounded
-/// view-shaped window; older relays fall back to the complete replay query.
+/// view-shaped window; older relays fall back to bounded NIP-01 pages.
 final threadWindowProvider = FutureProvider.autoDispose
     .family<ThreadWindowPage, ThreadRepliesArgs>((ref, args) async {
       // A reply missed while the socket is stale cannot invalidate this
@@ -100,20 +93,19 @@ final threadWindowProvider = FutureProvider.autoDispose
         return page;
       }
       debugPrint(
-        '[threadWindowProvider] view-shaped thread window unavailable; falling back',
+        '[threadWindowProvider] view-shaped thread window unavailable; '
+        'using bounded legacy pages',
       );
-      final legacy = await _fetchLegacyThread(
-        session,
-        args,
-        firstResponse: firstResponse,
-      );
-      confirmAuthoritative(legacy);
-      return ThreadWindowPage(
+      final legacyResponse = args.threadHeadId == args.rootId
+          ? firstResponse
+          : await session.queryRelay([_legacyThreadFilter(args, null)]);
+      final legacy = _parseLegacyThreadPage(
+        legacyResponse,
         startCursor: null,
-        events: legacy,
-        nextCursor: null,
-        hasMore: false,
+        pageSize: _threadWindowPageSize,
       );
+      confirmAuthoritative(legacy.events);
+      return legacy;
     });
 
 class ThreadReplyPageEvents extends ListBase<NostrEvent> {
@@ -195,6 +187,7 @@ class ThreadReplyPaginationNotifier
         ref.read(relaySessionProvider.notifier),
         args,
         cursor,
+        legacyFallback: tail.isLegacyFallback,
       );
       state = ThreadReplyPaginationState(
         olderPages: [...state.olderPages, page],
@@ -243,7 +236,8 @@ String? _threadHeadKey(List<NostrEvent>? events) {
       .map((event) => event.id)
       .join(',');
   final cursor = window.nextCursor;
-  return '$ids|${cursor?.createdAt}:${cursor?.eventId}|${window.hasMore}';
+  return '$ids|${cursor?.createdAt}:${cursor?.eventId}|${window.hasMore}|'
+      '${window.isLegacyFallback}';
 }
 
 List<NostrEvent> _retainedPaginationEvents(
@@ -270,11 +264,24 @@ Map<String, ChannelWindowThreadSummary> threadReplySummaries(
 Future<ThreadWindowPage> _fetchThreadWindowPage(
   RelaySessionNotifier session,
   ThreadRepliesArgs args,
-  ThreadPageCursor cursor,
-) async {
+  ThreadPageCursor cursor, {
+  required bool legacyFallback,
+}) async {
+  final pageSize = legacyFallback
+      ? _legacyThreadPageSize
+      : _threadWindowPageSize;
   final response = await session.queryRelay([
-    _threadWindowFilter(args, cursor),
+    legacyFallback
+        ? _legacyThreadFilter(args, cursor)
+        : _threadWindowFilter(args, cursor),
   ]);
+  if (!response.any((event) => event.kind == EventKind.channelWindowBounds)) {
+    return _parseLegacyThreadPage(
+      response,
+      startCursor: cursor,
+      pageSize: pageSize,
+    );
+  }
   return parseThreadWindowResponse(
     response,
     channelId: args.channelId,
@@ -298,54 +305,44 @@ NostrFilter _threadWindowFilter(
   extensions: {
     'thread_window': true,
     'include_aux': true,
-    'depth_limit': 64,
     'thread_parent': args.threadHeadId,
     if (cursor != null) 'before_id': cursor.eventId,
   },
 );
 
-Future<List<NostrEvent>> _fetchLegacyThread(
-  RelaySessionNotifier session,
-  ThreadRepliesArgs args, {
-  required List<NostrEvent> firstResponse,
-}) async {
-  final replies = firstResponse
-      .where(
-        (event) => EventKind.channelTimelineContentKinds.contains(event.kind),
-      )
-      .toList();
-  if (replies.length < _threadWindowPageSize) return replies;
-
-  var last = replies.last;
-  var cursor = _ThreadCursor(createdAt: last.createdAt, eventId: last.id);
-  for (var page = 0; page < 500; page++) {
-    final events = await session.queryRelay([
-      _threadRepliesFilter(args, cursor),
-    ]);
-    replies.addAll(events);
-    if (events.length < _legacyThreadPageSize) return replies;
-    last = events.last;
-    cursor = _ThreadCursor(createdAt: last.createdAt, eventId: last.id);
-  }
-  throw Exception('Thread ${args.rootId} exceeded the page safety limit.');
-}
-
-NostrFilter _threadRepliesFilter(
+NostrFilter _legacyThreadFilter(
   ThreadRepliesArgs args,
-  _ThreadCursor? cursor,
-) {
-  return NostrFilter(
-    kinds: EventKind.channelTimelineContentKinds,
-    tags: {
-      '#e': [args.rootId],
-      '#h': [args.channelId],
-    },
-    limit: 200,
-    extensions: {
-      'depth_limit': 64,
-      if (cursor != null) 'thread_cursor': cursor.createdAt,
-      if (cursor != null) 'thread_cursor_id': cursor.eventId,
-    },
+  ThreadPageCursor? cursor,
+) => NostrFilter(
+  kinds: EventKind.channelTimelineContentKinds,
+  tags: {
+    '#e': [args.threadHeadId],
+    '#h': [args.channelId],
+  },
+  limit: cursor == null ? _threadWindowPageSize : _legacyThreadPageSize,
+  until: cursor?.createdAt,
+  extensions: {if (cursor != null) 'before_id': cursor.eventId},
+);
+
+ThreadWindowPage _parseLegacyThreadPage(
+  List<NostrEvent> response, {
+  required ThreadPageCursor? startCursor,
+  required int pageSize,
+}) {
+  final events = [
+    for (final event in response)
+      if (EventKind.channelTimelineContentKinds.contains(event.kind)) event,
+  ];
+  final last = events.isEmpty ? null : events.last;
+  final hasMore = response.length >= pageSize && last != null;
+  return ThreadWindowPage(
+    startCursor: startCursor,
+    events: events,
+    nextCursor: hasMore
+        ? ThreadPageCursor(createdAt: last.createdAt, eventId: last.id)
+        : null,
+    hasMore: hasMore,
+    isLegacyFallback: true,
   );
 }
 
