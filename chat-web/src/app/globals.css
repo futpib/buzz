@@ -749,7 +749,7 @@ a {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  margin: 5px 0 0 10px;
+  margin: 5px 0 0;
   padding: 0;
   border: 0;
   background: transparent;
@@ -758,8 +758,8 @@ a {
   font-weight: 650;
 }
 
-.message-reply-action:first-of-type {
-  margin-left: 0;
+.message-reply-action-after-thread {
+  margin-left: 10px;
 }
 
 .message-reply-action:hover {

@@ -90,7 +90,11 @@ export function MessageRow({
         ) : null}
         {onReply ? (
           <button
-            className="message-reply-action"
+            className={
+              !hideThreadLink && message.replyCount > 0
+                ? "message-reply-action message-reply-action-after-thread"
+                : "message-reply-action"
+            }
             onClick={onReply}
             type="button"
           >
