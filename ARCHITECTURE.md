@@ -96,6 +96,22 @@ buzz-test-client    (integration test harness + manual CLI)
 
 **Key architectural principle:** The relay is the single source of truth. `buzz-relay` orchestrates all subsystems by calling them directly — it imports `buzz-db`, `buzz-auth`, `buzz-pubsub`, `buzz-search`, `buzz-audit`, and `buzz-workflow`. However, those subsystems are isolated from each other: `buzz-workflow` never calls `buzz-pubsub`, `buzz-search` never calls `buzz-db`, etc. Cross-subsystem coordination happens only through the relay. In multi-community mode, the relay also owns propagation of `TenantContext`; service crates should receive community-scoped inputs rather than independently deriving tenancy from client-controlled event tags.
 
+### Server-rendered chat web client
+
+`chat-web/` is the Next.js messaging surface. It runs as a Node server beside
+the relay and acts as a backend-for-frontend: server components and route
+handlers make authenticated relay requests, consume the relay's channel and
+thread window projections, and return view-shaped channel/message/thread data.
+Raw Nostr events and signing keys never cross the browser boundary. The browser
+hydrates server-rendered markup and receives complete projected snapshots over
+SSE after the server's authenticated NIP-42 subscription observes a change.
+
+The deployment is intentionally single-identity. `BUZZ_PRIVATE_KEY` and the
+optional `BUZZ_AUTH_TAG` belong to the server process, and every rendered read
+and signed mutation is scoped to that identity. A shared or multi-user
+deployment needs a separate identity/session design; it must not expose one
+server signer to unrelated users.
+
 ---
 
 ## 2. The Protocol

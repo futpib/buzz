@@ -1,0 +1,31 @@
+{
+  "name": "buzz-chat-web",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test 'src/**/*.test.ts'",
+    "lint": "biome lint .",
+    "check": "biome check . && pnpm typecheck && pnpm test"
+  },
+  "dependencies": {
+    "lucide-react": "^1.0.0",
+    "next": "16.3.5",
+    "nostr-tools": "^2.23.3",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1",
+    "server-only": "^0.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.0",
+    "@types/react": "^19.1.8",
+    "@types/react-dom": "^19.1.6",
+    "tsx": "^4.20.6",
+    "typescript": "~6.0.0"
+  }
+}

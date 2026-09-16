@@ -85,6 +85,7 @@ crates/
 
 desktop/              # Tauri 2 + React 19 desktop app
 web/                  # Browser web client (repo browser, served by the relay)
+chat-web/             # Next.js server-rendered messaging client (relay-backed BFF)
 mobile/               # Flutter mobile app
 migrations/           # SQL migrations (auto-applied on relay startup)
 scripts/              # Dev tooling

@@ -1,0 +1,151 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+
+import {
+  projectChannels,
+  projectProfiles,
+  projectThread,
+  projectTimeline,
+} from "./projector";
+import type { NostrEvent } from "./types";
+
+function event(
+  id: string,
+  kind: number,
+  content: string,
+  tags: string[][],
+  pubkey = "a".repeat(64),
+  createdAt = 10,
+): NostrEvent {
+  return {
+    id: id.padEnd(64, "0"),
+    kind,
+    content,
+    tags,
+    pubkey,
+    created_at: createdAt,
+    sig: "f".repeat(128),
+  };
+}
+
+test("projects only channels whose latest roster includes the viewer", () => {
+  const viewer = "a".repeat(64);
+  const events = [
+    event("membership", 39002, "", [
+      ["d", "channel-a"],
+      ["p", viewer],
+    ]),
+    event("metadata", 39000, "", [
+      ["d", "channel-a"],
+      ["name", "general"],
+      ["t", "stream"],
+      ["public"],
+    ]),
+  ];
+  assert.deepEqual(projectChannels(events, viewer), [
+    {
+      id: "channel-a",
+      name: "general",
+      description: "",
+      type: "stream",
+      visibility: "public",
+      archived: false,
+    },
+  ]);
+});
+
+test("applies server-side edits, deletions, reactions, and thread summaries", () => {
+  const viewer = "a".repeat(64);
+  const other = "b".repeat(64);
+  const root = event("root", 9, "before", [["h", "channel-a"]], other, 20);
+  const removed = event("removed", 9, "gone", [["h", "channel-a"]], other, 21);
+  const edit = event(
+    "edit",
+    40003,
+    "after",
+    [
+      ["h", "channel-a"],
+      ["e", root.id],
+    ],
+    other,
+    22,
+  );
+  const reaction = event(
+    "reaction",
+    7,
+    "🔥",
+    [
+      ["h", "channel-a"],
+      ["e", root.id],
+    ],
+    viewer,
+    23,
+  );
+  const deletion = event(
+    "deletion",
+    5,
+    "",
+    [
+      ["h", "channel-a"],
+      ["e", removed.id],
+    ],
+    other,
+    24,
+  );
+  const summary = event(
+    "summary",
+    39005,
+    JSON.stringify({ reply_count: 3, last_reply_at: 25 }),
+    [
+      ["h", "channel-a"],
+      ["e", root.id],
+      ["d", root.id],
+    ],
+    "c".repeat(64),
+    25,
+  );
+  const profiles = projectProfiles([
+    event("profile", 0, JSON.stringify({ display_name: "Bob" }), [], other),
+  ]);
+  const rows = projectTimeline(
+    [root, removed, edit, reaction, deletion, summary],
+    "channel-a",
+    profiles,
+    viewer,
+  );
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].content, "after");
+  assert.equal(rows[0].author.name, "Bob");
+  assert.equal(rows[0].replyCount, 3);
+  assert.deepEqual(rows[0].reactions, [
+    { emoji: "🔥", count: 1, reactedByMe: true },
+  ]);
+});
+
+test("projects a root and chronological thread replies", () => {
+  const viewer = "a".repeat(64);
+  const root = event("root", 9, "root", [["h", "channel-a"]], viewer, 20);
+  const reply = event(
+    "reply",
+    9,
+    "reply",
+    [
+      ["h", "channel-a"],
+      ["e", root.id, "", "reply"],
+    ],
+    "b".repeat(64),
+    21,
+  );
+  const thread = projectThread(
+    [reply, root],
+    "channel-a",
+    root.id,
+    new Map(),
+    viewer,
+  );
+  assert.equal(thread.root?.content, "root");
+  assert.deepEqual(
+    thread.replies.map((row) => row.content),
+    ["reply"],
+  );
+});
