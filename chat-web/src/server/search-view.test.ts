@@ -67,25 +67,34 @@ test("projects only results from the viewers projected channel roster", () => {
   assert.equal(results[0].isOwn, false);
 });
 
-test("links reply hits to their marked root and root hits to themselves", () => {
+test("links search hits to the visible branch that contains them", () => {
   const root = event();
-  const reply = event({
+  const direct = event({
     id: "f".repeat(64),
     tags: [
       ["h", "allowed"],
+      ["e", root.id, "", "reply"],
+    ],
+  });
+  const nested = event({
+    id: "e".repeat(64),
+    tags: [
+      ["h", "allowed"],
       ["e", root.id, "", "root"],
+      ["e", direct.id, "", "reply"],
     ],
   });
   const results = projectSearchResults(
-    [reply, root, reply],
+    [nested, direct, root, direct],
     [channel],
     new Map(),
     root.pubkey,
   );
   assert.deepEqual(
-    results.map((result) => [result.id, result.threadRootId, result.isOwn]),
+    results.map((result) => [result.id, result.threadId, result.isOwn]),
     [
-      [reply.id, root.id, true],
+      [nested.id, direct.id, true],
+      [direct.id, root.id, true],
       [root.id, root.id, true],
     ],
   );

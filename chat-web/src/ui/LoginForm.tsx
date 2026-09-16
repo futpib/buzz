@@ -219,7 +219,7 @@ export function LoginForm({
           <h1 id="login-title">Sign in to your workspace</h1>
           <p>
             Pair with Buzz Android or enter your nsec. The private key stays in
-            this browser tab.
+            this browser.
           </p>
         </div>
 
@@ -428,8 +428,7 @@ export function LoginForm({
           </button>
         </form>
         <p className="login-footnote">
-          The key is kept in session storage and is forgotten when this tab
-          session ends.
+          The key stays in this browser and is never sent to Buzz or the relay.
         </p>
       </section>
     </main>

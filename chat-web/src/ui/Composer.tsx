@@ -5,6 +5,17 @@ import { useRef, useState, useTransition } from "react";
 
 import { loadSigningCredential, makeMessageEvent } from "@/client/identity";
 
+async function returnToLogin(): Promise<void> {
+  await fetch("/api/auth/logout", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: "{}",
+  }).catch(() => undefined);
+  window.location.assign(
+    `/login?next=${encodeURIComponent(location.pathname + location.search)}`,
+  );
+}
+
 export function Composer({
   channelId,
   channelName,
@@ -14,6 +25,7 @@ export function Composer({
   cancelReply,
   onSent,
   forum = false,
+  expectedPubkey,
 }: {
   channelId: string;
   channelName: string;
@@ -23,6 +35,7 @@ export function Composer({
   cancelReply?: () => void;
   onSent?: () => void;
   forum?: boolean;
+  expectedPubkey: string;
 }) {
   const [content, setContent] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -35,11 +48,10 @@ export function Composer({
     setError(null);
     startTransition(async () => {
       try {
-        const credential = await loadSigningCredential();
+        const credential = await loadSigningCredential(expectedPubkey);
         if (!credential) {
-          throw new Error(
-            "Your browser signing key is unavailable. Sign in again.",
-          );
+          await returnToLogin();
+          return;
         }
         const event = makeMessageEvent(credential, {
           channelId,
@@ -94,7 +106,11 @@ export function Composer({
           disabled={pending}
           onChange={(event) => setContent(event.target.value)}
           onKeyDown={(event) => {
-            if (event.key === "Enter" && !event.shiftKey) {
+            if (
+              event.key === "Enter" &&
+              (event.ctrlKey || event.metaKey) &&
+              !event.nativeEvent.isComposing
+            ) {
               event.preventDefault();
               send();
             }
@@ -127,7 +143,7 @@ export function Composer({
       {error ? <p className="composer-error">{error}</p> : null}
       {!rootId ? (
         <p className="composer-hint">
-          Signed in this browser · Enter to send · Shift+Enter for a new line
+          Signed in this browser · Enter for a new line · Ctrl/Cmd+Enter to send
         </p>
       ) : null}
     </div>

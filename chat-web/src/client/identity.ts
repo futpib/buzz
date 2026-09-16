@@ -1,6 +1,6 @@
 "use client";
 
-import { finalizeEvent, nip19 } from "nostr-tools";
+import { finalizeEvent, getPublicKey, nip19 } from "nostr-tools";
 
 import type { NostrEvent } from "@/server/types";
 import { BROWSER_CREDENTIAL_KEY } from "@/shared/auth";
@@ -13,9 +13,12 @@ export type BrowserCredential = {
 const IDENTITY_DATABASE = "buzz-web-identity";
 const IDENTITY_STORE = "credentials";
 const IDENTITY_RECORD = "current";
+const PERSISTENT_CREDENTIAL_KEY = "buzz.identity.persistent.v1";
+const IDENTITY_DATABASE_TIMEOUT_MS = 1_500;
 let persistentCredentialRequest: Promise<BrowserCredential | null> | null =
   null;
 let identityGeneration = 0;
+let memoryCredential: BrowserCredential | null = null;
 
 function secretKey(nsec: string): Uint8Array {
   const decoded = nip19.decode(nsec.trim());
@@ -146,24 +149,99 @@ function parseStoredCredential(raw: unknown): BrowserCredential | null {
     ) {
       return null;
     }
-    secretKey(parsed.nsec);
-    return { nsec: parsed.nsec, authTag: parsed.authTag ?? null };
+    const nsec = parsed.nsec.trim();
+    secretKey(nsec);
+    return { nsec, authTag: parsed.authTag ?? null };
   } catch {
     return null;
   }
 }
 
+function storageValue(
+  storage: Storage | undefined,
+  key: string,
+): string | null {
+  try {
+    return storage?.getItem(key) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function setStorageValue(
+  storage: Storage | undefined,
+  key: string,
+  value: string,
+): boolean {
+  try {
+    storage?.setItem(key, value);
+    return storage !== undefined;
+  } catch {
+    return false;
+  }
+}
+
+function removeStorageValue(storage: Storage | undefined, key: string): void {
+  try {
+    storage?.removeItem(key);
+  } catch {
+    // A denied storage backend must not block the remaining cleanup paths.
+  }
+}
+
+function browserSessionStorage(): Storage | undefined {
+  return typeof sessionStorage === "undefined" ? undefined : sessionStorage;
+}
+
+function browserLocalStorage(): Storage | undefined {
+  return typeof localStorage === "undefined" ? undefined : localStorage;
+}
+
+function activateCredential(credential: BrowserCredential): void {
+  memoryCredential = credential;
+  setStorageValue(
+    browserSessionStorage(),
+    BROWSER_CREDENTIAL_KEY,
+    JSON.stringify(credential),
+  );
+}
+
+export function credentialPubkey(credential: BrowserCredential): string {
+  return getPublicKey(secretKey(credential.nsec));
+}
+
 function openIdentityDatabase(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
+    if (typeof indexedDB === "undefined") {
+      reject(new Error("Identity database is unavailable"));
+      return;
+    }
     const request = indexedDB.open(IDENTITY_DATABASE, 1);
+    let settled = false;
+    const finish = (database?: IDBDatabase, error?: Error) => {
+      if (settled) {
+        database?.close();
+        return;
+      }
+      settled = true;
+      clearTimeout(timeout);
+      if (error) reject(error);
+      else if (database) resolve(database);
+    };
+    const timeout = setTimeout(
+      () => finish(undefined, new Error("Identity database timed out")),
+      IDENTITY_DATABASE_TIMEOUT_MS,
+    );
     request.onupgradeneeded = () => {
       if (!request.result.objectStoreNames.contains(IDENTITY_STORE)) {
         request.result.createObjectStore(IDENTITY_STORE);
       }
     };
-    request.onsuccess = () => resolve(request.result);
+    request.onsuccess = () => finish(request.result);
     request.onerror = () =>
-      reject(request.error ?? new Error("Identity storage failed"));
+      finish(undefined, request.error ?? new Error("Identity storage failed"));
+    request.onblocked = () =>
+      finish(undefined, new Error("Identity database is blocked"));
   });
 }
 
@@ -185,9 +263,37 @@ async function persistentIdentity(
           : mode === "put"
             ? store.put(credential, IDENTITY_RECORD)
             : store.delete(IDENTITY_RECORD);
-      request.onsuccess = () => resolve(request.result);
-      request.onerror = () =>
-        reject(request.error ?? new Error("Identity storage failed"));
+      let result: unknown;
+      let settled = false;
+      const finish = (value?: unknown, error?: Error) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        if (error) reject(error);
+        else resolve(value);
+      };
+      const timeout = setTimeout(() => {
+        try {
+          transaction.abort();
+        } catch {
+          // A transaction that already completed needs no further cleanup.
+        }
+        finish(undefined, new Error("Identity storage timed out"));
+      }, IDENTITY_DATABASE_TIMEOUT_MS);
+      request.onsuccess = () => {
+        result = request.result;
+      };
+      transaction.oncomplete = () => finish(result);
+      transaction.onerror = () =>
+        finish(
+          undefined,
+          transaction.error ?? new Error("Identity storage failed"),
+        );
+      transaction.onabort = () =>
+        finish(
+          undefined,
+          transaction.error ?? new Error("Identity storage was aborted"),
+        );
     });
   } finally {
     database.close();
@@ -197,24 +303,58 @@ async function persistentIdentity(
 export async function storeCredential(
   credential: BrowserCredential,
 ): Promise<void> {
+  const parsed = parseStoredCredential(credential);
+  if (!parsed) throw new Error("Browser credential is invalid");
   identityGeneration += 1;
-  sessionStorage.setItem(BROWSER_CREDENTIAL_KEY, JSON.stringify(credential));
-  await persistentIdentity("put", credential);
+  activateCredential(parsed);
+  setStorageValue(
+    browserLocalStorage(),
+    PERSISTENT_CREDENTIAL_KEY,
+    JSON.stringify(parsed),
+  );
+  try {
+    await persistentIdentity("put", parsed);
+  } catch {
+    // IndexedDB is unreliable in some mobile/private browser contexts. The
+    // browser-only local fallback and active in-memory copy keep signing usable.
+  }
 }
 
 export function loadCredential(): BrowserCredential | null {
-  const raw = sessionStorage.getItem(BROWSER_CREDENTIAL_KEY);
+  if (memoryCredential) return memoryCredential;
+  const raw = storageValue(browserSessionStorage(), BROWSER_CREDENTIAL_KEY);
   if (!raw) return null;
-  return parseStoredCredential(raw);
+  const credential = parseStoredCredential(raw);
+  if (credential) memoryCredential = credential;
+  else removeStorageValue(browserSessionStorage(), BROWSER_CREDENTIAL_KEY);
+  return credential;
 }
 
 export async function loadPersistentCredential(): Promise<BrowserCredential | null> {
   const generation = identityGeneration;
+  const local = parseStoredCredential(
+    storageValue(browserLocalStorage(), PERSISTENT_CREDENTIAL_KEY),
+  );
+  if (local) {
+    if (generation === identityGeneration) activateCredential(local);
+    void persistentIdentity("put", local)
+      .then(() => {
+        if (generation !== identityGeneration) {
+          return persistentIdentity("delete");
+        }
+        return undefined;
+      })
+      .catch(() => undefined);
+    return generation === identityGeneration ? local : null;
+  }
+  removeStorageValue(browserLocalStorage(), PERSISTENT_CREDENTIAL_KEY);
   try {
     const credential = parseStoredCredential(await persistentIdentity("get"));
     if (credential && generation === identityGeneration) {
-      sessionStorage.setItem(
-        BROWSER_CREDENTIAL_KEY,
+      activateCredential(credential);
+      setStorageValue(
+        browserLocalStorage(),
+        PERSISTENT_CREDENTIAL_KEY,
         JSON.stringify(credential),
       );
     }
@@ -224,20 +364,37 @@ export async function loadPersistentCredential(): Promise<BrowserCredential | nu
   }
 }
 
-export async function loadSigningCredential(): Promise<BrowserCredential | null> {
+export async function loadSigningCredential(
+  expectedPubkey?: string,
+): Promise<BrowserCredential | null> {
   const active = loadCredential();
-  if (active) return active;
+  if (
+    active &&
+    (!expectedPubkey || credentialPubkey(active) === expectedPubkey)
+  ) {
+    return active;
+  }
   if (!persistentCredentialRequest) {
     persistentCredentialRequest = loadPersistentCredential().finally(() => {
       persistentCredentialRequest = null;
     });
   }
-  return persistentCredentialRequest;
+  const persistent = await persistentCredentialRequest;
+  if (
+    persistent &&
+    (!expectedPubkey || credentialPubkey(persistent) === expectedPubkey)
+  ) {
+    return persistent;
+  }
+  if (expectedPubkey) await forgetCredential();
+  return null;
 }
 
 export async function forgetCredential(): Promise<void> {
   identityGeneration += 1;
-  sessionStorage.removeItem(BROWSER_CREDENTIAL_KEY);
+  memoryCredential = null;
+  removeStorageValue(browserSessionStorage(), BROWSER_CREDENTIAL_KEY);
+  removeStorageValue(browserLocalStorage(), PERSISTENT_CREDENTIAL_KEY);
   try {
     await persistentIdentity("delete");
   } catch {

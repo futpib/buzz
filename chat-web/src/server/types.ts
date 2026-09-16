@@ -48,6 +48,19 @@ export type MessageView = {
   reactions: ReactionView[];
 };
 
+export type ChannelTimelineCursor = {
+  createdAt: number;
+  id: string;
+};
+
+export type ChannelHistoryPage = {
+  messages: MessageView[];
+  hasMore: boolean;
+  nextCursor: ChannelTimelineCursor | null;
+  generatedAt: number;
+  cacheState: ViewCacheState;
+};
+
 export type ThreadView = {
   rootId: string;
   outerRootId: string;
@@ -69,11 +82,35 @@ export type ThreadsWorkspaceView = {
   cacheState: ViewCacheState;
 };
 
+export type InboxCategory = "mention" | "needs_action" | "thread";
+
+export type InboxItemView = {
+  id: string;
+  conversationId: string;
+  channel: ChannelView | null;
+  threadId: string | null;
+  author: ProfileView;
+  content: string;
+  createdAt: number;
+  categories: InboxCategory[];
+  itemCount: number;
+};
+
+export type InboxWorkspaceView = {
+  identity: ProfileView;
+  channels: ChannelView[];
+  items: InboxItemView[];
+  generatedAt: number;
+  cacheState: ViewCacheState;
+};
+
 export type WorkspaceView = {
   identity: ProfileView;
   channels: ChannelView[];
   selectedChannel: ChannelView;
   timeline: MessageView[];
+  timelineHasMore: boolean;
+  timelineCursor: ChannelTimelineCursor | null;
   thread: ThreadView | null;
   generatedAt: number;
   cacheState: ViewCacheState;
@@ -81,7 +118,12 @@ export type WorkspaceView = {
 
 export type ChannelSnapshot = Pick<
   WorkspaceView,
-  "selectedChannel" | "timeline" | "thread" | "generatedAt"
+  | "selectedChannel"
+  | "timeline"
+  | "timelineHasMore"
+  | "timelineCursor"
+  | "thread"
+  | "generatedAt"
 > & {
   revision: string;
 };
@@ -90,7 +132,7 @@ export type SearchResultView = {
   id: string;
   channelId: string;
   channelName: string;
-  threadRootId: string;
+  threadId: string;
   author: ProfileView;
   content: string;
   createdAt: number;
@@ -100,5 +142,6 @@ export type SearchResultView = {
 export type SearchView = {
   query: string;
   results: SearchResultView[];
+  generatedAt: number;
   cacheState: ViewCacheState;
 };

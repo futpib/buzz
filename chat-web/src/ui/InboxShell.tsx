@@ -1,15 +1,19 @@
 "use client";
 
-import { Menu, MessageSquareText, Search } from "lucide-react";
+import { Inbox, Menu, Search } from "lucide-react";
 import { useEffect, useState } from "react";
 
-import type { ThreadsWorkspaceView } from "@/server/types";
+import type {
+  InboxCategory,
+  InboxItemView,
+  InboxWorkspaceView,
+} from "@/server/types";
 import { Avatar } from "@/ui/Avatar";
 import { SearchDialog } from "@/ui/SearchDialog";
-import { WorkspaceSidebar } from "@/ui/WorkspaceSidebar";
 import { ViewLink } from "@/ui/ViewLink";
+import { WorkspaceSidebar } from "@/ui/WorkspaceSidebar";
 
-const THREADS_CLIENT_REVALIDATE_AFTER_MS = 10_000;
+const INBOX_CLIENT_REVALIDATE_AFTER_MS = 10_000;
 
 function relativeTime(timestamp: number, now: number): string {
   const seconds = Math.max(0, Math.floor(now / 1_000) - timestamp);
@@ -30,7 +34,66 @@ function relativeTime(timestamp: number, now: number): string {
   });
 }
 
-export function ThreadsShell({ initial }: { initial: ThreadsWorkspaceView }) {
+function categoryLabel(categories: InboxCategory[]): string {
+  if (categories.includes("needs_action")) return "Needs action";
+  if (categories.includes("mention")) return "Mention";
+  return "Thread";
+}
+
+function InboxRow({
+  item,
+  generatedAt,
+}: {
+  item: InboxItemView;
+  generatedAt: number;
+}) {
+  const content = (
+    <>
+      <Avatar profile={item.author} />
+      <span className="thread-index-content">
+        <span className="thread-index-meta">
+          <strong>{item.author.name}</strong>
+          <span>{categoryLabel(item.categories)}</span>
+          {item.channel ? <span>#{item.channel.name}</span> : null}
+          <time dateTime={new Date(item.createdAt * 1_000).toISOString()}>
+            {relativeTime(item.createdAt, generatedAt)}
+          </time>
+        </span>
+        <span className="inbox-preview">{item.content || "Attachment"}</span>
+        <span className="thread-index-replies">
+          {item.itemCount === 1
+            ? "1 update"
+            : `${item.itemCount} grouped updates`}
+        </span>
+      </span>
+    </>
+  );
+  if (!item.channel || !item.threadId) {
+    return (
+      <article
+        className="thread-index-row inbox-row-static"
+        data-inbox-id={item.id}
+      >
+        {content}
+      </article>
+    );
+  }
+  return (
+    <ViewLink
+      className="thread-index-row"
+      data-inbox-id={item.id}
+      href={`/channels/${item.channel.id}?${new URLSearchParams({
+        thread: item.threadId,
+        message: item.id,
+      })}`}
+      scroll={false}
+    >
+      {content}
+    </ViewLink>
+  );
+}
+
+export function InboxShell({ initial }: { initial: InboxWorkspaceView }) {
   const [view, setView] = useState(initial);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
@@ -39,12 +102,12 @@ export function ThreadsShell({ initial }: { initial: ThreadsWorkspaceView }) {
     setView(initial);
     if (
       initial.cacheState !== "stale" &&
-      Date.now() - initial.generatedAt < THREADS_CLIENT_REVALIDATE_AFTER_MS
+      Date.now() - initial.generatedAt < INBOX_CLIENT_REVALIDATE_AFTER_MS
     ) {
       return;
     }
     const controller = new AbortController();
-    void fetch("/api/threads?fresh=1", {
+    void fetch("/api/inbox?fresh=1", {
       cache: "no-store",
       signal: controller.signal,
     })
@@ -56,7 +119,7 @@ export function ThreadsShell({ initial }: { initial: ThreadsWorkspaceView }) {
           return null;
         }
         if (!response.ok) return null;
-        return (await response.json()) as ThreadsWorkspaceView;
+        return (await response.json()) as InboxWorkspaceView;
       })
       .then((fresh) => {
         if (fresh && !controller.signal.aborted) setView(fresh);
@@ -77,7 +140,7 @@ export function ThreadsShell({ initial }: { initial: ThreadsWorkspaceView }) {
         type="button"
       />
       <WorkspaceSidebar
-        activePage="threads"
+        activePage="inbox"
         channels={view.channels}
         close={() => setMobileNavOpen(false)}
         identity={view.identity}
@@ -96,14 +159,16 @@ export function ThreadsShell({ initial }: { initial: ThreadsWorkspaceView }) {
             <Menu aria-hidden="true" size={20} />
           </button>
           <div className="channel-title">
-            <MessageSquareText aria-hidden="true" size={19} />
+            <Inbox aria-hidden="true" size={19} />
             <div>
-              <h1>Threads</h1>
-              <p>Every conversation in your authorized channels</p>
+              <h1>Inbox</h1>
+              <p>Mentions, replies, and items that need your attention</p>
             </div>
           </div>
           <div className="header-actions">
-            <span className="thread-total">{view.threads.length} total</span>
+            <span className="thread-total">
+              {view.items.length} conversations
+            </span>
             <button
               aria-controls="workspace-search"
               aria-expanded={searchOpen}
@@ -115,37 +180,19 @@ export function ThreadsShell({ initial }: { initial: ThreadsWorkspaceView }) {
             </button>
           </div>
         </header>
-        <nav className="threads-list" aria-label="All threads">
-          {view.threads.length === 0 ? (
-            <p className="empty-timeline">No threads yet.</p>
+        <section className="threads-list" aria-label="Inbox conversations">
+          {view.items.length === 0 ? (
+            <p className="empty-timeline">Your inbox is clear.</p>
           ) : (
-            view.threads.map(({ activityAt, channel, root }) => (
-              <ViewLink
-                className="thread-index-row"
-                data-channel-id={channel.id}
-                data-thread-id={root.id}
-                href={`/channels/${channel.id}?thread=${root.id}`}
-                key={root.id}
-              >
-                <Avatar profile={root.author} />
-                <div className="thread-index-content">
-                  <div className="thread-index-meta">
-                    <strong>{root.author.name}</strong>
-                    <span>#{channel.name}</span>
-                    <time dateTime={new Date(activityAt * 1_000).toISOString()}>
-                      {relativeTime(activityAt, view.generatedAt)}
-                    </time>
-                  </div>
-                  <p>{root.content || "Attachment"}</p>
-                  <span className="thread-index-replies">
-                    {root.replyCount}{" "}
-                    {root.replyCount === 1 ? "reply" : "replies"}
-                  </span>
-                </div>
-              </ViewLink>
+            view.items.map((item) => (
+              <InboxRow
+                generatedAt={view.generatedAt}
+                item={item}
+                key={item.conversationId}
+              />
             ))
           )}
-        </nav>
+        </section>
       </section>
       {searchOpen ? (
         <SearchDialog

@@ -24,7 +24,7 @@ export function WorkspaceSidebar({
   identity,
   selectedId,
 }: {
-  activePage: "channel" | "threads";
+  activePage: "channel" | "inbox" | "threads";
   channels: ChannelView[];
   close: () => void;
   identity: ProfileView;
@@ -82,9 +82,14 @@ export function WorkspaceSidebar({
         </button>
       </div>
       <nav className="primary-nav" aria-label="Workspace">
-        <button disabled title="Inbox is not available yet" type="button">
+        <ViewLink
+          className={activePage === "inbox" ? "primary-nav-active" : undefined}
+          href="/inbox"
+          onClick={close}
+          prefetchMode="eager"
+        >
           <Inbox aria-hidden="true" size={18} /> Inbox
-        </button>
+        </ViewLink>
         <ViewLink
           className={
             activePage === "threads" ? "primary-nav-active" : undefined

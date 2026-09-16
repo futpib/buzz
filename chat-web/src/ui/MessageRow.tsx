@@ -21,6 +21,7 @@ export function MessageRow({
   hideThreadLink = false,
   onReply,
   replyingTo,
+  highlighted = false,
 }: {
   message: MessageView;
   channelId: string;
@@ -28,10 +29,12 @@ export function MessageRow({
   hideThreadLink?: boolean;
   onReply?: () => void;
   replyingTo?: string | null;
+  highlighted?: boolean;
 }) {
   return (
     <article
-      className={compact ? "message-row message-row-compact" : "message-row"}
+      className={`${compact ? "message-row message-row-compact" : "message-row"}${highlighted ? " message-row-highlighted" : ""}`}
+      data-message-id={message.id}
     >
       <Avatar profile={message.author} small={compact} />
       <div className="message-content">

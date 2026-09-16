@@ -396,6 +396,30 @@ a {
   padding: 22px 0 15px;
 }
 
+.timeline-history-control {
+  display: flex;
+  min-height: 34px;
+  align-items: center;
+  justify-content: center;
+  padding: 0 16px 10px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.timeline-history-control button {
+  padding: 6px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--soft);
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.timeline-history-control button:hover {
+  border-color: var(--input-border);
+  color: var(--ink);
+}
+
 .channel-intro {
   padding: 26px 28px 24px;
 }
@@ -969,6 +993,23 @@ a {
   -webkit-line-clamp: 3;
 }
 
+.inbox-preview {
+  display: -webkit-box;
+  margin: 3px 0 5px;
+  overflow: hidden;
+  color: var(--message-ink);
+  font-size: 13px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+
+.inbox-row-static {
+  opacity: 0.9;
+}
+
 .thread-index-replies {
   color: var(--accent);
   font-size: 10px;
@@ -997,6 +1038,11 @@ a {
 .thread-messages-content > .message-row:first-child {
   padding-top: 10px;
   padding-bottom: 13px;
+}
+
+.message-row-highlighted {
+  background: color-mix(in srgb, var(--accent-soft) 72%, transparent);
+  box-shadow: inset 3px 0 var(--accent);
 }
 
 .reply-divider {

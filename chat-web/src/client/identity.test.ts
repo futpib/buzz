@@ -3,10 +3,13 @@ import test from "node:test";
 import { verifyEvent, nip19 } from "nostr-tools";
 
 import {
+  forgetCredential,
   encodeNostrAuthorization,
+  loadPersistentCredential,
   makeAuthEvent,
   makeMediaGetAuthEvent,
   makeMessageEvent,
+  storeCredential,
 } from "./identity";
 
 const secret = Uint8Array.from({ length: 32 }, (_, index) => index + 1);
@@ -75,4 +78,59 @@ test("browser media auth is public, scoped, fresh, and key-free", () => {
     Buffer.from(authorization.slice(6), "base64url").toString("utf8"),
   );
   assert.equal(decoded.id, event.id);
+});
+
+class MemoryStorage implements Storage {
+  readonly values = new Map<string, string>();
+
+  get length(): number {
+    return this.values.size;
+  }
+
+  clear(): void {
+    this.values.clear();
+  }
+
+  getItem(key: string): string | null {
+    return this.values.get(key) ?? null;
+  }
+
+  key(index: number): string | null {
+    return [...this.values.keys()][index] ?? null;
+  }
+
+  removeItem(key: string): void {
+    this.values.delete(key);
+  }
+
+  setItem(key: string, value: string): void {
+    this.values.set(key, value);
+  }
+}
+
+test("browser identity survives through the production local fallback", async () => {
+  const session = new MemoryStorage();
+  const local = new MemoryStorage();
+  Object.defineProperty(globalThis, "sessionStorage", {
+    configurable: true,
+    value: session,
+  });
+  Object.defineProperty(globalThis, "localStorage", {
+    configurable: true,
+    value: local,
+  });
+
+  await storeCredential(credential);
+  assert.match(session.getItem("buzz.identity.v1") ?? "", /nsec1/);
+  assert.match(local.getItem("buzz.identity.persistent.v1") ?? "", /nsec1/);
+
+  session.clear();
+  assert.deepEqual(await loadPersistentCredential(), credential);
+  assert.match(session.getItem("buzz.identity.v1") ?? "", /nsec1/);
+
+  await forgetCredential();
+  assert.equal(session.length, 0);
+  assert.equal(local.length, 0);
+  Reflect.deleteProperty(globalThis, "sessionStorage");
+  Reflect.deleteProperty(globalThis, "localStorage");
 });

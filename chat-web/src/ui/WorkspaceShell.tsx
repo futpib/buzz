@@ -10,9 +10,20 @@ import {
   Users,
   X,
 } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 
-import type { ChannelSnapshot, WorkspaceView } from "@/server/types";
+import type {
+  ChannelHistoryPage,
+  ChannelSnapshot,
+  WorkspaceView,
+} from "@/server/types";
 import { Composer } from "@/ui/Composer";
 import { MessageRow } from "@/ui/MessageRow";
 import { SearchDialog } from "@/ui/SearchDialog";
@@ -22,14 +33,37 @@ import { ViewLink } from "@/ui/ViewLink";
 type LiveState = "connecting" | "live" | "reconnecting";
 type ReplyTarget = { id: string; name: string };
 
-export function WorkspaceShell({ initial }: { initial: WorkspaceView }) {
+export function WorkspaceShell({
+  initial,
+  targetMessageId = null,
+}: {
+  initial: WorkspaceView;
+  targetMessageId?: string | null;
+}) {
   const [timeline, setTimeline] = useState(initial.timeline);
   const [thread, setThread] = useState(initial.thread);
   const [liveState, setLiveState] = useState<LiveState>("connecting");
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [replyTarget, setReplyTarget] = useState<ReplyTarget | null>(null);
+  const [olderTimeline, setOlderTimeline] = useState(
+    initial.timeline.slice(0, 0),
+  );
+  const [timelineHasMore, setTimelineHasMore] = useState(
+    initial.timelineHasMore,
+  );
+  const [timelineCursor, setTimelineCursor] = useState(initial.timelineCursor);
+  const [historyError, setHistoryError] = useState<string | null>(null);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const timelineScroller = useRef<HTMLDivElement>(null);
   const timelineEnd = useRef<HTMLDivElement>(null);
+  const timelinePinnedToBottom = useRef(true);
+  const historyLoaded = useRef(false);
+  const historyLoadingRef = useRef(false);
+  const restoreTimelineScroll = useRef<{
+    height: number;
+    top: number;
+  } | null>(null);
   const threadScroller = useRef<HTMLDivElement>(null);
   const threadContent = useRef<HTMLDivElement>(null);
   const threadPinnedToBottom = useRef(true);
@@ -38,6 +72,14 @@ export function WorkspaceShell({ initial }: { initial: WorkspaceView }) {
 
   useEffect(() => {
     setTimeline(initial.timeline);
+    setOlderTimeline([]);
+    setTimelineHasMore(initial.timelineHasMore);
+    setTimelineCursor(initial.timelineCursor);
+    setHistoryError(null);
+    setHistoryLoading(false);
+    historyLoaded.current = false;
+    historyLoadingRef.current = false;
+    timelinePinnedToBottom.current = true;
     setThread(initial.thread);
     setMobileNavOpen(false);
     setSearchOpen(false);
@@ -66,6 +108,10 @@ export function WorkspaceShell({ initial }: { initial: WorkspaceView }) {
         (event as MessageEvent<string>).data,
       ) as ChannelSnapshot;
       setTimeline(snapshot.timeline);
+      if (!historyLoaded.current) {
+        setTimelineHasMore(snapshot.timelineHasMore);
+        setTimelineCursor(snapshot.timelineCursor);
+      }
       setThread(snapshot.thread);
       setLiveState("live");
     });
@@ -73,15 +119,114 @@ export function WorkspaceShell({ initial }: { initial: WorkspaceView }) {
   }, [initial.selectedChannel.id, rootId]);
 
   useEffect(() => {
-    if (timeline.length >= 0) {
+    if (timeline.length >= 0 && timelinePinnedToBottom.current) {
       timelineEnd.current?.scrollIntoView({ block: "end" });
     }
   }, [timeline.length]);
+
+  useLayoutEffect(() => {
+    if (olderTimeline.length === 0) return;
+    const restore = restoreTimelineScroll.current;
+    const scroller = timelineScroller.current;
+    if (!restore || !scroller) return;
+    scroller.scrollTop = restore.top + scroller.scrollHeight - restore.height;
+    restoreTimelineScroll.current = null;
+  }, [olderTimeline.length]);
+
+  const renderedTimeline = useMemo(
+    () =>
+      [
+        ...new Map(
+          [...olderTimeline, ...timeline].map((message) => [
+            message.id,
+            message,
+          ]),
+        ).values(),
+      ].sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id)),
+    [olderTimeline, timeline],
+  );
+
+  const loadOlder = useCallback(async () => {
+    const cursor = timelineCursor;
+    const scroller = timelineScroller.current;
+    if (!timelineHasMore || !cursor || !scroller || historyLoadingRef.current) {
+      return;
+    }
+    historyLoadingRef.current = true;
+    historyLoaded.current = true;
+    setHistoryLoading(true);
+    setHistoryError(null);
+    restoreTimelineScroll.current = {
+      height: scroller.scrollHeight,
+      top: scroller.scrollTop,
+    };
+    try {
+      const response = await fetch(
+        `/api/channels/${initial.selectedChannel.id}/history?${new URLSearchParams(
+          {
+            created_at: String(cursor.createdAt),
+            id: cursor.id,
+          },
+        )}`,
+        { cache: "no-store" },
+      );
+      if (response.status === 401) {
+        window.location.assign(
+          `/login?next=${encodeURIComponent(location.pathname + location.search)}`,
+        );
+        return;
+      }
+      const page = (await response.json()) as ChannelHistoryPage & {
+        error?: string;
+      };
+      if (!response.ok) {
+        throw new Error(page.error || "Older messages could not be loaded");
+      }
+      setOlderTimeline((current) => [
+        ...new Map(
+          [...page.messages, ...current].map((message) => [
+            message.id,
+            message,
+          ]),
+        ).values(),
+      ]);
+      const advanced =
+        page.nextCursor &&
+        (page.nextCursor.createdAt !== cursor.createdAt ||
+          page.nextCursor.id !== cursor.id);
+      setTimelineHasMore(
+        page.hasMore && page.messages.length > 0 && Boolean(advanced),
+      );
+      setTimelineCursor(advanced ? page.nextCursor : null);
+    } catch (caught) {
+      restoreTimelineScroll.current = null;
+      setHistoryError(
+        caught instanceof Error
+          ? caught.message
+          : "Older messages could not be loaded",
+      );
+    } finally {
+      historyLoadingRef.current = false;
+      setHistoryLoading(false);
+    }
+  }, [initial.selectedChannel.id, timelineCursor, timelineHasMore]);
 
   useEffect(() => {
     const scroller = threadScroller.current;
     const content = threadContent.current;
     if (!openThreadId || !scroller || !content) return;
+    const target = targetMessageId
+      ? content.querySelector<HTMLElement>(
+          `[data-message-id="${targetMessageId}"]`,
+        )
+      : null;
+    if (target) {
+      const frame = requestAnimationFrame(() => {
+        target.scrollIntoView({ block: "center" });
+        threadPinnedToBottom.current = false;
+      });
+      return () => cancelAnimationFrame(frame);
+    }
     const scrollToLatest = () => {
       scroller.scrollTop = scroller.scrollHeight;
       threadPinnedToBottom.current = true;
@@ -99,7 +244,7 @@ export function WorkspaceShell({ initial }: { initial: WorkspaceView }) {
       contentObserver.disconnect();
       scrollerObserver.disconnect();
     };
-  }, [openThreadId]);
+  }, [openThreadId, targetMessageId]);
 
   const forum = initial.selectedChannel.type === "forum";
   const threadAuthors = new Map(
@@ -182,7 +327,19 @@ export function WorkspaceShell({ initial }: { initial: WorkspaceView }) {
           </div>
         </header>
 
-        <div className="timeline">
+        <div
+          className="timeline"
+          onScroll={(event) => {
+            const scroller = event.currentTarget;
+            timelinePinnedToBottom.current =
+              scroller.scrollHeight -
+                scroller.clientHeight -
+                scroller.scrollTop <=
+              40;
+            if (scroller.scrollTop <= 80) void loadOlder();
+          }}
+          ref={timelineScroller}
+        >
           <div className="channel-intro">
             <div className="intro-icon">
               {forum ? <MessageSquareText size={25} /> : <Hash size={27} />}
@@ -193,12 +350,27 @@ export function WorkspaceShell({ initial }: { initial: WorkspaceView }) {
                 `This is the start of #${initial.selectedChannel.name}.`}
             </p>
           </div>
-          {timeline.length === 0 ? (
+          {timelineHasMore || historyLoading || historyError ? (
+            <div className="timeline-history-control" aria-live="polite">
+              {historyLoading ? <span>Loading older messages…</span> : null}
+              {!historyLoading && historyError ? (
+                <button onClick={() => void loadOlder()} type="button">
+                  Try loading older messages again
+                </button>
+              ) : null}
+              {!historyLoading && !historyError && timelineHasMore ? (
+                <button onClick={() => void loadOlder()} type="button">
+                  Load older messages
+                </button>
+              ) : null}
+            </div>
+          ) : null}
+          {renderedTimeline.length === 0 ? (
             <p className="empty-timeline">
               No messages yet. Start the conversation.
             </p>
           ) : (
-            timeline.map((message) => (
+            renderedTimeline.map((message) => (
               <MessageRow
                 channelId={initial.selectedChannel.id}
                 key={message.id}
@@ -211,6 +383,7 @@ export function WorkspaceShell({ initial }: { initial: WorkspaceView }) {
         <Composer
           channelId={initial.selectedChannel.id}
           channelName={initial.selectedChannel.name}
+          expectedPubkey={initial.identity.pubkey}
           forum={forum}
         />
       </section>
@@ -249,6 +422,7 @@ export function WorkspaceShell({ initial }: { initial: WorkspaceView }) {
                 <MessageRow
                   channelId={initial.selectedChannel.id}
                   hideThreadLink
+                  highlighted={thread.root.id === targetMessageId}
                   message={thread.root}
                   onReply={() =>
                     setReplyTarget({
@@ -273,6 +447,7 @@ export function WorkspaceShell({ initial }: { initial: WorkspaceView }) {
                 <MessageRow
                   channelId={initial.selectedChannel.id}
                   compact
+                  highlighted={message.id === targetMessageId}
                   key={message.id}
                   message={message}
                   onReply={() =>
@@ -294,6 +469,7 @@ export function WorkspaceShell({ initial }: { initial: WorkspaceView }) {
           <Composer
             channelId={initial.selectedChannel.id}
             channelName={initial.selectedChannel.name}
+            expectedPubkey={initial.identity.pubkey}
             forum={forum}
             parentId={replyTarget?.id ?? thread.rootId}
             replyingTo={replyTarget?.name ?? null}
@@ -307,7 +483,12 @@ export function WorkspaceShell({ initial }: { initial: WorkspaceView }) {
           <PanelRightClose aria-hidden="true" size={17} />
         </span>
       )}
-      {searchOpen ? <SearchDialog close={() => setSearchOpen(false)} /> : null}
+      {searchOpen ? (
+        <SearchDialog
+          close={() => setSearchOpen(false)}
+          viewerPubkey={initial.identity.pubkey}
+        />
+      ) : null}
     </main>
   );
 }

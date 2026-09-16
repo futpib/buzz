@@ -55,6 +55,7 @@ async function searchWorkspaceFresh(
       projectProfiles(profileEvents),
       session.pubkey,
     ),
+    generatedAt: Date.now(),
   };
 }
 
@@ -63,7 +64,9 @@ export async function searchWorkspace(
   rawQuery: string,
 ): Promise<SearchView> {
   const query = normalizeSearchQuery(rawQuery);
-  if (!query) return { query, results: [], cacheState: "fresh" };
+  if (!query) {
+    return { query, results: [], generatedAt: Date.now(), cacheState: "fresh" };
+  }
   const result = await searchCache.get(searchCacheKey(session, query), () =>
     searchWorkspaceFresh(session, query),
   );
@@ -75,7 +78,9 @@ export async function refreshSearchWorkspace(
   rawQuery: string,
 ): Promise<SearchView> {
   const query = normalizeSearchQuery(rawQuery);
-  if (!query) return { query, results: [], cacheState: "fresh" };
+  if (!query) {
+    return { query, results: [], generatedAt: Date.now(), cacheState: "fresh" };
+  }
   const result = await searchCache.refresh(searchCacheKey(session, query), () =>
     searchWorkspaceFresh(session, query),
   );

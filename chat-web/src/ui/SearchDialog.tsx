@@ -26,7 +26,10 @@ function ResultTime({ timestamp }: { timestamp: number }) {
 }
 
 function Result({ result }: { result: SearchResultView }) {
-  const href = `/channels/${result.channelId}?thread=${result.threadRootId}`;
+  const href = `/channels/${result.channelId}?${new URLSearchParams({
+    thread: result.threadId,
+    message: result.id,
+  })}`;
   return (
     <li>
       <ViewLink className="search-result" href={href} scroll={false}>
@@ -45,7 +48,13 @@ function Result({ result }: { result: SearchResultView }) {
   );
 }
 
-export function SearchDialog({ close }: { close: () => void }) {
+export function SearchDialog({
+  close,
+  viewerPubkey,
+}: {
+  close: () => void;
+  viewerPubkey: string;
+}) {
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<SearchResultView[]>([]);
   const [searched, setSearched] = useState(false);
@@ -71,7 +80,8 @@ export function SearchDialog({ close }: { close: () => void }) {
       setError(null);
       return;
     }
-    const cached = searchViewCache.get(normalized);
+    const cacheKey = `${viewerPubkey}\u0000${normalized.toLowerCase()}`;
+    const cached = searchViewCache.get(cacheKey);
     if (cached) {
       setResults(cached.results);
       setSearched(true);
@@ -84,7 +94,7 @@ export function SearchDialog({ close }: { close: () => void }) {
       setError(null);
       try {
         const response = await fetch(
-          `/api/search?${new URLSearchParams({ q: normalized, fresh: "1" })}`,
+          `/api/search?${new URLSearchParams({ q: normalized })}`,
           { cache: "no-store", signal: controller.signal },
         );
         if (response.status === 401) {
@@ -95,9 +105,20 @@ export function SearchDialog({ close }: { close: () => void }) {
         }
         const body = (await response.json()) as SearchView & { error?: string };
         if (!response.ok) throw new Error(body.error || "Search failed");
-        searchViewCache.set(normalized, body);
+        searchViewCache.set(cacheKey, body);
         setResults(body.results);
         setSearched(true);
+        if (body.cacheState === "stale") {
+          const freshResponse = await fetch(
+            `/api/search?${new URLSearchParams({ q: normalized, fresh: "1" })}`,
+            { cache: "no-store", signal: controller.signal },
+          );
+          if (freshResponse.ok) {
+            const fresh = (await freshResponse.json()) as SearchView;
+            searchViewCache.set(cacheKey, fresh);
+            setResults(fresh.results);
+          }
+        }
       } catch (caught) {
         if (controller.signal.aborted) return;
         setError(caught instanceof Error ? caught.message : "Search failed");
@@ -111,7 +132,7 @@ export function SearchDialog({ close }: { close: () => void }) {
       window.clearTimeout(timeout);
       controller.abort();
     };
-  }, [query]);
+  }, [query, viewerPubkey]);
 
   return (
     <div className="search-layer">

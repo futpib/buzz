@@ -1,4 +1,5 @@
 import { fallbackProfile } from "@/server/projector";
+import { eventThreadTarget } from "@/server/event-navigation";
 import type {
   ChannelView,
   NostrEvent,
@@ -28,18 +29,6 @@ function tagValue(event: NostrEvent, key: string): string | null {
   return tagValues(event, key)[0] ?? null;
 }
 
-function threadRootId(event: NostrEvent): string {
-  const eventTags = event.tags.filter(
-    (tag) => tag[0] === "e" && typeof tag[1] === "string",
-  );
-  return (
-    eventTags.find((tag) => tag[3] === "root")?.[1] ??
-    eventTags.find((tag) => tag[3] === "reply")?.[1] ??
-    eventTags[0]?.[1] ??
-    event.id
-  );
-}
-
 export function projectSearchResults(
   events: NostrEvent[],
   channels: ChannelView[],
@@ -62,7 +51,7 @@ export function projectSearchResults(
       id: event.id,
       channelId,
       channelName: channel.name,
-      threadRootId: threadRootId(event),
+      threadId: eventThreadTarget(event),
       author: profiles.get(event.pubkey) ?? fallbackProfile(event.pubkey),
       content: event.content,
       createdAt: event.created_at,

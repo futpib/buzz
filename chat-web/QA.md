@@ -38,6 +38,10 @@ the browser. A pass is not complete until it covers the checks below.
   mobile drawer navigation, sending, a direct reply, a reply to that reply,
   and deletion propagation. Inspect the signed nested reply for distinct
   NIP-10 `root` and `reply` markers.
+- On a channel with more than one timeline page, scroll to the top with trusted
+  input, require older top-level messages to be prepended, and verify the
+  reader's scroll anchor is preserved. Require a visible load-more fallback; a
+  recent raw-event window is not historical coverage.
 - Match Android's nested-thread model: the outer branch renders only direct
   children, a reply with children gets a visible tappable summary, and opening
   that summary renders the child branch. Do not accept flattened descendants
@@ -54,9 +58,11 @@ the browser. A pass is not complete until it covers the checks below.
   protected page, and send a browser-signed temporary message. This proves the
   signing path itself hydrates IndexedDB instead of depending on the login
   screen having run first.
-- Verify the nsec is absent from HTML, cookies, localStorage, and HTTP/WebSocket
-  traffic. Persistent identity data may exist only in browser IndexedDB and
-  active-tab sessionStorage.
+- Block or remove IndexedDB, clear sessionStorage, and verify browser-only
+  localStorage restores a signer. This is the mobile/private-browser fallback.
+- Verify the nsec is absent from HTML, cookies, and HTTP/WebSocket traffic.
+  Persistent identity data may exist only in browser storage (IndexedDB and the
+  localStorage fallback) plus active-tab memory/sessionStorage.
 - Verify logged-out pages redirect to login and all protected APIs return 401.
 
 ## Rendering
