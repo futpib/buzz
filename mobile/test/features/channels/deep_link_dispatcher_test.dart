@@ -8,6 +8,7 @@ import 'package:buzz/features/pairing/pairing_provider.dart';
 import 'package:buzz/shared/auth/auth.dart';
 import 'package:buzz/shared/deeplink/deep_link.dart';
 import 'package:buzz/shared/deeplink/pending_deep_link_provider.dart';
+import 'package:buzz/shared/relay/relay.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -629,6 +630,14 @@ void main() {
   ) async {
     const code = 'nostrpair://desktop?mode=recover';
     const link = PairingDeepLink(code: code);
+    final activeCommunity = Community(
+      id: 'active-community',
+      name: 'Active',
+      relayUrl: 'https://active.example.com',
+      nsec: 'active-nsec',
+      addedAt: DateTime.utc(2026),
+    );
+    final activeCommunityResult = Completer<Community?>();
     final pairing = _RecordingPairingNotifier();
     final container = ProviderContainer(
       overrides: [
@@ -636,6 +645,9 @@ void main() {
           () => _FakePendingDeepLinkNotifier(link),
         ),
         authProvider.overrideWith(_AuthenticatedAuthNotifier.new),
+        activeCommunityProvider.overrideWith(
+          (ref) => activeCommunityResult.future,
+        ),
         pairingProvider.overrideWith(() => pairing),
       ],
     );
@@ -647,17 +659,25 @@ void main() {
       UncontrolledProviderScope(
         container: container,
         child: const MaterialApp(
-          home: DeepLinkDispatcher(child: Scaffold(body: SizedBox())),
+          home: DeepLinkDispatcher(
+            dispatchMessageLinks: false,
+            child: Scaffold(body: SizedBox()),
+          ),
         ),
       ),
     );
     await tester.pump();
+    expect(pairing.authorizationCalls, 0);
+
+    activeCommunityResult.complete(activeCommunity);
     await tester.pump();
     await tester.pump();
     await tester.pump();
     await tester.pump();
 
     expect(pairing.authorizationCalls, 1);
+    expect(pairing.authorizedCommunityIds, [activeCommunity.id]);
+    expect(pairing.authorizedRelayNsecs, [activeCommunity.nsec]);
     expect(pairing.pairedCodes, [code]);
     expect(find.text('Send to Desktop'), findsOneWidget);
   });
@@ -870,6 +890,8 @@ class _AuthenticatedAuthNotifier extends AuthNotifier {
 
 class _RecordingPairingNotifier extends PairingNotifier {
   int authorizationCalls = 0;
+  final authorizedCommunityIds = <String>[];
+  final authorizedRelayNsecs = <String?>[];
   final pairedCodes = <String>[];
 
   @override
@@ -878,6 +900,8 @@ class _RecordingPairingNotifier extends PairingNotifier {
   @override
   Future<bool> authorizeIdentityExport({required Community community}) async {
     authorizationCalls++;
+    authorizedCommunityIds.add(community.id);
+    authorizedRelayNsecs.add(ref.read(relayConfigProvider).nsec);
     return true;
   }
 

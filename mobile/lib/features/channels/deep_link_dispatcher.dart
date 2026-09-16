@@ -92,14 +92,21 @@ class _DeepLinkDispatcherState extends ConsumerState<DeepLinkDispatcher> {
 
   void _maybeDispatchPairing(PairingDeepLink link) {
     final auth = ref.read(authProvider).value;
-    final community = auth?.community;
-    if (auth?.status != AuthStatus.authenticated || community == null) return;
+    if (auth?.status != AuthStatus.authenticated) return;
 
     _preparingPairing = true;
     final navigatorContext = context;
     Future.microtask(() async {
       final pairing = ref.read(pairingProvider.notifier);
       try {
+        // AuthState can briefly retain the previous community while a switch
+        // refreshes. Wait for the provider that actually drives RelayConfig so
+        // the export grant is bound to the active signing identity.
+        final community = await ref.read(activeCommunityProvider.future);
+        if (!mounted || ref.read(pendingDeepLinkProvider) != link) return;
+        if (community == null) {
+          throw StateError('No active community is available for pairing');
+        }
         final authorized = await pairing.authorizeIdentityExport(
           community: community,
         );
@@ -142,6 +149,20 @@ class _DeepLinkDispatcherState extends ConsumerState<DeepLinkDispatcher> {
             ),
           ),
         );
+      } catch (error) {
+        debugPrint('deep-link: failed to prepare identity export: $error');
+        if (mounted && ref.read(pendingDeepLinkProvider) == link) {
+          ref.read(pendingDeepLinkProvider.notifier).consume();
+          if (navigatorContext.mounted) {
+            ScaffoldMessenger.maybeOf(navigatorContext)?.showSnackBar(
+              const SnackBar(
+                content: Text(
+                  'Could not prepare identity export. Try pairing again.',
+                ),
+              ),
+            );
+          }
+        }
       } finally {
         pairing.reset();
         _preparingPairing = false;
