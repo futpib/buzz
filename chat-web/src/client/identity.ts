@@ -82,6 +82,40 @@ export function makeMessageEvent(
   ) as NostrEvent;
 }
 
+export function makeMediaGetAuthEvent(
+  credential: BrowserCredential,
+  server: string,
+  createdAt = Math.floor(Date.now() / 1000),
+): NostrEvent {
+  const authority = server.trim().toLowerCase();
+  if (!authority || /[/@]/.test(authority)) {
+    throw new Error("Media server is invalid");
+  }
+  return finalizeEvent(
+    {
+      kind: 24_242,
+      created_at: createdAt,
+      tags: [
+        ["t", "get"],
+        ["expiration", String(createdAt + 600)],
+        ["server", authority],
+      ],
+      content: "Get buzz-media",
+    },
+    secretKey(credential.nsec),
+  ) as NostrEvent;
+}
+
+export function encodeNostrAuthorization(event: NostrEvent): string {
+  const bytes = new TextEncoder().encode(JSON.stringify(event));
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return `Nostr ${btoa(binary)
+    .replaceAll("+", "-")
+    .replaceAll("/", "_")
+    .replace(/=+$/, "")}`;
+}
+
 export function storeCredential(credential: BrowserCredential): void {
   sessionStorage.setItem(BROWSER_CREDENTIAL_KEY, JSON.stringify(credential));
 }

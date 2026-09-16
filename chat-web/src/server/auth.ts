@@ -16,6 +16,7 @@ const SESSION_TTL_MS = 8 * 60 * 60 * 1_000;
 
 export type AuthSession = {
   pubkey: string;
+  authTag: string[] | null;
   relay: RelayConnection;
   createdAt: number;
   lastUsedAt: number;
@@ -131,6 +132,10 @@ export async function completeLogin(
   const hash = tokenHash(token);
   const session: AuthSession = {
     pubkey: event.pubkey,
+    authTag:
+      event.tags.filter((tag) => tag[0] === "auth").length === 1
+        ? [...(event.tags.find((tag) => tag[0] === "auth") ?? [])]
+        : null,
     relay: pending.relay,
     createdAt: Date.now(),
     lastUsedAt: Date.now(),

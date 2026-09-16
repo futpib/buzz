@@ -2,7 +2,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { verifyEvent, nip19 } from "nostr-tools";
 
-import { makeAuthEvent, makeMessageEvent } from "./identity";
+import {
+  encodeNostrAuthorization,
+  makeAuthEvent,
+  makeMediaGetAuthEvent,
+  makeMessageEvent,
+} from "./identity";
 
 const secret = Uint8Array.from({ length: 32 }, (_, index) => index + 1);
 const nsec = nip19.nsecEncode(secret);
@@ -29,4 +34,27 @@ test("browser signing returns only public signed events", () => {
   assert.equal(JSON.stringify(message).includes(nsec), false);
   assert.deepEqual(auth.tags.at(-1), credential.authTag);
   assert.deepEqual(message.tags.at(-1), credential.authTag);
+});
+
+test("browser media auth is public, scoped, fresh, and key-free", () => {
+  const createdAt = 1_700_000_000;
+  const event = makeMediaGetAuthEvent(
+    credential,
+    "Relay.Example:443",
+    createdAt,
+  );
+  assert.equal(verifyEvent(event), true);
+  assert.equal(event.kind, 24_242);
+  assert.deepEqual(event.tags, [
+    ["t", "get"],
+    ["expiration", String(createdAt + 600)],
+    ["server", "relay.example:443"],
+  ]);
+  assert.equal(JSON.stringify(event).includes(credential.nsec), false);
+  const authorization = encodeNostrAuthorization(event);
+  assert.match(authorization, /^Nostr [A-Za-z0-9_-]+$/);
+  const decoded = JSON.parse(
+    Buffer.from(authorization.slice(6), "base64url").toString("utf8"),
+  );
+  assert.equal(decoded.id, event.id);
 });

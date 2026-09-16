@@ -523,6 +523,29 @@ a {
   color: #656770;
 }
 
+.message-media-image {
+  display: block;
+  max-width: min(100%, 720px);
+  max-height: min(62vh, 720px);
+  margin: 8px 0;
+  border-radius: 10px;
+  object-fit: contain;
+}
+
+.message-image-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 42px;
+  margin: 8px 0;
+  padding: 9px 11px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--soft);
+  color: var(--muted);
+  font-size: 11px;
+}
+
 .reaction-list {
   display: flex;
   flex-wrap: wrap;
