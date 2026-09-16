@@ -24,6 +24,18 @@ function hasBareTag(event: NostrEvent, key: string): boolean {
   return event.tags.some((tag) => tag.length === 1 && tag[0] === key);
 }
 
+function threadRootId(event: NostrEvent): string | null {
+  const eventTags = event.tags.filter(
+    (tag) => tag[0] === "e" && typeof tag[1] === "string",
+  );
+  return (
+    eventTags.find((tag) => tag[3] === "root")?.[1] ??
+    eventTags.find((tag) => tag[3] === "reply")?.[1] ??
+    eventTags[0]?.[1] ??
+    null
+  );
+}
+
 function isNewer(candidate: NostrEvent, current: NostrEvent): boolean {
   return (
     candidate.created_at > current.created_at ||
@@ -190,7 +202,26 @@ function projectSummaries(events: NostrEvent[]): Map<string, Summary> {
       // A malformed relay overlay is ignored rather than poisoning the view.
     }
   }
-  return new Map([...summaries].map(([id, entry]) => [id, entry.value]));
+  const projected = new Map(
+    [...summaries].map(([id, entry]) => [id, entry.value]),
+  );
+  const derived = new Map<string, Summary>();
+  for (const event of events) {
+    if (!MESSAGE_KINDS.has(event.kind)) continue;
+    const rootId = threadRootId(event);
+    if (!rootId) continue;
+    const current = derived.get(rootId) ?? {
+      replyCount: 0,
+      lastReplyAt: null,
+    };
+    current.replyCount += 1;
+    current.lastReplyAt = Math.max(current.lastReplyAt ?? 0, event.created_at);
+    derived.set(rootId, current);
+  }
+  for (const [rootId, summary] of derived) {
+    if (!projected.has(rootId)) projected.set(rootId, summary);
+  }
+  return projected;
 }
 
 function deletedIds(events: NostrEvent[]): Set<string> {
@@ -288,6 +319,7 @@ export function projectTimeline(
       (event) =>
         MESSAGE_KINDS.has(event.kind) &&
         tagValue(event, "h") === channelId &&
+        threadRootId(event) === null &&
         !deleted.has(event.id),
     )
     .map((event) =>

@@ -1,3 +1,4 @@
+import { getRequestSession } from "@/server/auth";
 import { loadChannelSnapshot } from "@/server/data";
 import { listenForChannelChanges } from "@/server/live";
 
@@ -8,6 +9,10 @@ const UUID =
 const EVENT_ID = /^[0-9a-f]{64}$/i;
 
 export async function GET(request: Request): Promise<Response> {
+  const session = getRequestSession(request);
+  if (!session) {
+    return Response.json({ error: "Login required" }, { status: 401 });
+  }
   const url = new URL(request.url);
   const channelId = url.searchParams.get("channel") ?? "";
   const rootParam = url.searchParams.get("thread");
@@ -42,7 +47,11 @@ export async function GET(request: Request): Promise<Response> {
         }
         refreshInFlight = true;
         try {
-          const snapshot = await loadChannelSnapshot(channelId, rootId);
+          const snapshot = await loadChannelSnapshot(
+            session,
+            channelId,
+            rootId,
+          );
           if (snapshot.revision !== revision) {
             revision = snapshot.revision;
             emit("snapshot", snapshot);
@@ -64,6 +73,7 @@ export async function GET(request: Request): Promise<Response> {
       emit("status", { state: "connecting" });
       void refresh();
       void listenForChannelChanges(
+        session,
         channelId,
         () => void refresh(),
         abort.signal,

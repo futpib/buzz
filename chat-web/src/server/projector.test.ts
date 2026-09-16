@@ -149,3 +149,24 @@ test("projects a root and chronological thread replies", () => {
     ["reply"],
   );
 });
+
+test("raw relay replies stay out of the timeline and derive thread counts", () => {
+  const viewer = "a".repeat(64);
+  const root = event("root", 9, "root", [["h", "channel-a"]], viewer, 20);
+  const reply = event(
+    "reply",
+    9,
+    "reply",
+    [
+      ["h", "channel-a"],
+      ["e", root.id, "", "reply"],
+    ],
+    "b".repeat(64),
+    21,
+  );
+  const rows = projectTimeline([reply, root], "channel-a", new Map(), viewer);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].id, root.id);
+  assert.equal(rows[0].replyCount, 1);
+  assert.equal(rows[0].lastReplyAt, 21);
+});

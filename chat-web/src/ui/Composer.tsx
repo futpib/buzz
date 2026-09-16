@@ -3,7 +3,7 @@
 import { ArrowUp, LoaderCircle } from "lucide-react";
 import { useRef, useState, useTransition } from "react";
 
-import { sendMessageAction } from "@/app/actions";
+import { loadCredential, makeMessageEvent } from "@/client/identity";
 
 export function Composer({
   channelId,
@@ -27,7 +27,35 @@ export function Composer({
     setError(null);
     startTransition(async () => {
       try {
-        await sendMessageAction({ channelId, content: message, rootId, forum });
+        const credential = loadCredential();
+        if (!credential) {
+          throw new Error(
+            "Your browser signing key is unavailable. Sign in again.",
+          );
+        }
+        const event = makeMessageEvent(credential, {
+          channelId,
+          content: message,
+          rootId,
+          forum,
+        });
+        const response = await fetch("/api/events", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(event),
+        });
+        if (response.status === 401) {
+          window.location.assign(
+            `/login?next=${encodeURIComponent(location.pathname + location.search)}`,
+          );
+          return;
+        }
+        if (!response.ok) {
+          const body = (await response.json().catch(() => null)) as {
+            error?: string;
+          } | null;
+          throw new Error(body?.error || "Message was not sent");
+        }
         setContent("");
         textarea.current?.focus();
       } catch (caught) {
@@ -73,8 +101,7 @@ export function Composer({
       {error ? <p className="composer-error">{error}</p> : null}
       {!rootId ? (
         <p className="composer-hint">
-          Sending as the server identity · Enter to send · Shift+Enter for a new
-          line
+          Signed in this browser · Enter to send · Shift+Enter for a new line
         </p>
       ) : null}
     </div>

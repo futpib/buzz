@@ -6,6 +6,8 @@ import {
   Hash,
   Inbox,
   LockKeyhole,
+  LogOut,
+  Menu,
   MessageSquareText,
   PanelRightClose,
   Search,
@@ -16,6 +18,7 @@ import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import type { ChannelSnapshot, WorkspaceView } from "@/server/types";
+import { forgetCredential } from "@/client/identity";
 import { Avatar } from "@/ui/Avatar";
 import { Composer } from "@/ui/Composer";
 import { MessageRow } from "@/ui/MessageRow";
@@ -26,12 +29,16 @@ export function WorkspaceShell({ initial }: { initial: WorkspaceView }) {
   const [timeline, setTimeline] = useState(initial.timeline);
   const [thread, setThread] = useState(initial.thread);
   const [liveState, setLiveState] = useState<LiveState>("connecting");
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  const [loggingOut, setLoggingOut] = useState(false);
+  const [logoutError, setLogoutError] = useState<string | null>(null);
   const timelineEnd = useRef<HTMLDivElement>(null);
   const rootId = initial.thread?.rootId ?? null;
 
   useEffect(() => {
     setTimeline(initial.timeline);
     setThread(initial.thread);
+    setMobileNavOpen(false);
   }, [initial]);
 
   useEffect(() => {
@@ -39,7 +46,18 @@ export function WorkspaceShell({ initial }: { initial: WorkspaceView }) {
     if (rootId) params.set("thread", rootId);
     const source = new EventSource(`/api/live?${params}`);
     source.onopen = () => setLiveState("live");
-    source.onerror = () => setLiveState("reconnecting");
+    source.onerror = () => {
+      setLiveState("reconnecting");
+      void fetch("/api/auth/status", { cache: "no-store" })
+        .then((response) => {
+          if (response.status === 401) {
+            window.location.assign(
+              `/login?next=${encodeURIComponent(location.pathname + location.search)}`,
+            );
+          }
+        })
+        .catch(() => undefined);
+    };
     source.addEventListener("snapshot", (event) => {
       const snapshot = JSON.parse(
         (event as MessageEvent<string>).data,
@@ -74,13 +92,54 @@ export function WorkspaceShell({ initial }: { initial: WorkspaceView }) {
         ? "Connecting"
         : "Reconnecting";
 
+  const logout = async () => {
+    if (loggingOut) return;
+    setLoggingOut(true);
+    setLogoutError(null);
+    try {
+      const response = await fetch("/api/auth/logout", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+      });
+      if (!response.ok && response.status !== 401) {
+        throw new Error("Sign out failed. Try again.");
+      }
+      forgetCredential();
+      window.location.assign("/login");
+    } catch (caught) {
+      setLogoutError(
+        caught instanceof Error
+          ? caught.message
+          : "Sign out failed. Try again.",
+      );
+      setLoggingOut(false);
+    }
+  };
+
   return (
-    <main className={thread ? "workspace workspace-thread-open" : "workspace"}>
-      <aside className="sidebar">
+    <main
+      className={`${thread ? "workspace workspace-thread-open" : "workspace"}${mobileNavOpen ? " mobile-nav-open" : ""}`}
+    >
+      <button
+        aria-label="Dismiss channel navigation"
+        className="mobile-nav-backdrop"
+        onClick={() => setMobileNavOpen(false)}
+        type="button"
+      />
+      <aside className="sidebar" id="channel-navigation">
         <div className="workspace-switcher">
           <span className="brand-mark">B</span>
           <span className="workspace-name">Buzz</span>
           <ChevronDown aria-hidden="true" size={15} />
+          <button
+            aria-label="Close channel navigation"
+            className="sidebar-close-button"
+            onClick={() => setMobileNavOpen(false)}
+            type="button"
+          >
+            <X aria-hidden="true" size={20} />
+          </button>
         </div>
         <nav className="primary-nav" aria-label="Workspace">
           <button type="button">
@@ -97,12 +156,14 @@ export function WorkspaceShell({ initial }: { initial: WorkspaceView }) {
         <ChannelGroup
           channels={channelGroups.streams}
           label="Channels"
+          onNavigate={() => setMobileNavOpen(false)}
           selectedId={initial.selectedChannel.id}
         />
         {channelGroups.forums.length > 0 ? (
           <ChannelGroup
             channels={channelGroups.forums}
             label="Forums"
+            onNavigate={() => setMobileNavOpen(false)}
             selectedId={initial.selectedChannel.id}
           />
         ) : null}
@@ -110,6 +171,7 @@ export function WorkspaceShell({ initial }: { initial: WorkspaceView }) {
           <ChannelGroup
             channels={channelGroups.dms}
             label="Direct messages"
+            onNavigate={() => setMobileNavOpen(false)}
             selectedId={initial.selectedChannel.id}
           />
         ) : null}
@@ -118,14 +180,38 @@ export function WorkspaceShell({ initial }: { initial: WorkspaceView }) {
           <Avatar profile={initial.identity} small />
           <div>
             <strong>{initial.identity.name}</strong>
-            <span>Server identity</span>
+            <span>Browser identity</span>
           </div>
           <span className="presence-dot" aria-label="Online" role="status" />
+          <button
+            aria-label="Sign out"
+            className="logout-button"
+            disabled={loggingOut}
+            onClick={logout}
+            type="button"
+          >
+            <LogOut aria-hidden="true" size={16} />
+          </button>
         </div>
+        {logoutError ? (
+          <p className="sidebar-error" role="alert">
+            {logoutError}
+          </p>
+        ) : null}
       </aside>
 
       <section className="channel-panel">
         <header className="channel-header">
+          <button
+            aria-controls="channel-navigation"
+            aria-expanded={mobileNavOpen}
+            aria-label="Open channel navigation"
+            className="mobile-menu-button"
+            onClick={() => setMobileNavOpen(true)}
+            type="button"
+          >
+            <Menu aria-hidden="true" size={20} />
+          </button>
           <div className="channel-title">
             {initial.selectedChannel.visibility === "private" ? (
               <LockKeyhole aria-hidden="true" size={17} />
@@ -252,10 +338,12 @@ export function WorkspaceShell({ initial }: { initial: WorkspaceView }) {
 
 function ChannelGroup({
   label,
+  onNavigate,
   channels,
   selectedId,
 }: {
   label: string;
+  onNavigate: () => void;
   channels: WorkspaceView["channels"];
   selectedId: string;
 }) {
@@ -275,6 +363,7 @@ function ChannelGroup({
             }
             href={`/channels/${channel.id}`}
             key={channel.id}
+            onClick={onNavigate}
           >
             {channel.type === "dm" ? (
               <span className="dm-dot" />
