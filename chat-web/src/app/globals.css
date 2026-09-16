@@ -882,6 +882,46 @@ a {
   gap: 8px;
 }
 
+.pairing-code-block {
+  display: grid;
+  width: 100%;
+  gap: 6px;
+  text-align: left;
+}
+
+.pairing-code-block label {
+  color: var(--ink);
+  font-size: 10px;
+  font-weight: 680;
+}
+
+.pairing-code-block textarea {
+  width: 100%;
+  min-width: 0;
+  padding: 9px 10px;
+  resize: vertical;
+  border: 1px solid var(--input-border);
+  border-radius: 8px;
+  outline: 0;
+  background: var(--panel);
+  color: var(--input-ink);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.pairing-code-block textarea:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgb(100 86 199 / 11%);
+}
+
+.pairing-code-block span {
+  color: var(--muted);
+  font-size: 9px;
+  line-height: 1.45;
+}
+
 .pairing-secondary-actions button,
 .pairing-cancel {
   display: inline-flex;

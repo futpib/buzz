@@ -79,9 +79,12 @@ export function LoginForm({
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [pairing, setPairing] = useState<PairingSnapshot | null>(null);
-  const [copied, setCopied] = useState(false);
+  const [copyStatus, setCopyStatus] = useState<"idle" | "copied" | "selected">(
+    "idle",
+  );
   const automaticAttempt = useRef(false);
   const pairingSession = useRef<BrowserPairingSession | null>(null);
+  const pairingCodeField = useRef<HTMLTextAreaElement | null>(null);
   const redirectTimer = useRef<number | null>(null);
 
   const authenticate = useCallback(async (credential: BrowserCredential) => {
@@ -107,7 +110,7 @@ export function LoginForm({
 
   const startPairing = useCallback(async () => {
     pairingSession.current?.dispose();
-    setCopied(false);
+    setCopyStatus("idle");
     setError(null);
     const session = new BrowserPairingSession(pairingRelayUrl, {
       onChange: (snapshot) => {
@@ -165,12 +168,29 @@ export function LoginForm({
 
   const copyPairingCode = async () => {
     if (!pairing?.qrUri) return;
+    const selectCode = () => {
+      const field = pairingCodeField.current;
+      if (!field) return;
+      field.focus();
+      field.select();
+      field.setSelectionRange(0, field.value.length);
+    };
+
     try {
-      await navigator.clipboard.writeText(pairing.qrUri);
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 2_000);
+      if (!window.isSecureContext || !navigator.clipboard?.writeText) {
+        selectCode();
+        if (!document.execCommand("copy")) {
+          setCopyStatus("selected");
+          return;
+        }
+      } else {
+        await navigator.clipboard.writeText(pairing.qrUri);
+      }
+      setCopyStatus("copied");
+      window.setTimeout(() => setCopyStatus("idle"), 2_000);
     } catch {
-      setError("Could not copy the pairing code.");
+      selectCode();
+      setCopyStatus("selected");
     }
   };
 
@@ -247,14 +267,35 @@ export function LoginForm({
                 <Smartphone aria-hidden="true" size={18} />
                 Open Buzz Android
               </a>
+              <div className="pairing-code-block">
+                <label htmlFor="pairing-code">One-time pairing code</label>
+                <textarea
+                  aria-describedby="pairing-code-help"
+                  autoCapitalize="none"
+                  autoComplete="off"
+                  id="pairing-code"
+                  onFocus={(event) => event.currentTarget.select()}
+                  readOnly
+                  ref={pairingCodeField}
+                  rows={4}
+                  spellCheck={false}
+                  value={pairing.qrUri}
+                  wrap="soft"
+                />
+                <span id="pairing-code-help">
+                  {copyStatus === "selected"
+                    ? "Selected — long-press the code and choose Copy."
+                    : "If Copy is blocked on HTTP, long-press this code to copy it manually."}
+                </span>
+              </div>
               <div className="pairing-secondary-actions">
                 <button onClick={() => void copyPairingCode()} type="button">
-                  {copied ? (
+                  {copyStatus === "copied" ? (
                     <Check aria-hidden="true" size={15} />
                   ) : (
                     <Copy aria-hidden="true" size={15} />
                   )}
-                  {copied ? "Copied" : "Copy code"}
+                  {copyStatus === "copied" ? "Copied" : "Copy code"}
                 </button>
                 <button onClick={cancelPairing} type="button">
                   <X aria-hidden="true" size={15} />
