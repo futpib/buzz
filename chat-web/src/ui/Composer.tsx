@@ -1,6 +1,6 @@
 "use client";
 
-import { ArrowUp, LoaderCircle } from "lucide-react";
+import { ArrowUp, LoaderCircle, X } from "lucide-react";
 import { useRef, useState, useTransition } from "react";
 
 import { loadCredential, makeMessageEvent } from "@/client/identity";
@@ -9,11 +9,19 @@ export function Composer({
   channelId,
   channelName,
   rootId = null,
+  parentId = null,
+  replyingTo = null,
+  cancelReply,
+  onSent,
   forum = false,
 }: {
   channelId: string;
   channelName: string;
   rootId?: string | null;
+  parentId?: string | null;
+  replyingTo?: string | null;
+  cancelReply?: () => void;
+  onSent?: () => void;
   forum?: boolean;
 }) {
   const [content, setContent] = useState("");
@@ -37,6 +45,7 @@ export function Composer({
           channelId,
           content: message,
           rootId,
+          parentId,
           forum,
         });
         const response = await fetch("/api/events", {
@@ -57,6 +66,7 @@ export function Composer({
           throw new Error(body?.error || "Message was not sent");
         }
         setContent("");
+        onSent?.();
         textarea.current?.focus();
       } catch (caught) {
         setError(
@@ -68,6 +78,16 @@ export function Composer({
 
   return (
     <div className={rootId ? "composer composer-thread" : "composer"}>
+      {rootId && replyingTo ? (
+        <div className="composer-reply-target">
+          <span>
+            Replying to <strong>{replyingTo}</strong>
+          </span>
+          <button aria-label="Cancel reply" onClick={cancelReply} type="button">
+            <X aria-hidden="true" size={15} />
+          </button>
+        </div>
+      ) : null}
       <div className="composer-box">
         <textarea
           aria-label={rootId ? "Reply to thread" : `Message ${channelName}`}
@@ -79,7 +99,13 @@ export function Composer({
               send();
             }
           }}
-          placeholder={rootId ? "Reply…" : `Message #${channelName}`}
+          placeholder={
+            rootId && replyingTo
+              ? `Reply to ${replyingTo}…`
+              : rootId
+                ? "Reply…"
+                : `Message #${channelName}`
+          }
           ref={textarea}
           rows={1}
           value={content}

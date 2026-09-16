@@ -35,14 +35,35 @@ export function validateMessageEvent(
   if (channels.length !== 1 || !UUID.test(channels[0])) {
     throw new Error("Message must target exactly one valid channel");
   }
-  const roots = tagValues(event, "e");
-  if (roots.length > 1 || (roots[0] && !EVENT_ID.test(roots[0]))) {
-    throw new Error("Message has an invalid thread root");
+  const references = event.tags.filter((tag) => tag[0] === "e");
+  if (
+    references.length > 2 ||
+    references.some(
+      (tag) =>
+        !EVENT_ID.test(tag[1] ?? "") ||
+        (tag[3] !== "root" && tag[3] !== "reply"),
+    )
+  ) {
+    throw new Error("Message has invalid thread references");
   }
-  if (event.kind === 45003 && roots.length !== 1) {
+  const rootReferences = references.filter((tag) => tag[3] === "root");
+  const replyReferences = references.filter((tag) => tag[3] === "reply");
+  if (
+    rootReferences.length > 1 ||
+    replyReferences.length > 1 ||
+    (references.length === 2 &&
+      (rootReferences.length !== 1 ||
+        replyReferences.length !== 1 ||
+        rootReferences[0][1] === replyReferences[0][1])) ||
+    (references.length === 1 && replyReferences.length !== 1)
+  ) {
+    throw new Error("Message has invalid NIP-10 thread markers");
+  }
+  const isReply = replyReferences.length === 1;
+  if (event.kind === 45003 && !isReply) {
     throw new Error("Forum replies require a thread root");
   }
-  if (event.kind === 45001 && roots.length !== 0) {
+  if (event.kind === 45001 && isReply) {
     throw new Error("Forum topics cannot be replies");
   }
 }

@@ -36,6 +36,24 @@ test("browser signing returns only public signed events", () => {
   assert.deepEqual(message.tags.at(-1), credential.authTag);
 });
 
+test("nested browser replies carry canonical root and parent markers", () => {
+  const rootId = "a".repeat(64);
+  const parentId = "b".repeat(64);
+  const message = makeMessageEvent(credential, {
+    channelId: "90db6dbb-a9f1-4c04-a4bb-eb5d2beec82b",
+    content: "nested",
+    rootId,
+    parentId,
+  });
+
+  assert.equal(verifyEvent(message), true);
+  assert.deepEqual(message.tags.slice(0, 3), [
+    ["h", "90db6dbb-a9f1-4c04-a4bb-eb5d2beec82b"],
+    ["e", rootId, "", "root"],
+    ["e", parentId, "", "reply"],
+  ]);
+});
+
 test("browser media auth is public, scoped, fresh, and key-free", () => {
   const createdAt = 1_700_000_000;
   const event = makeMediaGetAuthEvent(

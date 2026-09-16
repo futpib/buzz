@@ -19,11 +19,15 @@ export function MessageRow({
   channelId,
   compact = false,
   hideThreadLink = false,
+  onReply,
+  replyingTo,
 }: {
   message: MessageView;
   channelId: string;
   compact?: boolean;
   hideThreadLink?: boolean;
+  onReply?: () => void;
+  replyingTo?: string | null;
 }) {
   return (
     <article
@@ -37,6 +41,9 @@ export function MessageRow({
           <MessageTime timestamp={message.createdAt} />
           {message.editedAt ? <span>edited</span> : null}
         </div>
+        {replyingTo ? (
+          <p className="message-reply-context">Replying to {replyingTo}</p>
+        ) : null}
         <MessageBody content={message.content} />
         {message.reactions.length > 0 ? (
           <ul className="reaction-list" aria-label="Reactions">
@@ -62,6 +69,16 @@ export function MessageRow({
             {message.replyCount}{" "}
             {message.replyCount === 1 ? "reply" : "replies"}
           </Link>
+        ) : null}
+        {onReply ? (
+          <button
+            className="message-reply-action"
+            onClick={onReply}
+            type="button"
+          >
+            <MessageCircle aria-hidden="true" size={13} strokeWidth={2.2} />
+            Reply
+          </button>
         ) : null}
       </div>
     </article>

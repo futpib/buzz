@@ -1,12 +1,8 @@
 "use client";
 
 import {
-  Bell,
-  ChevronDown,
   Hash,
-  Inbox,
   LockKeyhole,
-  LogOut,
   Menu,
   MessageSquareText,
   PanelRightClose,
@@ -15,16 +11,16 @@ import {
   X,
 } from "lucide-react";
 import Link from "next/link";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import type { ChannelSnapshot, WorkspaceView } from "@/server/types";
-import { forgetCredential } from "@/client/identity";
-import { Avatar } from "@/ui/Avatar";
 import { Composer } from "@/ui/Composer";
 import { MessageRow } from "@/ui/MessageRow";
 import { SearchDialog } from "@/ui/SearchDialog";
+import { WorkspaceSidebar } from "@/ui/WorkspaceSidebar";
 
 type LiveState = "connecting" | "live" | "reconnecting";
+type ReplyTarget = { id: string; name: string };
 
 export function WorkspaceShell({ initial }: { initial: WorkspaceView }) {
   const [timeline, setTimeline] = useState(initial.timeline);
@@ -32,15 +28,18 @@ export function WorkspaceShell({ initial }: { initial: WorkspaceView }) {
   const [liveState, setLiveState] = useState<LiveState>("connecting");
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
-  const [loggingOut, setLoggingOut] = useState(false);
-  const [logoutError, setLogoutError] = useState<string | null>(null);
+  const [replyTarget, setReplyTarget] = useState<ReplyTarget | null>(null);
   const timelineEnd = useRef<HTMLDivElement>(null);
+  const threadScroller = useRef<HTMLDivElement>(null);
+  const threadContent = useRef<HTMLDivElement>(null);
   const rootId = initial.thread?.rootId ?? null;
+  const openThreadId = thread?.rootId ?? null;
 
   useEffect(() => {
     setTimeline(initial.timeline);
     setThread(initial.thread);
     setMobileNavOpen(false);
+    setReplyTarget(null);
   }, [initial]);
 
   useEffect(() => {
@@ -77,47 +76,36 @@ export function WorkspaceShell({ initial }: { initial: WorkspaceView }) {
     }
   }, [timeline.length]);
 
-  const channelGroups = useMemo(() => {
-    const active = initial.channels.filter((channel) => !channel.archived);
-    return {
-      streams: active.filter((channel) => channel.type === "stream"),
-      forums: active.filter((channel) => channel.type === "forum"),
-      dms: active.filter((channel) => channel.type === "dm"),
+  useEffect(() => {
+    const scroller = threadScroller.current;
+    const content = threadContent.current;
+    if (!openThreadId || !scroller || !content) return;
+    const scrollToLatest = () => {
+      scroller.scrollTop = scroller.scrollHeight;
     };
-  }, [initial.channels]);
+    const frame = requestAnimationFrame(scrollToLatest);
+    const observer = new ResizeObserver(scrollToLatest);
+    observer.observe(content);
+    const settled = window.setTimeout(() => observer.disconnect(), 1_500);
+    return () => {
+      cancelAnimationFrame(frame);
+      clearTimeout(settled);
+      observer.disconnect();
+    };
+  }, [openThreadId]);
 
   const forum = initial.selectedChannel.type === "forum";
+  const threadAuthors = new Map(
+    [thread?.root, ...(thread?.replies ?? [])]
+      .filter((message) => message !== null && message !== undefined)
+      .map((message) => [message.id, message.author.name]),
+  );
   const liveLabel =
     liveState === "live"
       ? "Live"
       : liveState === "connecting"
         ? "Connecting"
         : "Reconnecting";
-
-  const logout = async () => {
-    if (loggingOut) return;
-    setLoggingOut(true);
-    setLogoutError(null);
-    try {
-      const response = await fetch("/api/auth/logout", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: "{}",
-      });
-      if (!response.ok && response.status !== 401) {
-        throw new Error("Sign out failed. Try again.");
-      }
-      forgetCredential();
-      window.location.assign("/login");
-    } catch (caught) {
-      setLogoutError(
-        caught instanceof Error
-          ? caught.message
-          : "Sign out failed. Try again.",
-      );
-      setLoggingOut(false);
-    }
-  };
 
   return (
     <main
@@ -129,78 +117,13 @@ export function WorkspaceShell({ initial }: { initial: WorkspaceView }) {
         onClick={() => setMobileNavOpen(false)}
         type="button"
       />
-      <aside className="sidebar" id="channel-navigation">
-        <div className="workspace-switcher">
-          <span className="brand-mark">B</span>
-          <span className="workspace-name">Buzz</span>
-          <ChevronDown aria-hidden="true" size={15} />
-          <button
-            aria-label="Close channel navigation"
-            className="sidebar-close-button"
-            onClick={() => setMobileNavOpen(false)}
-            type="button"
-          >
-            <X aria-hidden="true" size={20} />
-          </button>
-        </div>
-        <nav className="primary-nav" aria-label="Workspace">
-          <button type="button">
-            <Inbox aria-hidden="true" size={18} /> Inbox
-          </button>
-          <button type="button">
-            <MessageSquareText aria-hidden="true" size={18} /> Threads
-          </button>
-          <button type="button">
-            <Bell aria-hidden="true" size={18} /> Activity
-          </button>
-        </nav>
-
-        <ChannelGroup
-          channels={channelGroups.streams}
-          label="Channels"
-          onNavigate={() => setMobileNavOpen(false)}
-          selectedId={initial.selectedChannel.id}
-        />
-        {channelGroups.forums.length > 0 ? (
-          <ChannelGroup
-            channels={channelGroups.forums}
-            label="Forums"
-            onNavigate={() => setMobileNavOpen(false)}
-            selectedId={initial.selectedChannel.id}
-          />
-        ) : null}
-        {channelGroups.dms.length > 0 ? (
-          <ChannelGroup
-            channels={channelGroups.dms}
-            label="Direct messages"
-            onNavigate={() => setMobileNavOpen(false)}
-            selectedId={initial.selectedChannel.id}
-          />
-        ) : null}
-
-        <div className="identity-card">
-          <Avatar profile={initial.identity} small />
-          <div>
-            <strong>{initial.identity.name}</strong>
-            <span>Browser identity</span>
-          </div>
-          <span className="presence-dot" aria-label="Online" role="status" />
-          <button
-            aria-label="Sign out"
-            className="logout-button"
-            disabled={loggingOut}
-            onClick={logout}
-            type="button"
-          >
-            <LogOut aria-hidden="true" size={16} />
-          </button>
-        </div>
-        {logoutError ? (
-          <p className="sidebar-error" role="alert">
-            {logoutError}
-          </p>
-        ) : null}
-      </aside>
+      <WorkspaceSidebar
+        activePage="channel"
+        channels={initial.channels}
+        close={() => setMobileNavOpen(false)}
+        identity={initial.identity}
+        selectedId={initial.selectedChannel.id}
+      />
 
       <section className="channel-panel">
         <header className="channel-header">
@@ -231,7 +154,12 @@ export function WorkspaceShell({ initial }: { initial: WorkspaceView }) {
             <span className={`live-status live-${liveState}`}>
               <span /> {liveLabel}
             </span>
-            <button aria-label="Channel members" type="button">
+            <button
+              aria-label="Channel members"
+              disabled
+              title="Channel members are not available yet"
+              type="button"
+            >
               <Users aria-hidden="true" size={18} />
             </button>
             <button
@@ -295,96 +223,72 @@ export function WorkspaceShell({ initial }: { initial: WorkspaceView }) {
               <X aria-hidden="true" size={19} />
             </Link>
           </header>
-          <div className="thread-messages">
-            {thread.root ? (
-              <MessageRow
-                channelId={initial.selectedChannel.id}
-                hideThreadLink
-                message={thread.root}
-              />
-            ) : (
-              <p className="thread-unavailable">
-                This message is no longer available.
-              </p>
-            )}
-            <div className="reply-divider">
-              <span>
-                {thread.replies.length}{" "}
-                {thread.replies.length === 1 ? "reply" : "replies"}
-              </span>
-              <i />
+          <div className="thread-messages" ref={threadScroller}>
+            <div className="thread-messages-content" ref={threadContent}>
+              {thread.root ? (
+                <MessageRow
+                  channelId={initial.selectedChannel.id}
+                  hideThreadLink
+                  message={thread.root}
+                  onReply={() =>
+                    setReplyTarget({
+                      id: thread.root?.id ?? thread.rootId,
+                      name: thread.root?.author.name ?? "thread",
+                    })
+                  }
+                />
+              ) : (
+                <p className="thread-unavailable">
+                  This message is no longer available.
+                </p>
+              )}
+              <div className="reply-divider">
+                <span>
+                  {thread.replies.length}{" "}
+                  {thread.replies.length === 1 ? "reply" : "replies"}
+                </span>
+                <i />
+              </div>
+              {thread.replies.map((message) => (
+                <MessageRow
+                  channelId={initial.selectedChannel.id}
+                  compact
+                  hideThreadLink
+                  key={message.id}
+                  message={message}
+                  onReply={() =>
+                    setReplyTarget({
+                      id: message.id,
+                      name: message.author.name,
+                    })
+                  }
+                  replyingTo={
+                    message.parentId && message.parentId !== thread.rootId
+                      ? (threadAuthors.get(message.parentId) ??
+                        "a previous reply")
+                      : null
+                  }
+                />
+              ))}
             </div>
-            {thread.replies.map((message) => (
-              <MessageRow
-                channelId={initial.selectedChannel.id}
-                compact
-                hideThreadLink
-                key={message.id}
-                message={message}
-              />
-            ))}
           </div>
           <Composer
             channelId={initial.selectedChannel.id}
             channelName={initial.selectedChannel.name}
             forum={forum}
+            parentId={replyTarget?.id ?? thread.rootId}
+            replyingTo={replyTarget?.name ?? null}
+            cancelReply={() => setReplyTarget(null)}
+            onSent={() => setReplyTarget(null)}
             rootId={thread.rootId}
           />
         </aside>
       ) : (
-        <button
-          className="thread-panel-hint"
-          aria-label="No thread open"
-          type="button"
-        >
+        <span className="thread-panel-hint" aria-hidden="true">
           <PanelRightClose aria-hidden="true" size={17} />
-        </button>
+        </span>
       )}
       {searchOpen ? <SearchDialog close={() => setSearchOpen(false)} /> : null}
     </main>
-  );
-}
-
-function ChannelGroup({
-  label,
-  onNavigate,
-  channels,
-  selectedId,
-}: {
-  label: string;
-  onNavigate: () => void;
-  channels: WorkspaceView["channels"];
-  selectedId: string;
-}) {
-  if (channels.length === 0) return null;
-  return (
-    <div className="channel-group">
-      <div className="channel-group-title">
-        <ChevronDown aria-hidden="true" size={13} /> {label}
-      </div>
-      <nav aria-label={label}>
-        {channels.map((channel) => (
-          <Link
-            className={
-              channel.id === selectedId
-                ? "channel-link channel-link-active"
-                : "channel-link"
-            }
-            href={`/channels/${channel.id}`}
-            key={channel.id}
-            onClick={onNavigate}
-          >
-            {channel.type === "dm" ? (
-              <span className="dm-dot" />
-            ) : channel.visibility === "private" ? (
-              <LockKeyhole aria-hidden="true" size={14} />
-            ) : (
-              <Hash aria-hidden="true" size={15} />
-            )}
-            <span>{channel.name}</span>
-          </Link>
-        ))}
-      </nav>
-    </div>
   );
 }

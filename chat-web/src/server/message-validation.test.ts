@@ -21,6 +21,18 @@ function message(kind = 9): NostrEvent {
   ) as NostrEvent;
 }
 
+function reply(tags: string[][]): NostrEvent {
+  return finalizeEvent(
+    {
+      kind: 9,
+      created_at: now,
+      tags: [["h", channel], ...tags],
+      content: "reply",
+    },
+    secret,
+  ) as NostrEvent;
+}
+
 test("accepts only fresh signed message events from the login identity", () => {
   const event = message();
   assert.doesNotThrow(() => validateMessageEvent(event.pubkey, event, now));
@@ -35,5 +47,28 @@ test("accepts only fresh signed message events from the login identity", () => {
   assert.throws(
     () => validateMessageEvent(event.pubkey, event, now + 61),
     /stale/,
+  );
+});
+
+test("accepts canonical direct and nested replies but rejects ambiguous markers", () => {
+  const root = "a".repeat(64);
+  const parent = "b".repeat(64);
+  for (const event of [
+    reply([["e", root, "", "reply"]]),
+    reply([
+      ["e", root, "", "root"],
+      ["e", parent, "", "reply"],
+    ]),
+  ]) {
+    assert.doesNotThrow(() => validateMessageEvent(event.pubkey, event, now));
+  }
+
+  const ambiguous = reply([
+    ["e", root, "", "reply"],
+    ["e", parent, "", "reply"],
+  ]);
+  assert.throws(
+    () => validateMessageEvent(ambiguous.pubkey, ambiguous, now),
+    /NIP-10/,
   );
 });

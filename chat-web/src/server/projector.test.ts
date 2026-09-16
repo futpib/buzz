@@ -5,6 +5,7 @@ import {
   projectChannels,
   projectProfiles,
   projectThread,
+  projectThreadIndex,
   projectTimeline,
 } from "./projector";
 import type { NostrEvent } from "./types";
@@ -150,6 +151,60 @@ test("projects a root and chronological thread replies", () => {
   );
 });
 
+test("projects nested reply ancestry without splitting the thread", () => {
+  const viewer = "a".repeat(64);
+  const root = event(
+    "nested-root",
+    9,
+    "root",
+    [["h", "channel-a"]],
+    viewer,
+    20,
+  );
+  const parent = event(
+    "nested-parent",
+    9,
+    "parent",
+    [
+      ["h", "channel-a"],
+      ["e", root.id, "", "reply"],
+    ],
+    "b".repeat(64),
+    21,
+  );
+  const child = event(
+    "nested-child",
+    9,
+    "child",
+    [
+      ["h", "channel-a"],
+      ["e", root.id, "", "root"],
+      ["e", parent.id, "", "reply"],
+    ],
+    viewer,
+    22,
+  );
+
+  const thread = projectThread(
+    [child, root, parent],
+    "channel-a",
+    root.id,
+    new Map(),
+    viewer,
+  );
+  assert.deepEqual(
+    thread.replies.map((message) => [
+      message.content,
+      message.threadRootId,
+      message.parentId,
+    ]),
+    [
+      ["parent", root.id, root.id],
+      ["child", root.id, parent.id],
+    ],
+  );
+});
+
 test("raw relay replies stay out of the timeline and derive thread counts", () => {
   const viewer = "a".repeat(64);
   const root = event("root", 9, "root", [["h", "channel-a"]], viewer, 20);
@@ -169,4 +224,78 @@ test("raw relay replies stay out of the timeline and derive thread counts", () =
   assert.equal(rows[0].id, root.id);
   assert.equal(rows[0].replyCount, 1);
   assert.equal(rows[0].lastReplyAt, 21);
+});
+
+test("projects every channel root into a workspace thread index", () => {
+  const viewer = "a".repeat(64);
+  const other = "b".repeat(64);
+  const channels = [
+    {
+      id: "channel-a",
+      name: "alpha",
+      description: "",
+      type: "stream" as const,
+      visibility: "public" as const,
+      archived: false,
+    },
+    {
+      id: "channel-b",
+      name: "beta",
+      description: "",
+      type: "stream" as const,
+      visibility: "public" as const,
+      archived: false,
+    },
+  ];
+  const first = event("first", 9, "first", [["h", "channel-a"]], viewer, 20);
+  const second = event("second", 9, "second", [["h", "channel-b"]], other, 21);
+  const reply = event(
+    "reply",
+    9,
+    "reply",
+    [
+      ["h", "channel-a"],
+      ["e", first.id, "", "reply"],
+    ],
+    other,
+    22,
+  );
+  const threads = projectThreadIndex(
+    [first, second, reply],
+    channels,
+    new Map(),
+    viewer,
+  );
+  assert.deepEqual(
+    threads.map((thread) => [
+      thread.channel.id,
+      thread.root.id,
+      thread.root.replyCount,
+      thread.activityAt,
+    ]),
+    [
+      ["channel-a", first.id, 1, 22],
+      ["channel-b", second.id, 0, 21],
+    ],
+  );
+});
+
+test("projects an http profile picture for avatar rendering", () => {
+  const pubkey = "b".repeat(64);
+  const profiles = projectProfiles([
+    event(
+      "profile-picture",
+      0,
+      JSON.stringify({
+        display_name: "Picture Person",
+        picture: "https://relay.example/media/avatar.png",
+      }),
+      [],
+      pubkey,
+    ),
+  ]);
+  assert.equal(
+    profiles.get(pubkey)?.picture,
+    "https://relay.example/media/avatar.png",
+  );
 });

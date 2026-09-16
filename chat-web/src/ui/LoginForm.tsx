@@ -23,6 +23,7 @@ import { QRCodeSVG } from "qrcode.react";
 import {
   forgetCredential,
   loadCredential,
+  loadPersistentCredential,
   makeAuthEvent,
   parseAuthTag,
   storeCredential,
@@ -64,7 +65,7 @@ async function createBrowserSession(credential: BrowserCredential) {
   if (!sessionResponse.ok) {
     throw new Error(await errorMessage(sessionResponse, "Login failed"));
   }
-  storeCredential(credential);
+  await storeCredential(credential);
 }
 
 export function LoginForm({
@@ -94,7 +95,7 @@ export function LoginForm({
       await createBrowserSession(credential);
       return true;
     } catch (caught) {
-      forgetCredential();
+      await forgetCredential();
       setError(caught instanceof Error ? caught.message : "Login failed");
       setPending(false);
       return false;
@@ -144,7 +145,13 @@ export function LoginForm({
     if (automaticAttempt.current) return;
     automaticAttempt.current = true;
     const stored = loadCredential();
-    if (stored) void login(stored);
+    if (stored) {
+      void login(stored);
+      return;
+    }
+    void loadPersistentCredential().then((credential) => {
+      if (credential) void login(credential);
+    });
   }, [login]);
 
   useEffect(

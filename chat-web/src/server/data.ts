@@ -9,17 +9,24 @@ import {
   projectChannels,
   projectProfiles,
   projectThread,
+  projectThreadIndex,
   projectTimeline,
 } from "@/server/projector";
 import type { RelayFilter } from "@/server/relay";
 import type {
   ChannelSnapshot,
   ChannelView,
+  NostrEvent,
+  ThreadsWorkspaceView,
   WorkspaceView,
 } from "@/server/types";
 
 const CHANNEL_WINDOW_LIMIT = 80;
 const THREAD_WINDOW_LIMIT = 100;
+// Keep each history page comfortably below the relay/WebSocket request timeout.
+// The composite cursor makes these bounded pages exhaustive without dropping
+// events that share a timestamp.
+const THREAD_INDEX_EVENT_LIMIT = 500;
 
 export class UnknownChannelError extends Error {}
 
@@ -61,6 +68,40 @@ function mergeEvents<T extends { id: string }>(...groups: T[][]): T[] {
   return [...new Map(groups.flat().map((event) => [event.id, event])).values()];
 }
 
+async function loadChannelHistory(
+  session: AuthSession,
+  channelId: string,
+): Promise<NostrEvent[]> {
+  const events = new Map<string, NostrEvent>();
+  let until: number | undefined;
+  let beforeId: string | undefined;
+  for (;;) {
+    const filter: RelayFilter = {
+      kinds: [9, 39005, 40002, 40003, 40008, 45001, 45003],
+      "#h": [channelId],
+      limit: THREAD_INDEX_EVENT_LIMIT,
+    };
+    if (until !== undefined && beforeId !== undefined) {
+      filter.until = until;
+      filter.before_id = beforeId;
+    }
+    const page = await session.relay.query([filter]);
+    for (const event of page) events.set(event.id, event);
+    if (page.length < THREAD_INDEX_EVENT_LIMIT) break;
+    const tail = page.at(-1);
+    if (
+      !tail ||
+      (until === tail.created_at && beforeId === tail.id) ||
+      tail.created_at < 0
+    ) {
+      throw new Error(`Thread history pagination stalled for ${channelId}`);
+    }
+    until = tail.created_at;
+    beforeId = tail.id;
+  }
+  return [...events.values()];
+}
+
 function profileFilter(events: { pubkey: string }[], viewerPubkey: string) {
   const authors = [
     ...new Set([viewerPubkey, ...events.map((event) => event.pubkey)]),
@@ -88,6 +129,26 @@ export async function loadWorkspaceIndex(session: AuthSession): Promise<{
   const events = await session.relay.query(baseFilters(session.pubkey));
   const channels = projectChannels(events, session.pubkey);
   return { channels, defaultChannel: pickDefaultChannel(channels) };
+}
+
+export async function loadThreadsWorkspace(
+  session: AuthSession,
+): Promise<ThreadsWorkspaceView> {
+  const { channels } = await loadWorkspaceIndex(session);
+  const eventGroups = await Promise.all(
+    channels.map((channel) => loadChannelHistory(session, channel.id)),
+  );
+  const events = mergeEvents(...eventGroups);
+  const profileEvents = await session.relay.query([
+    profileFilter(events, session.pubkey),
+  ]);
+  const profiles = projectProfiles(profileEvents);
+  return {
+    identity: profiles.get(session.pubkey) ?? fallbackProfile(session.pubkey),
+    channels,
+    threads: projectThreadIndex(events, channels, profiles, session.pubkey),
+    generatedAt: Date.now(),
+  };
 }
 
 export async function loadWorkspace(

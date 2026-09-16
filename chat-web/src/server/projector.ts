@@ -4,6 +4,7 @@ import type {
   NostrEvent,
   ProfileView,
   ReactionView,
+  ThreadSummaryView,
   ThreadView,
 } from "@/server/types";
 
@@ -24,16 +25,23 @@ function hasBareTag(event: NostrEvent, key: string): boolean {
   return event.tags.some((tag) => tag.length === 1 && tag[0] === key);
 }
 
-function threadRootId(event: NostrEvent): string | null {
+function threadIds(event: NostrEvent): {
+  rootId: string;
+  parentId: string;
+} | null {
   const eventTags = event.tags.filter(
     (tag) => tag[0] === "e" && typeof tag[1] === "string",
   );
-  return (
-    eventTags.find((tag) => tag[3] === "root")?.[1] ??
-    eventTags.find((tag) => tag[3] === "reply")?.[1] ??
-    eventTags[0]?.[1] ??
-    null
-  );
+  const root = eventTags.find((tag) => tag[3] === "root")?.[1];
+  const reply = eventTags.find((tag) => tag[3] === "reply")?.[1];
+  if (reply) return { rootId: root ?? reply, parentId: reply };
+  // Retain compatibility with older Buzz messages that used a bare e-tag.
+  const legacy = eventTags[0]?.[1];
+  return legacy ? { rootId: legacy, parentId: legacy } : null;
+}
+
+function threadRootId(event: NostrEvent): string | null {
+  return threadIds(event)?.rootId ?? null;
 }
 
 function isNewer(candidate: NostrEvent, current: NostrEvent): boolean {
@@ -291,8 +299,11 @@ function messageView(
   const edit = edits.get(event.id);
   const usableEdit = edit?.pubkey === event.pubkey ? edit : null;
   const summary = summaries.get(event.id);
+  const thread = threadIds(event);
   return {
     id: event.id,
+    threadRootId: thread?.rootId ?? null,
+    parentId: thread?.parentId ?? null,
     author: profiles.get(event.pubkey) ?? fallbackProfile(event.pubkey),
     content: usableEdit?.content ?? event.content,
     createdAt: event.created_at,
@@ -326,6 +337,28 @@ export function projectTimeline(
       messageView(event, profiles, viewerPubkey, edits, summaries, reactions),
     )
     .sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id));
+}
+
+export function projectThreadIndex(
+  events: NostrEvent[],
+  channels: ChannelView[],
+  profiles: Map<string, ProfileView>,
+  viewerPubkey: string,
+): ThreadSummaryView[] {
+  return channels
+    .flatMap((channel) =>
+      projectTimeline(events, channel.id, profiles, viewerPubkey).map(
+        (root) => ({
+          channel,
+          root,
+          activityAt: root.lastReplyAt ?? root.createdAt,
+        }),
+      ),
+    )
+    .sort(
+      (a, b) =>
+        b.activityAt - a.activityAt || b.root.id.localeCompare(a.root.id),
+    );
 }
 
 export function projectThread(

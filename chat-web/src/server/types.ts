@@ -33,6 +33,8 @@ export type ReactionView = {
 
 export type MessageView = {
   id: string;
+  threadRootId: string | null;
+  parentId: string | null;
   author: ProfileView;
   content: string;
   createdAt: number;
@@ -47,6 +49,19 @@ export type ThreadView = {
   rootId: string;
   root: MessageView | null;
   replies: MessageView[];
+};
+
+export type ThreadSummaryView = {
+  channel: ChannelView;
+  root: MessageView;
+  activityAt: number;
+};
+
+export type ThreadsWorkspaceView = {
+  identity: ProfileView;
+  channels: ChannelView[];
+  threads: ThreadSummaryView[];
+  generatedAt: number;
 };
 
 export type WorkspaceView = {

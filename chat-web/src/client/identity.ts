@@ -10,6 +10,10 @@ export type BrowserCredential = {
   authTag: string[] | null;
 };
 
+const IDENTITY_DATABASE = "buzz-web-identity";
+const IDENTITY_STORE = "credentials";
+const IDENTITY_RECORD = "current";
+
 function secretKey(nsec: string): Uint8Array {
   const decoded = nip19.decode(nsec.trim());
   if (decoded.type !== "nsec") throw new Error("Enter a valid nsec key");
@@ -58,11 +62,19 @@ export function makeMessageEvent(
     channelId: string;
     content: string;
     rootId?: string | null;
+    parentId?: string | null;
     forum?: boolean;
   },
 ): NostrEvent {
   const tags = [["h", input.channelId]];
-  if (input.rootId) tags.push(["e", input.rootId, "", "reply"]);
+  if (input.rootId) {
+    if (input.parentId && input.parentId !== input.rootId) {
+      tags.push(["e", input.rootId, "", "root"]);
+      tags.push(["e", input.parentId, "", "reply"]);
+    } else {
+      tags.push(["e", input.rootId, "", "reply"]);
+    }
+  }
   if (credential.authTag) tags.push([...credential.authTag]);
   const kind = input.rootId
     ? input.forum
@@ -116,16 +128,13 @@ export function encodeNostrAuthorization(event: NostrEvent): string {
     .replace(/=+$/, "")}`;
 }
 
-export function storeCredential(credential: BrowserCredential): void {
-  sessionStorage.setItem(BROWSER_CREDENTIAL_KEY, JSON.stringify(credential));
-}
-
-export function loadCredential(): BrowserCredential | null {
-  const raw = sessionStorage.getItem(BROWSER_CREDENTIAL_KEY);
-  if (!raw) return null;
+function parseStoredCredential(raw: unknown): BrowserCredential | null {
   try {
-    const parsed = JSON.parse(raw) as Partial<BrowserCredential>;
-    if (typeof parsed.nsec !== "string") return null;
+    const parsed =
+      typeof raw === "string"
+        ? (JSON.parse(raw) as Partial<BrowserCredential>)
+        : (raw as Partial<BrowserCredential>);
+    if (!parsed || typeof parsed.nsec !== "string") return null;
     if (
       parsed.authTag !== null &&
       parsed.authTag !== undefined &&
@@ -134,12 +143,87 @@ export function loadCredential(): BrowserCredential | null {
     ) {
       return null;
     }
+    secretKey(parsed.nsec);
     return { nsec: parsed.nsec, authTag: parsed.authTag ?? null };
   } catch {
     return null;
   }
 }
 
-export function forgetCredential(): void {
+function openIdentityDatabase(): Promise<IDBDatabase> {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(IDENTITY_DATABASE, 1);
+    request.onupgradeneeded = () => {
+      if (!request.result.objectStoreNames.contains(IDENTITY_STORE)) {
+        request.result.createObjectStore(IDENTITY_STORE);
+      }
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () =>
+      reject(request.error ?? new Error("Identity storage failed"));
+  });
+}
+
+async function persistentIdentity(
+  mode: "get" | "put" | "delete",
+  credential?: BrowserCredential,
+): Promise<unknown> {
+  const database = await openIdentityDatabase();
+  try {
+    return await new Promise((resolve, reject) => {
+      const transaction = database.transaction(
+        IDENTITY_STORE,
+        mode === "get" ? "readonly" : "readwrite",
+      );
+      const store = transaction.objectStore(IDENTITY_STORE);
+      const request =
+        mode === "get"
+          ? store.get(IDENTITY_RECORD)
+          : mode === "put"
+            ? store.put(credential, IDENTITY_RECORD)
+            : store.delete(IDENTITY_RECORD);
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () =>
+        reject(request.error ?? new Error("Identity storage failed"));
+    });
+  } finally {
+    database.close();
+  }
+}
+
+export async function storeCredential(
+  credential: BrowserCredential,
+): Promise<void> {
+  sessionStorage.setItem(BROWSER_CREDENTIAL_KEY, JSON.stringify(credential));
+  await persistentIdentity("put", credential);
+}
+
+export function loadCredential(): BrowserCredential | null {
+  const raw = sessionStorage.getItem(BROWSER_CREDENTIAL_KEY);
+  if (!raw) return null;
+  return parseStoredCredential(raw);
+}
+
+export async function loadPersistentCredential(): Promise<BrowserCredential | null> {
+  try {
+    const credential = parseStoredCredential(await persistentIdentity("get"));
+    if (credential) {
+      sessionStorage.setItem(
+        BROWSER_CREDENTIAL_KEY,
+        JSON.stringify(credential),
+      );
+    }
+    return credential;
+  } catch {
+    return null;
+  }
+}
+
+export async function forgetCredential(): Promise<void> {
   sessionStorage.removeItem(BROWSER_CREDENTIAL_KEY);
+  try {
+    await persistentIdentity("delete");
+  } catch {
+    // A failed database deletion must not retain the active tab credential.
+  }
 }
