@@ -5,7 +5,7 @@ import { useEffect, useState } from "react";
 
 import {
   encodeNostrAuthorization,
-  loadCredential,
+  loadSigningCredential,
   makeMediaGetAuthEvent,
 } from "@/client/identity";
 import { ImageLightbox } from "@/ui/ImageLightbox";
@@ -29,7 +29,7 @@ function loadProtectedMedia(targetHref: string, targetHost: string) {
   const cached = protectedMediaCache.get(targetHref);
   if (cached) return cached;
   const request = (async () => {
-    const credential = loadCredential();
+    const credential = await loadSigningCredential();
     if (!credential) throw new Error("Browser signing key is unavailable");
     const event = makeMediaGetAuthEvent(credential, targetHost);
     const response = await fetch(

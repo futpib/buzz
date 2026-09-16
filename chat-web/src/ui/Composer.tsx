@@ -3,7 +3,7 @@
 import { ArrowUp, LoaderCircle, X } from "lucide-react";
 import { useRef, useState, useTransition } from "react";
 
-import { loadCredential, makeMessageEvent } from "@/client/identity";
+import { loadSigningCredential, makeMessageEvent } from "@/client/identity";
 
 export function Composer({
   channelId,
@@ -35,7 +35,7 @@ export function Composer({
     setError(null);
     startTransition(async () => {
       try {
-        const credential = loadCredential();
+        const credential = await loadSigningCredential();
         if (!credential) {
           throw new Error(
             "Your browser signing key is unavailable. Sign in again.",

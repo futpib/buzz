@@ -1,5 +1,5 @@
 import { getRequestSession } from "@/server/auth";
-import { refreshSearchWorkspace, searchWorkspace } from "@/server/search";
+import { loadThreadsWorkspace, refreshThreadsWorkspace } from "@/server/data";
 
 export const dynamic = "force-dynamic";
 
@@ -12,11 +12,10 @@ export async function GET(request: Request): Promise<Response> {
     );
   }
   try {
-    const query = new URL(request.url).searchParams.get("q") ?? "";
     const fresh = new URL(request.url).searchParams.get("fresh") === "1";
     const view = fresh
-      ? await refreshSearchWorkspace(session, query)
-      : await searchWorkspace(session, query);
+      ? await refreshThreadsWorkspace(session)
+      : await loadThreadsWorkspace(session);
     return Response.json(view, {
       headers: {
         "Cache-Control": "private, no-cache",
@@ -24,18 +23,9 @@ export async function GET(request: Request): Promise<Response> {
       },
     });
   } catch (error) {
-    if (
-      error instanceof Error &&
-      error.message.startsWith("Search query must")
-    ) {
-      return Response.json(
-        { error: error.message },
-        { status: 400, headers: { "Cache-Control": "no-store" } },
-      );
-    }
-    console.error("web search failed", error);
+    console.error("web thread index refresh failed", error);
     return Response.json(
-      { error: "Search is temporarily unavailable" },
+      { error: "Threads are temporarily unavailable" },
       { status: 500, headers: { "Cache-Control": "no-store" } },
     );
   }

@@ -1,11 +1,13 @@
 "use client";
 
 import { LoaderCircle, Search, X } from "lucide-react";
-import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 
 import type { SearchResultView, SearchView } from "@/server/types";
 import { Avatar } from "@/ui/Avatar";
+import { ViewLink } from "@/ui/ViewLink";
+
+const searchViewCache = new Map<string, SearchView>();
 
 function ResultTime({ timestamp }: { timestamp: number }) {
   const date = new Date(timestamp * 1_000);
@@ -23,22 +25,11 @@ function ResultTime({ timestamp }: { timestamp: number }) {
   );
 }
 
-function Result({
-  result,
-  close,
-}: {
-  result: SearchResultView;
-  close: () => void;
-}) {
+function Result({ result }: { result: SearchResultView }) {
   const href = `/channels/${result.channelId}?thread=${result.threadRootId}`;
   return (
     <li>
-      <Link
-        className="search-result"
-        href={href}
-        onClick={close}
-        scroll={false}
-      >
+      <ViewLink className="search-result" href={href} scroll={false}>
         <Avatar profile={result.author} small />
         <span className="search-result-body">
           <span className="search-result-meta">
@@ -49,7 +40,7 @@ function Result({
           </span>
           <span className="search-result-content">{result.content}</span>
         </span>
-      </Link>
+      </ViewLink>
     </li>
   );
 }
@@ -80,13 +71,20 @@ export function SearchDialog({ close }: { close: () => void }) {
       setError(null);
       return;
     }
+    const cached = searchViewCache.get(normalized);
+    if (cached) {
+      setResults(cached.results);
+      setSearched(true);
+      setLoading(false);
+      setError(null);
+    }
     const controller = new AbortController();
     const timeout = window.setTimeout(async () => {
-      setLoading(true);
+      if (!cached) setLoading(true);
       setError(null);
       try {
         const response = await fetch(
-          `/api/search?${new URLSearchParams({ q: normalized })}`,
+          `/api/search?${new URLSearchParams({ q: normalized, fresh: "1" })}`,
           { cache: "no-store", signal: controller.signal },
         );
         if (response.status === 401) {
@@ -97,6 +95,7 @@ export function SearchDialog({ close }: { close: () => void }) {
         }
         const body = (await response.json()) as SearchView & { error?: string };
         if (!response.ok) throw new Error(body.error || "Search failed");
+        searchViewCache.set(normalized, body);
         setResults(body.results);
         setSearched(true);
       } catch (caught) {
@@ -170,7 +169,7 @@ export function SearchDialog({ close }: { close: () => void }) {
               </p>
               <ul>
                 {results.map((result) => (
-                  <Result close={close} key={result.id} result={result} />
+                  <Result key={result.id} result={result} />
                 ))}
               </ul>
             </>

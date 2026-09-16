@@ -13,6 +13,9 @@ export type BrowserCredential = {
 const IDENTITY_DATABASE = "buzz-web-identity";
 const IDENTITY_STORE = "credentials";
 const IDENTITY_RECORD = "current";
+let persistentCredentialRequest: Promise<BrowserCredential | null> | null =
+  null;
+let identityGeneration = 0;
 
 function secretKey(nsec: string): Uint8Array {
   const decoded = nip19.decode(nsec.trim());
@@ -194,6 +197,7 @@ async function persistentIdentity(
 export async function storeCredential(
   credential: BrowserCredential,
 ): Promise<void> {
+  identityGeneration += 1;
   sessionStorage.setItem(BROWSER_CREDENTIAL_KEY, JSON.stringify(credential));
   await persistentIdentity("put", credential);
 }
@@ -205,21 +209,34 @@ export function loadCredential(): BrowserCredential | null {
 }
 
 export async function loadPersistentCredential(): Promise<BrowserCredential | null> {
+  const generation = identityGeneration;
   try {
     const credential = parseStoredCredential(await persistentIdentity("get"));
-    if (credential) {
+    if (credential && generation === identityGeneration) {
       sessionStorage.setItem(
         BROWSER_CREDENTIAL_KEY,
         JSON.stringify(credential),
       );
     }
-    return credential;
+    return generation === identityGeneration ? credential : null;
   } catch {
     return null;
   }
 }
 
+export async function loadSigningCredential(): Promise<BrowserCredential | null> {
+  const active = loadCredential();
+  if (active) return active;
+  if (!persistentCredentialRequest) {
+    persistentCredentialRequest = loadPersistentCredential().finally(() => {
+      persistentCredentialRequest = null;
+    });
+  }
+  return persistentCredentialRequest;
+}
+
 export async function forgetCredential(): Promise<void> {
+  identityGeneration += 1;
   sessionStorage.removeItem(BROWSER_CREDENTIAL_KEY);
   try {
     await persistentIdentity("delete");

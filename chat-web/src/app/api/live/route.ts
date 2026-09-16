@@ -1,5 +1,5 @@
 import { getRequestSession } from "@/server/auth";
-import { loadChannelSnapshot } from "@/server/data";
+import { loadChannelSnapshot, markWorkspaceViewsStale } from "@/server/data";
 import { listenForChannelChanges } from "@/server/live";
 
 export const dynamic = "force-dynamic";
@@ -71,11 +71,13 @@ export async function GET(request: Request): Promise<Response> {
       };
 
       emit("status", { state: "connecting" });
-      void refresh();
       void listenForChannelChanges(
         session,
         channelId,
-        () => void refresh(),
+        () => {
+          markWorkspaceViewsStale(session, channelId);
+          void refresh();
+        },
         abort.signal,
       ).catch((error) => {
         emit("status", {

@@ -15,6 +15,7 @@ const LOGIN_TTL_MS = 4_500;
 const SESSION_TTL_MS = 8 * 60 * 60 * 1_000;
 
 export type AuthSession = {
+  cacheScope: string;
   pubkey: string;
   authTag: string[] | null;
   relay: RelayConnection;
@@ -131,6 +132,7 @@ export async function completeLogin(
   const token = randomBytes(32).toString("base64url");
   const hash = tokenHash(token);
   const session: AuthSession = {
+    cacheScope: randomUUID(),
     pubkey: event.pubkey,
     authTag:
       event.tags.filter((tag) => tag[0] === "auth").length === 1

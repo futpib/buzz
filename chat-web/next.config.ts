@@ -4,6 +4,12 @@ const nextConfig: NextConfig = {
   poweredByHeader: false,
   reactStrictMode: true,
   serverExternalPackages: ["nostr-tools"],
+  experimental: {
+    staleTimes: {
+      dynamic: 60,
+      static: 300,
+    },
+  },
   async headers() {
     return [
       {

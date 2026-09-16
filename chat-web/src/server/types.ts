@@ -1,3 +1,5 @@
+import type { ViewCacheState } from "@/server/view-cache";
+
 export type NostrEvent = {
   id: string;
   pubkey: string;
@@ -64,6 +66,7 @@ export type ThreadsWorkspaceView = {
   channels: ChannelView[];
   threads: ThreadSummaryView[];
   generatedAt: number;
+  cacheState: ViewCacheState;
 };
 
 export type WorkspaceView = {
@@ -73,6 +76,7 @@ export type WorkspaceView = {
   timeline: MessageView[];
   thread: ThreadView | null;
   generatedAt: number;
+  cacheState: ViewCacheState;
 };
 
 export type ChannelSnapshot = Pick<
@@ -96,4 +100,5 @@ export type SearchResultView = {
 export type SearchView = {
   query: string;
   results: SearchResultView[];
+  cacheState: ViewCacheState;
 };

@@ -1,9 +1,9 @@
 import { MessageCircle } from "lucide-react";
-import Link from "next/link";
 
 import type { MessageView } from "@/server/types";
 import { Avatar } from "@/ui/Avatar";
 import { MessageBody } from "@/ui/MessageBody";
+import { ViewLink } from "@/ui/ViewLink";
 
 function MessageTime({ timestamp }: { timestamp: number }) {
   const date = new Date(timestamp * 1000);
@@ -60,7 +60,7 @@ export function MessageRow({
           </ul>
         ) : null}
         {!hideThreadLink && message.replyCount > 0 ? (
-          <Link
+          <ViewLink
             aria-label={`${message.replyCount} ${message.replyCount === 1 ? "reply" : "replies"} to ${message.author.name}`}
             className={
               compact ? "thread-link thread-link-nested" : "thread-link"
@@ -86,7 +86,7 @@ export function MessageRow({
               {message.replyCount}{" "}
               {message.replyCount === 1 ? "reply" : "replies"}
             </span>
-          </Link>
+          </ViewLink>
         ) : null}
         {onReply ? (
           <button

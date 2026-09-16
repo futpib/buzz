@@ -1664,6 +1664,19 @@ a {
   grid-template-columns: 244px 1fr;
 }
 
+.navigation-loading-overlay {
+  position: fixed;
+  z-index: 80;
+  inset: 0;
+  display: grid;
+  height: 100dvh;
+  grid-template-columns: 244px minmax(0, 1fr);
+  background: var(--bg);
+  color: var(--ink);
+  cursor: progress;
+  pointer-events: none;
+}
+
 .loading-sidebar {
   border-right: 1px solid var(--line);
   background: var(--sidebar);
@@ -1867,6 +1880,10 @@ a {
     grid-template-columns: 220px minmax(0, 1fr);
   }
 
+  .navigation-loading-overlay {
+    grid-template-columns: 220px minmax(0, 1fr);
+  }
+
   .message-row {
     padding-right: 20px;
     padding-left: 20px;
@@ -1881,6 +1898,11 @@ a {
   }
 
   .loading-shell {
+    min-width: 0;
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .navigation-loading-overlay {
     min-width: 0;
     grid-template-columns: minmax(0, 1fr);
   }

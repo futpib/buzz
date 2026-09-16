@@ -5,18 +5,17 @@ import {
   ChevronDown,
   Hash,
   Inbox,
-  LoaderCircle,
   LockKeyhole,
   LogOut,
   MessageSquareText,
   X,
 } from "lucide-react";
-import Link, { useLinkStatus } from "next/link";
 import { useMemo, useState } from "react";
 
 import { forgetCredential } from "@/client/identity";
 import type { ChannelView, ProfileView } from "@/server/types";
 import { Avatar } from "@/ui/Avatar";
+import { ViewLink } from "@/ui/ViewLink";
 
 export function WorkspaceSidebar({
   activePage,
@@ -86,16 +85,16 @@ export function WorkspaceSidebar({
         <button disabled title="Inbox is not available yet" type="button">
           <Inbox aria-hidden="true" size={18} /> Inbox
         </button>
-        <Link
+        <ViewLink
           className={
             activePage === "threads" ? "primary-nav-active" : undefined
           }
           href="/threads"
           onClick={close}
+          prefetchMode="eager"
         >
           <MessageSquareText aria-hidden="true" size={18} /> Threads
-          <NavigationPending />
-        </Link>
+        </ViewLink>
         <button disabled title="Activity is not available yet" type="button">
           <Bell aria-hidden="true" size={18} /> Activity
         </button>
@@ -169,7 +168,7 @@ function ChannelGroup({
       </div>
       <nav aria-label={label}>
         {channels.map((channel) => (
-          <Link
+          <ViewLink
             className={
               channel.id === selectedId
                 ? "channel-link channel-link-active"
@@ -178,6 +177,7 @@ function ChannelGroup({
             href={`/channels/${channel.id}`}
             key={channel.id}
             onClick={onNavigate}
+            prefetchMode="eager"
           >
             {channel.type === "dm" ? (
               <span className="dm-dot" />
@@ -187,21 +187,9 @@ function ChannelGroup({
               <Hash aria-hidden="true" size={15} />
             )}
             <span>{channel.name}</span>
-            <NavigationPending />
-          </Link>
+          </ViewLink>
         ))}
       </nav>
     </div>
   );
-}
-
-function NavigationPending() {
-  const { pending } = useLinkStatus();
-  return pending ? (
-    <LoaderCircle
-      aria-label="Loading"
-      className="link-pending spin"
-      size={14}
-    />
-  ) : null;
 }

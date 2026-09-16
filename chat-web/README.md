@@ -5,12 +5,19 @@ backend-for-frontend: the Next.js server consumes an authenticated relay stream,
 projects channel/thread windows, and sends view-shaped snapshots to the browser.
 The browser never receives raw relay events.
 
-Login and message signing happen in the browser. The nsec is kept in tab-scoped
-session storage and is never submitted to Next.js or the relay. The server sees
-only public, signed NIP-42 proofs and signed message events. It holds the
-authenticated relay WebSocket behind an opaque, HttpOnly session cookie so
-React Server Components can render authorized views without holding a private
-key.
+Login and message signing happen in the browser. The nsec is kept in
+sessionStorage for the active tab and in IndexedDB for persistent login; it is
+never submitted to Next.js or the relay. The server sees only public, signed
+NIP-42 proofs and signed message events. It holds the authenticated relay
+WebSocket behind an opaque, HttpOnly session cookie so React Server Components
+can render authorized views without holding a private key.
+
+Authenticated channel, thread, Threads-index, and search projections use a
+bounded session-scoped stale-while-revalidate cache. Next.js keeps prefetched
+route payloads in its client cache; sidebar destinations warm eagerly and
+large thread/search result sets warm on navigation intent. Cold misses render a
+system-themed navigation skeleton, while active channel views reconcile from
+the relay live stream and the Threads index refreshes in the background.
 
 ## Run
 

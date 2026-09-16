@@ -8,16 +8,25 @@ import {
   projectSearchResults,
 } from "@/server/search-view";
 import type { SearchView } from "@/server/types";
+import { ViewCache } from "@/server/view-cache";
 
 const SEARCH_LIMIT = 40;
+const SEARCH_STALE_AFTER_MS = 10_000;
+type SearchPayload = Omit<SearchView, "cacheState">;
 
-export async function searchWorkspace(
+const searchCache = new ViewCache<SearchPayload>({
+  maxEntries: 512,
+  staleAfterMs: SEARCH_STALE_AFTER_MS,
+});
+
+function searchCacheKey(session: AuthSession, query: string): string {
+  return `${session.cacheScope}:${query}`;
+}
+
+async function searchWorkspaceFresh(
   session: AuthSession,
-  rawQuery: string,
-): Promise<SearchView> {
-  const query = normalizeSearchQuery(rawQuery);
-  if (!query) return { query, results: [] };
-
+  query: string,
+): Promise<SearchPayload> {
   const [{ channels }, events] = await Promise.all([
     loadWorkspaceIndex(session),
     session.relay.query([
@@ -47,4 +56,33 @@ export async function searchWorkspace(
       session.pubkey,
     ),
   };
+}
+
+export async function searchWorkspace(
+  session: AuthSession,
+  rawQuery: string,
+): Promise<SearchView> {
+  const query = normalizeSearchQuery(rawQuery);
+  if (!query) return { query, results: [], cacheState: "fresh" };
+  const result = await searchCache.get(searchCacheKey(session, query), () =>
+    searchWorkspaceFresh(session, query),
+  );
+  return { ...result.value, cacheState: result.state };
+}
+
+export async function refreshSearchWorkspace(
+  session: AuthSession,
+  rawQuery: string,
+): Promise<SearchView> {
+  const query = normalizeSearchQuery(rawQuery);
+  if (!query) return { query, results: [], cacheState: "fresh" };
+  const result = await searchCache.refresh(searchCacheKey(session, query), () =>
+    searchWorkspaceFresh(session, query),
+  );
+  return { ...result.value, cacheState: result.state };
+}
+
+export function markSearchViewsStale(session: AuthSession): void {
+  const prefix = `${session.cacheScope}:`;
+  searchCache.markStale((key) => key.startsWith(prefix));
 }

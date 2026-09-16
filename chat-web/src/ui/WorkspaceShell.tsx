@@ -10,7 +10,6 @@ import {
   Users,
   X,
 } from "lucide-react";
-import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 
 import type { ChannelSnapshot, WorkspaceView } from "@/server/types";
@@ -18,6 +17,7 @@ import { Composer } from "@/ui/Composer";
 import { MessageRow } from "@/ui/MessageRow";
 import { SearchDialog } from "@/ui/SearchDialog";
 import { WorkspaceSidebar } from "@/ui/WorkspaceSidebar";
+import { ViewLink } from "@/ui/ViewLink";
 
 type LiveState = "connecting" | "live" | "reconnecting";
 type ReplyTarget = { id: string; name: string };
@@ -32,6 +32,7 @@ export function WorkspaceShell({ initial }: { initial: WorkspaceView }) {
   const timelineEnd = useRef<HTMLDivElement>(null);
   const threadScroller = useRef<HTMLDivElement>(null);
   const threadContent = useRef<HTMLDivElement>(null);
+  const threadPinnedToBottom = useRef(true);
   const rootId = initial.thread?.rootId ?? null;
   const openThreadId = thread?.rootId ?? null;
 
@@ -39,6 +40,7 @@ export function WorkspaceShell({ initial }: { initial: WorkspaceView }) {
     setTimeline(initial.timeline);
     setThread(initial.thread);
     setMobileNavOpen(false);
+    setSearchOpen(false);
     setReplyTarget(null);
   }, [initial]);
 
@@ -82,15 +84,20 @@ export function WorkspaceShell({ initial }: { initial: WorkspaceView }) {
     if (!openThreadId || !scroller || !content) return;
     const scrollToLatest = () => {
       scroller.scrollTop = scroller.scrollHeight;
+      threadPinnedToBottom.current = true;
     };
     const frame = requestAnimationFrame(scrollToLatest);
-    const observer = new ResizeObserver(scrollToLatest);
-    observer.observe(content);
-    const settled = window.setTimeout(() => observer.disconnect(), 1_500);
+    const keepLatestVisible = () => {
+      if (threadPinnedToBottom.current) scrollToLatest();
+    };
+    const contentObserver = new ResizeObserver(keepLatestVisible);
+    const scrollerObserver = new ResizeObserver(keepLatestVisible);
+    contentObserver.observe(content);
+    scrollerObserver.observe(scroller);
     return () => {
       cancelAnimationFrame(frame);
-      clearTimeout(settled);
-      observer.disconnect();
+      contentObserver.disconnect();
+      scrollerObserver.disconnect();
     };
   }, [openThreadId]);
 
@@ -110,6 +117,7 @@ export function WorkspaceShell({ initial }: { initial: WorkspaceView }) {
   return (
     <main
       className={`${thread ? "workspace workspace-thread-open" : "workspace"}${mobileNavOpen ? " mobile-nav-open" : ""}`}
+      data-cache-state={initial.cacheState}
     >
       <button
         aria-label="Dismiss channel navigation"
@@ -214,16 +222,28 @@ export function WorkspaceShell({ initial }: { initial: WorkspaceView }) {
               <h2>Thread</h2>
               <span>#{initial.selectedChannel.name}</span>
             </div>
-            <Link
+            <ViewLink
               aria-label="Close thread"
               className="icon-link"
               href={`/channels/${initial.selectedChannel.id}`}
+              prefetchMode="eager"
               scroll={false}
             >
               <X aria-hidden="true" size={19} />
-            </Link>
+            </ViewLink>
           </header>
-          <div className="thread-messages" ref={threadScroller}>
+          <div
+            className="thread-messages"
+            onScroll={(event) => {
+              const scroller = event.currentTarget;
+              threadPinnedToBottom.current =
+                scroller.scrollHeight -
+                  scroller.clientHeight -
+                  scroller.scrollTop <=
+                24;
+            }}
+            ref={threadScroller}
+          >
             <div className="thread-messages-content" ref={threadContent}>
               {thread.root ? (
                 <MessageRow

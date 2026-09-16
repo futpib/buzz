@@ -1,13 +1,15 @@
 "use client";
 
 import { Menu, MessageSquareText, Search } from "lucide-react";
-import Link from "next/link";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import type { ThreadsWorkspaceView } from "@/server/types";
 import { Avatar } from "@/ui/Avatar";
 import { SearchDialog } from "@/ui/SearchDialog";
 import { WorkspaceSidebar } from "@/ui/WorkspaceSidebar";
+import { ViewLink } from "@/ui/ViewLink";
+
+const THREADS_CLIENT_REVALIDATE_AFTER_MS = 10_000;
 
 function relativeTime(timestamp: number, now: number): string {
   const seconds = Math.max(0, Math.floor(now / 1_000) - timestamp);
@@ -29,12 +31,44 @@ function relativeTime(timestamp: number, now: number): string {
 }
 
 export function ThreadsShell({ initial }: { initial: ThreadsWorkspaceView }) {
+  const [view, setView] = useState(initial);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
+
+  useEffect(() => {
+    setView(initial);
+    if (
+      initial.cacheState !== "stale" &&
+      Date.now() - initial.generatedAt < THREADS_CLIENT_REVALIDATE_AFTER_MS
+    ) {
+      return;
+    }
+    const controller = new AbortController();
+    void fetch("/api/threads?fresh=1", {
+      cache: "no-store",
+      signal: controller.signal,
+    })
+      .then(async (response) => {
+        if (response.status === 401) {
+          window.location.assign(
+            `/login?next=${encodeURIComponent(location.pathname + location.search)}`,
+          );
+          return null;
+        }
+        if (!response.ok) return null;
+        return (await response.json()) as ThreadsWorkspaceView;
+      })
+      .then((fresh) => {
+        if (fresh && !controller.signal.aborted) setView(fresh);
+      })
+      .catch(() => undefined);
+    return () => controller.abort();
+  }, [initial]);
 
   return (
     <main
       className={`workspace workspace-threads${mobileNavOpen ? " mobile-nav-open" : ""}`}
+      data-cache-state={view.cacheState}
     >
       <button
         aria-label="Dismiss channel navigation"
@@ -44,9 +78,9 @@ export function ThreadsShell({ initial }: { initial: ThreadsWorkspaceView }) {
       />
       <WorkspaceSidebar
         activePage="threads"
-        channels={initial.channels}
+        channels={view.channels}
         close={() => setMobileNavOpen(false)}
-        identity={initial.identity}
+        identity={view.identity}
         selectedId={null}
       />
       <section className="threads-panel">
@@ -69,7 +103,7 @@ export function ThreadsShell({ initial }: { initial: ThreadsWorkspaceView }) {
             </div>
           </div>
           <div className="header-actions">
-            <span className="thread-total">{initial.threads.length} total</span>
+            <span className="thread-total">{view.threads.length} total</span>
             <button
               aria-controls="workspace-search"
               aria-expanded={searchOpen}
@@ -82,11 +116,11 @@ export function ThreadsShell({ initial }: { initial: ThreadsWorkspaceView }) {
           </div>
         </header>
         <nav className="threads-list" aria-label="All threads">
-          {initial.threads.length === 0 ? (
+          {view.threads.length === 0 ? (
             <p className="empty-timeline">No threads yet.</p>
           ) : (
-            initial.threads.map(({ activityAt, channel, root }) => (
-              <Link
+            view.threads.map(({ activityAt, channel, root }) => (
+              <ViewLink
                 className="thread-index-row"
                 data-channel-id={channel.id}
                 data-thread-id={root.id}
@@ -99,7 +133,7 @@ export function ThreadsShell({ initial }: { initial: ThreadsWorkspaceView }) {
                     <strong>{root.author.name}</strong>
                     <span>#{channel.name}</span>
                     <time dateTime={new Date(activityAt * 1_000).toISOString()}>
-                      {relativeTime(activityAt, initial.generatedAt)}
+                      {relativeTime(activityAt, view.generatedAt)}
                     </time>
                   </div>
                   <p>{root.content || "Attachment"}</p>
@@ -108,7 +142,7 @@ export function ThreadsShell({ initial }: { initial: ThreadsWorkspaceView }) {
                     {root.replyCount === 1 ? "reply" : "replies"}
                   </span>
                 </div>
-              </Link>
+              </ViewLink>
             ))
           )}
         </nav>

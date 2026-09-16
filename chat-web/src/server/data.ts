@@ -20,6 +20,7 @@ import type {
   ThreadsWorkspaceView,
   WorkspaceView,
 } from "@/server/types";
+import { ViewCache } from "@/server/view-cache";
 
 const CHANNEL_WINDOW_LIMIT = 80;
 const THREAD_WINDOW_LIMIT = 100;
@@ -27,6 +28,31 @@ const THREAD_WINDOW_LIMIT = 100;
 // The composite cursor makes these bounded pages exhaustive without dropping
 // events that share a timestamp.
 const THREAD_INDEX_EVENT_LIMIT = 500;
+const INDEX_STALE_AFTER_MS = 10_000;
+const WORKSPACE_STALE_AFTER_MS = 3_000;
+const THREADS_STALE_AFTER_MS = 15_000;
+const THREAD_PREWARM_LIMIT = 40;
+
+type WorkspaceIndex = {
+  channels: ChannelView[];
+  defaultChannel: ChannelView | null;
+};
+
+type WorkspacePayload = Omit<WorkspaceView, "cacheState">;
+type ThreadsWorkspacePayload = Omit<ThreadsWorkspaceView, "cacheState">;
+
+const workspaceIndexCache = new ViewCache<WorkspaceIndex>({
+  maxEntries: 128,
+  staleAfterMs: INDEX_STALE_AFTER_MS,
+});
+const workspaceCache = new ViewCache<WorkspacePayload>({
+  maxEntries: 512,
+  staleAfterMs: WORKSPACE_STALE_AFTER_MS,
+});
+const threadsCache = new ViewCache<ThreadsWorkspacePayload>({
+  maxEntries: 128,
+  staleAfterMs: THREADS_STALE_AFTER_MS,
+});
 
 export class UnknownChannelError extends Error {}
 
@@ -122,19 +148,30 @@ function pickDefaultChannel(channels: ChannelView[]): ChannelView | null {
   );
 }
 
-export async function loadWorkspaceIndex(session: AuthSession): Promise<{
-  channels: ChannelView[];
-  defaultChannel: ChannelView | null;
-}> {
+async function loadWorkspaceIndexFresh(
+  session: AuthSession,
+): Promise<WorkspaceIndex> {
   const events = await session.relay.query(baseFilters(session.pubkey));
   const channels = projectChannels(events, session.pubkey);
   return { channels, defaultChannel: pickDefaultChannel(channels) };
 }
 
-export async function loadThreadsWorkspace(
+export async function loadWorkspaceIndex(
   session: AuthSession,
-): Promise<ThreadsWorkspaceView> {
-  const { channels } = await loadWorkspaceIndex(session);
+): Promise<WorkspaceIndex> {
+  return (
+    await workspaceIndexCache.get(session.cacheScope, () =>
+      loadWorkspaceIndexFresh(session),
+    )
+  ).value;
+}
+
+async function loadThreadsWorkspaceFresh(
+  session: AuthSession,
+): Promise<ThreadsWorkspacePayload> {
+  const index = await loadWorkspaceIndexFresh(session);
+  workspaceIndexCache.set(session.cacheScope, index);
+  const { channels } = index;
   const eventGroups = await Promise.all(
     channels.map((channel) => loadChannelHistory(session, channel.id)),
   );
@@ -143,19 +180,98 @@ export async function loadThreadsWorkspace(
     profileFilter(events, session.pubkey),
   ]);
   const profiles = projectProfiles(profileEvents);
-  return {
-    identity: profiles.get(session.pubkey) ?? fallbackProfile(session.pubkey),
+  const identity =
+    profiles.get(session.pubkey) ?? fallbackProfile(session.pubkey);
+  const threads = projectThreadIndex(
+    events,
     channels,
-    threads: projectThreadIndex(events, channels, profiles, session.pubkey),
-    generatedAt: Date.now(),
+    profiles,
+    session.pubkey,
+  );
+  const generatedAt = Date.now();
+  const timelines = new Map(
+    channels.map((channel, index) => [
+      channel.id,
+      projectTimeline(
+        eventGroups[index] ?? [],
+        channel.id,
+        profiles,
+        session.pubkey,
+      ).slice(-CHANNEL_WINDOW_LIMIT),
+    ]),
+  );
+  for (const channel of channels) {
+    workspaceCache.set(workspaceCacheKey(session, channel.id, null), {
+      identity,
+      channels,
+      selectedChannel: channel,
+      timeline: timelines.get(channel.id) ?? [],
+      thread: null,
+      generatedAt,
+    });
+  }
+  for (const summary of threads.slice(0, THREAD_PREWARM_LIMIT)) {
+    const channelIndex = channels.findIndex(
+      (channel) => channel.id === summary.channel.id,
+    );
+    const channelEvents = eventGroups[channelIndex] ?? [];
+    workspaceCache.set(
+      workspaceCacheKey(session, summary.channel.id, summary.root.id),
+      {
+        identity,
+        channels,
+        selectedChannel: summary.channel,
+        timeline: timelines.get(summary.channel.id) ?? [],
+        thread: projectThread(
+          channelEvents,
+          summary.channel.id,
+          summary.root.id,
+          profiles,
+          session.pubkey,
+        ),
+        generatedAt,
+      },
+    );
+  }
+  return {
+    identity,
+    channels,
+    threads,
+    generatedAt,
   };
 }
 
-export async function loadWorkspace(
+export async function loadThreadsWorkspace(
+  session: AuthSession,
+): Promise<ThreadsWorkspaceView> {
+  const result = await threadsCache.get(session.cacheScope, () =>
+    loadThreadsWorkspaceFresh(session),
+  );
+  return { ...result.value, cacheState: result.state };
+}
+
+export async function refreshThreadsWorkspace(
+  session: AuthSession,
+): Promise<ThreadsWorkspaceView> {
+  const result = await threadsCache.refresh(session.cacheScope, () =>
+    loadThreadsWorkspaceFresh(session),
+  );
+  return { ...result.value, cacheState: result.state };
+}
+
+function workspaceCacheKey(
   session: AuthSession,
   channelId: string,
   rootId: string | null,
-): Promise<WorkspaceView> {
+): string {
+  return `${session.cacheScope}:${channelId}:${rootId ?? "channel"}`;
+}
+
+async function loadWorkspaceFresh(
+  session: AuthSession,
+  channelId: string,
+  rootId: string | null,
+): Promise<WorkspacePayload> {
   const [events, threadEvents] = await Promise.all([
     session.relay.query(baseFilters(session.pubkey, channelId)),
     rootId
@@ -168,6 +284,10 @@ export async function loadWorkspace(
   ]);
   const viewerPubkey = session.pubkey;
   const channels = projectChannels(events, viewerPubkey);
+  workspaceIndexCache.set(session.cacheScope, {
+    channels,
+    defaultChannel: pickDefaultChannel(channels),
+  });
   const selectedChannel = channels.find((channel) => channel.id === channelId);
   if (!selectedChannel) {
     throw new UnknownChannelError(`Channel ${channelId} is not available`);
@@ -195,12 +315,40 @@ export async function loadWorkspace(
   };
 }
 
+export async function loadWorkspace(
+  session: AuthSession,
+  channelId: string,
+  rootId: string | null,
+): Promise<WorkspaceView> {
+  const key = workspaceCacheKey(session, channelId, rootId);
+  const result = await workspaceCache.get(key, () =>
+    loadWorkspaceFresh(session, channelId, rootId),
+  );
+  return { ...result.value, cacheState: result.state };
+}
+
+export function markWorkspaceViewsStale(
+  session: AuthSession,
+  channelId?: string,
+): void {
+  const prefix = `${session.cacheScope}:`;
+  const channelPrefix = channelId ? `${prefix}${channelId}:` : prefix;
+  workspaceCache.markStale((key) => key.startsWith(channelPrefix));
+  workspaceIndexCache.markStale((key) => key === session.cacheScope);
+  threadsCache.markStale((key) => key === session.cacheScope);
+}
+
 export async function loadChannelSnapshot(
   session: AuthSession,
   channelId: string,
   rootId: string | null,
 ): Promise<ChannelSnapshot> {
-  const workspace = await loadWorkspace(session, channelId, rootId);
+  const key = workspaceCacheKey(session, channelId, rootId);
+  const workspace = (
+    await workspaceCache.refresh(key, () =>
+      loadWorkspaceFresh(session, channelId, rootId),
+    )
+  ).value;
   const snapshot = {
     selectedChannel: workspace.selectedChannel,
     timeline: workspace.timeline,

@@ -24,6 +24,16 @@ the browser. A pass is not complete until it covers the checks below.
   an enabled inert control anywhere in the product surface is a failure.
 - Require immediate pending feedback after a trusted navigation click and a
   responsive, system-themed skeleton while server view data is loading.
+- Measure a cold route transition and a revisit to the same route. Require the
+  cold transition to paint the navigation skeleton, the revisit to reuse the
+  client route cache without another blocking relay projection, and a stale
+  server entry to render immediately while one coalesced refresh runs. Inspect
+  the production `data-cache-state` seam and network requests; the mere
+  presence of cache code or a spinner is not evidence.
+- Exercise every navigation surface: sidebar channels, Threads, timeline
+  thread summaries, nested branches, search results, and thread close. Large
+  result sets may warm on pointer/focus/touch intent; the bounded sidebar set
+  must be eagerly prefetched.
 - Exercise channel navigation, opening and closing a real thread, search,
   mobile drawer navigation, sending, a direct reply, a reply to that reply,
   and deletion propagation. Inspect the signed nested reply for distinct
@@ -40,6 +50,10 @@ the browser. A pass is not complete until it covers the checks below.
 - Clear only the server session cookie, open a fresh tab, and verify that the
   browser-persisted identity re-establishes the session without entering the
   nsec again.
+- Separately keep the server cookie, clear only sessionStorage, reload a
+  protected page, and send a browser-signed temporary message. This proves the
+  signing path itself hydrates IndexedDB instead of depending on the login
+  screen having run first.
 - Verify the nsec is absent from HTML, cookies, localStorage, and HTTP/WebSocket
   traffic. Persistent identity data may exist only in browser IndexedDB and
   active-tab sessionStorage.
