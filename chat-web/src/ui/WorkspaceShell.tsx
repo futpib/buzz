@@ -22,6 +22,7 @@ import { forgetCredential } from "@/client/identity";
 import { Avatar } from "@/ui/Avatar";
 import { Composer } from "@/ui/Composer";
 import { MessageRow } from "@/ui/MessageRow";
+import { SearchDialog } from "@/ui/SearchDialog";
 
 type LiveState = "connecting" | "live" | "reconnecting";
 
@@ -30,6 +31,7 @@ export function WorkspaceShell({ initial }: { initial: WorkspaceView }) {
   const [thread, setThread] = useState(initial.thread);
   const [liveState, setLiveState] = useState<LiveState>("connecting");
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  const [searchOpen, setSearchOpen] = useState(false);
   const [loggingOut, setLoggingOut] = useState(false);
   const [logoutError, setLogoutError] = useState<string | null>(null);
   const timelineEnd = useRef<HTMLDivElement>(null);
@@ -232,7 +234,13 @@ export function WorkspaceShell({ initial }: { initial: WorkspaceView }) {
             <button aria-label="Channel members" type="button">
               <Users aria-hidden="true" size={18} />
             </button>
-            <button aria-label="Search" type="button">
+            <button
+              aria-controls="workspace-search"
+              aria-expanded={searchOpen}
+              aria-label="Search"
+              onClick={() => setSearchOpen(true)}
+              type="button"
+            >
               <Search aria-hidden="true" size={18} />
             </button>
           </div>
@@ -332,6 +340,7 @@ export function WorkspaceShell({ initial }: { initial: WorkspaceView }) {
           <PanelRightClose aria-hidden="true" size={17} />
         </button>
       )}
+      {searchOpen ? <SearchDialog close={() => setSearchOpen(false)} /> : null}
     </main>
   );
 }

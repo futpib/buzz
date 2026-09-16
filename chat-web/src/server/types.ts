@@ -64,3 +64,19 @@ export type ChannelSnapshot = Pick<
 > & {
   revision: string;
 };
+
+export type SearchResultView = {
+  id: string;
+  channelId: string;
+  channelName: string;
+  threadRootId: string;
+  author: ProfileView;
+  content: string;
+  createdAt: number;
+  isOwn: boolean;
+};
+
+export type SearchView = {
+  query: string;
+  results: SearchResultView[];
+};
