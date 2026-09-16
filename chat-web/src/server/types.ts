@@ -42,11 +42,13 @@ export type MessageView = {
   isOwn: boolean;
   replyCount: number;
   lastReplyAt: number | null;
+  replyParticipants: ProfileView[];
   reactions: ReactionView[];
 };
 
 export type ThreadView = {
   rootId: string;
+  outerRootId: string;
   root: MessageView | null;
   replies: MessageView[];
 };

@@ -61,13 +61,31 @@ export function MessageRow({
         ) : null}
         {!hideThreadLink && message.replyCount > 0 ? (
           <Link
-            className="thread-link"
+            aria-label={`${message.replyCount} ${message.replyCount === 1 ? "reply" : "replies"} to ${message.author.name}`}
+            className={
+              compact ? "thread-link thread-link-nested" : "thread-link"
+            }
+            data-nested-thread-id={compact ? message.id : undefined}
             href={`/channels/${channelId}?thread=${message.id}`}
             scroll={false}
           >
-            <MessageCircle aria-hidden="true" size={14} strokeWidth={2.2} />
-            {message.replyCount}{" "}
-            {message.replyCount === 1 ? "reply" : "replies"}
+            {compact && message.replyParticipants.length > 0 ? (
+              <span className="thread-participants" aria-hidden="true">
+                {message.replyParticipants.map((participant) => (
+                  <Avatar
+                    key={participant.pubkey}
+                    profile={participant}
+                    small
+                  />
+                ))}
+              </span>
+            ) : (
+              <MessageCircle aria-hidden="true" size={14} strokeWidth={2.2} />
+            )}
+            <span>
+              {message.replyCount}{" "}
+              {message.replyCount === 1 ? "reply" : "replies"}
+            </span>
           </Link>
         ) : null}
         {onReply ? (

@@ -96,7 +96,11 @@ test("applies server-side edits, deletions, reactions, and thread summaries", ()
   const summary = event(
     "summary",
     39005,
-    JSON.stringify({ reply_count: 3, last_reply_at: 25 }),
+    JSON.stringify({
+      reply_count: 3,
+      last_reply_at: 25,
+      participants: [other],
+    }),
     [
       ["h", "channel-a"],
       ["e", root.id],
@@ -118,6 +122,10 @@ test("applies server-side edits, deletions, reactions, and thread summaries", ()
   assert.equal(rows[0].content, "after");
   assert.equal(rows[0].author.name, "Bob");
   assert.equal(rows[0].replyCount, 3);
+  assert.deepEqual(
+    rows[0].replyParticipants.map((profile) => profile.name),
+    ["Bob"],
+  );
   assert.deepEqual(rows[0].reactions, [
     { emoji: "🔥", count: 1, reactedByMe: true },
   ]);
@@ -151,7 +159,7 @@ test("projects a root and chronological thread replies", () => {
   );
 });
 
-test("projects nested reply ancestry without splitting the thread", () => {
+test("projects nested replies as Android-style child threads", () => {
   const viewer = "a".repeat(64);
   const root = event(
     "nested-root",
@@ -197,11 +205,27 @@ test("projects nested reply ancestry without splitting the thread", () => {
       message.content,
       message.threadRootId,
       message.parentId,
+      message.replyCount,
     ]),
-    [
-      ["parent", root.id, root.id],
-      ["child", root.id, parent.id],
-    ],
+    [["parent", root.id, root.id, 1]],
+  );
+  assert.deepEqual(
+    thread.replies[0].replyParticipants.map((profile) => profile.pubkey),
+    [viewer],
+  );
+
+  const nested = projectThread(
+    [child, root, parent],
+    "channel-a",
+    parent.id,
+    new Map(),
+    viewer,
+  );
+  assert.equal(nested.outerRootId, root.id);
+  assert.equal(nested.root?.content, "parent");
+  assert.deepEqual(
+    nested.replies.map((message) => [message.content, message.parentId]),
+    [["child", parent.id]],
   );
 });
 

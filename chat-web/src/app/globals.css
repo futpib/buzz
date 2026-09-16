@@ -715,6 +715,30 @@ a {
   text-decoration: underline;
 }
 
+.thread-link-nested {
+  min-height: 28px;
+  gap: 8px;
+  margin-top: 7px;
+}
+
+.thread-participants {
+  display: inline-flex;
+  padding-left: 6px;
+}
+
+.thread-participants .avatar {
+  width: 24px;
+  height: 24px;
+  margin-left: -6px;
+  border: 2px solid var(--panel);
+  border-radius: 999px;
+  font-size: 7px;
+}
+
+.message-row:hover .thread-participants .avatar {
+  border-color: var(--hover);
+}
+
 .message-reply-context {
   margin: 1px 0 2px;
   color: var(--muted);

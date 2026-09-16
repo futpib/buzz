@@ -183,7 +183,11 @@ export function fallbackProfile(pubkey: string): ProfileView {
   };
 }
 
-type Summary = { replyCount: number; lastReplyAt: number | null };
+type Summary = {
+  replyCount: number;
+  lastReplyAt: number | null;
+  participantPubkeys: string[];
+};
 
 function projectSummaries(events: NostrEvent[]): Map<string, Summary> {
   const summaries = new Map<string, { event: NostrEvent; value: Summary }>();
@@ -195,12 +199,22 @@ function projectSummaries(events: NostrEvent[]): Map<string, Summary> {
       const content = JSON.parse(event.content) as Record<string, unknown>;
       const replyCount = Number(content.reply_count ?? 0);
       const lastReplyAt = content.last_reply_at;
+      const participants = content.participants;
       const value = {
         replyCount: Number.isFinite(replyCount) ? Math.max(0, replyCount) : 0,
         lastReplyAt:
           typeof lastReplyAt === "number" && Number.isFinite(lastReplyAt)
             ? lastReplyAt
             : null,
+        participantPubkeys: Array.isArray(participants)
+          ? participants
+              .filter(
+                (participant): participant is string =>
+                  typeof participant === "string" &&
+                  /^[0-9a-f]{64}$/i.test(participant),
+              )
+              .slice(0, 3)
+          : [],
       };
       const current = summaries.get(rootId);
       if (!current || isNewer(event, current.event)) {
@@ -213,21 +227,42 @@ function projectSummaries(events: NostrEvent[]): Map<string, Summary> {
   const projected = new Map(
     [...summaries].map(([id, entry]) => [id, entry.value]),
   );
-  const derived = new Map<string, Summary>();
+  const children = new Map<string, NostrEvent[]>();
   for (const event of events) {
     if (!MESSAGE_KINDS.has(event.kind)) continue;
-    const rootId = threadRootId(event);
-    if (!rootId) continue;
-    const current = derived.get(rootId) ?? {
-      replyCount: 0,
-      lastReplyAt: null,
-    };
-    current.replyCount += 1;
-    current.lastReplyAt = Math.max(current.lastReplyAt ?? 0, event.created_at);
-    derived.set(rootId, current);
+    const parentId = threadIds(event)?.parentId;
+    if (!parentId) continue;
+    const replies = children.get(parentId) ?? [];
+    replies.push(event);
+    children.set(parentId, replies);
   }
-  for (const [rootId, summary] of derived) {
-    if (!projected.has(rootId)) projected.set(rootId, summary);
+  for (const [parentId, replies] of children) {
+    const newest = [...replies].sort(
+      (a, b) => b.created_at - a.created_at || a.id.localeCompare(b.id),
+    );
+    const participantPubkeys = [
+      ...new Set(newest.map((event) => event.pubkey)),
+    ].slice(0, 3);
+    const derived: Summary = {
+      replyCount: replies.length,
+      lastReplyAt: newest[0]?.created_at ?? null,
+      participantPubkeys,
+    };
+    const relay = projected.get(parentId);
+    if (!relay) {
+      projected.set(parentId, derived);
+      continue;
+    }
+    projected.set(parentId, {
+      replyCount: Math.max(relay.replyCount, derived.replyCount),
+      lastReplyAt: Math.max(relay.lastReplyAt ?? 0, derived.lastReplyAt ?? 0),
+      participantPubkeys: [
+        ...new Set([
+          ...relay.participantPubkeys,
+          ...derived.participantPubkeys,
+        ]),
+      ].slice(0, 3),
+    });
   }
   return projected;
 }
@@ -311,6 +346,10 @@ function messageView(
     isOwn: event.pubkey === viewerPubkey,
     replyCount: summary?.replyCount ?? 0,
     lastReplyAt: summary?.lastReplyAt ?? null,
+    replyParticipants:
+      summary?.participantPubkeys.map(
+        (pubkey) => profiles.get(pubkey) ?? fallbackProfile(pubkey),
+      ) ?? [],
     reactions: reactions.get(event.id) ?? [],
   };
 }
@@ -389,13 +428,16 @@ export function projectThread(
         reactions,
       )
     : null;
+  const outerRootId = rootEvent
+    ? (threadIds(rootEvent)?.rootId ?? rootId)
+    : rootId;
   const replies = rows
     .filter(
-      (event) => event.id !== rootId && tagValues(event, "e").includes(rootId),
+      (event) => event.id !== rootId && threadIds(event)?.parentId === rootId,
     )
     .map((event) =>
       messageView(event, profiles, viewerPubkey, edits, summaries, reactions),
     )
     .sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id));
-  return { rootId, root, replies };
+  return { rootId, outerRootId, root, replies };
 }

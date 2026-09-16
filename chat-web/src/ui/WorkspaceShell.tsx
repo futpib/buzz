@@ -253,7 +253,6 @@ export function WorkspaceShell({ initial }: { initial: WorkspaceView }) {
                 <MessageRow
                   channelId={initial.selectedChannel.id}
                   compact
-                  hideThreadLink
                   key={message.id}
                   message={message}
                   onReply={() =>
@@ -280,7 +279,7 @@ export function WorkspaceShell({ initial }: { initial: WorkspaceView }) {
             replyingTo={replyTarget?.name ?? null}
             cancelReply={() => setReplyTarget(null)}
             onSent={() => setReplyTarget(null)}
-            rootId={thread.rootId}
+            rootId={thread.outerRootId}
           />
         </aside>
       ) : (

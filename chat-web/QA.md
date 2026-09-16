@@ -28,6 +28,10 @@ the browser. A pass is not complete until it covers the checks below.
   mobile drawer navigation, sending, a direct reply, a reply to that reply,
   and deletion propagation. Inspect the signed nested reply for distinct
   NIP-10 `root` and `reply` markers.
+- Match Android's nested-thread model: the outer branch renders only direct
+  children, a reply with children gets a visible tappable summary, and opening
+  that summary renders the child branch. Do not accept flattened descendants
+  or an author-only "Replying to" label as equivalent coverage.
 - Require a real thread to open at its latest reply after media has painted,
   at both desktop and phone sizes.
 
