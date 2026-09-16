@@ -50,6 +50,27 @@ class InviteDeepLink extends BuzzDeepLink {
       'InviteDeepLink(relay: $relayUrl, code: $code, policyReceipt: $policyReceipt)';
 }
 
+/// A same-device handoff into the authenticated identity-recovery flow.
+///
+/// The inner NIP-AB URI contains only a one-time session secret and ephemeral
+/// public key. The user's nsec is transferred later over the encrypted pairing
+/// channel, after device authorization and SAS confirmation.
+class PairingDeepLink extends BuzzDeepLink {
+  final String code;
+
+  const PairingDeepLink({required this.code});
+
+  @override
+  bool operator ==(Object other) =>
+      other is PairingDeepLink && other.code == code;
+
+  @override
+  int get hashCode => code.hashCode;
+
+  @override
+  String toString() => 'PairingDeepLink(code: [redacted])';
+}
+
 /// A parsed channel-only deep link.
 ///
 /// Canonical form: `buzz://channel/<channel-uuid>`.
@@ -290,8 +311,49 @@ InviteDeepLink? parseInviteDeepLink(Uri uri) {
   return null;
 }
 
+/// Parse `buzz://pair?code=<nostrpair-uri>` app handoffs.
+///
+/// This form exists for pairing a web tab and Buzz Android on the same phone,
+/// where the phone cannot scan a QR code displayed on its own screen.
+PairingDeepLink? parsePairingDeepLink(Uri uri) {
+  if (uri.scheme != 'buzz' || uri.host != 'pair') return null;
+  if (uri.path.isNotEmpty ||
+      uri.hasFragment ||
+      uri.userInfo.isNotEmpty ||
+      uri.hasPort ||
+      uri.queryParametersAll.length != 1 ||
+      uri.queryParametersAll['code']?.length != 1) {
+    return null;
+  }
+
+  final code = uri.queryParameters['code'];
+  if (code == null || code.length > 2048 || !code.startsWith('nostrpair://')) {
+    return null;
+  }
+  final inner = Uri.tryParse(code);
+  final modes = inner?.queryParametersAll['mode'];
+  final secrets = inner?.queryParametersAll['secret'];
+  final relays = inner?.queryParametersAll['relay'];
+  if (inner == null ||
+      inner.scheme != 'nostrpair' ||
+      !RegExp(r'^[0-9a-f]{64}$').hasMatch(inner.host) ||
+      inner.path.isNotEmpty ||
+      inner.hasFragment ||
+      inner.userInfo.isNotEmpty ||
+      inner.hasPort ||
+      modes?.length != 1 ||
+      modes!.single != 'recover' ||
+      secrets?.length != 1 ||
+      relays == null ||
+      relays.isEmpty) {
+    return null;
+  }
+  return PairingDeepLink(code: code);
+}
+
 /// Parse any supported Buzz deep link.
 BuzzDeepLink? parseBuzzDeepLink(Uri uri) =>
+    parsePairingDeepLink(uri) ??
     parseInviteDeepLink(uri) ??
     parseChannelDeepLink(uri) ??
     parseMessageDeepLink(uri);

@@ -12,9 +12,12 @@
     "check": "biome check . && pnpm typecheck && pnpm test"
   },
   "dependencies": {
+    "@noble/curves": "^2.0.1",
+    "@noble/hashes": "^2.0.1",
     "lucide-react": "^1.0.0",
     "next": "16.3.5",
     "nostr-tools": "^2.23.3",
+    "qrcode.react": "^4.2.0",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
     "react-markdown": "^10.1.0",

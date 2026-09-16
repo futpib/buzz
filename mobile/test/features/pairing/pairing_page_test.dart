@@ -312,6 +312,26 @@ void main() {
       expect(notifier.pairedCodes, [code]);
     });
 
+    testWidgets('same-phone handoff starts the recovery code automatically', (
+      tester,
+    ) async {
+      final notifier = _RecordingPairingNotifier();
+      const code = 'nostrpair://desktop?mode=recover';
+      await tester.pumpWidget(
+        WidgetHelpers.testable(
+          overrides: [pairingProvider.overrideWith(() => notifier)],
+          child: const PairingPage(
+            addingCommunity: true,
+            identityRecoveryOnly: true,
+            initialCode: code,
+          ),
+        ),
+      );
+      await tester.pump();
+
+      expect(notifier.pairedCodes, [code]);
+    });
+
     testWidgets('new identity import offers protection checked by default', (
       tester,
     ) async {

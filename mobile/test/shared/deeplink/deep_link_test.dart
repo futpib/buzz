@@ -3,6 +3,7 @@ import 'package:flutter_test/flutter_test.dart';
 
 void main() {
   _inviteTests();
+  _pairingTests();
   _channelTests();
   _buildMessageLinkTests();
 
@@ -46,6 +47,49 @@ void main() {
         'buzz://message?channel=$channel&id=$id&thread=not-hex',
       ]) {
         expect(parseMessageDeepLink(Uri.parse(url)), isNull, reason: url);
+      }
+    });
+  });
+}
+
+void _pairingTests() {
+  group('parsePairingDeepLink', () {
+    const source =
+        '199e64ca60662cb2d6e91d16cb065be51ad74a6ee5f8c5b0fdc53d246611ed9a';
+    const secret =
+        'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2';
+    final code =
+        'nostrpair://$source?secret=$secret&relay=wss%3A%2F%2Fpairing.buzz.xyz&v=1&mode=recover';
+
+    test('parses a same-phone identity recovery handoff', () {
+      final outer = Uri(
+        scheme: 'buzz',
+        host: 'pair',
+        queryParameters: {'code': code},
+      );
+      expect(parsePairingDeepLink(outer), PairingDeepLink(code: code));
+      expect(parseBuzzDeepLink(outer), PairingDeepLink(code: code));
+    });
+
+    test('rejects non-recovery, malformed, and ambiguous handoffs', () {
+      for (final value in [
+        'buzz://pair',
+        'buzz://pair?code=nostrpair%3A%2F%2F$source',
+        Uri(
+          scheme: 'buzz',
+          host: 'pair',
+          queryParameters: {'code': code.replaceFirst('&mode=recover', '')},
+        ).toString(),
+        Uri(
+          scheme: 'buzz',
+          host: 'pair',
+          queryParameters: {
+            'code': code.replaceFirst('mode=recover', 'mode=send'),
+          },
+        ).toString(),
+        '${Uri(scheme: 'buzz', host: 'pair', queryParameters: {'code': code})}&extra=true',
+      ]) {
+        expect(parsePairingDeepLink(Uri.parse(value)), isNull, reason: value);
       }
     });
   });

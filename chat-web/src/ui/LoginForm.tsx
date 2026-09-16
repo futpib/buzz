@@ -1,6 +1,16 @@
 "use client";
 
-import { KeyRound, LoaderCircle, LockKeyhole } from "lucide-react";
+import {
+  Check,
+  Copy,
+  KeyRound,
+  LoaderCircle,
+  LockKeyhole,
+  RefreshCw,
+  ShieldCheck,
+  Smartphone,
+  X,
+} from "lucide-react";
 import {
   type FormEvent,
   useCallback,
@@ -8,6 +18,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { QRCodeSVG } from "qrcode.react";
 
 import {
   forgetCredential,
@@ -17,6 +28,7 @@ import {
   storeCredential,
   type BrowserCredential,
 } from "@/client/identity";
+import { BrowserPairingSession, type PairingSnapshot } from "@/client/pairing";
 
 type LoginStart = {
   attemptId: string;
@@ -33,52 +45,97 @@ async function errorMessage(response: Response, fallback: string) {
   }
 }
 
-export function LoginForm({ nextPath }: { nextPath: string }) {
+async function createBrowserSession(credential: BrowserCredential) {
+  const startResponse = await fetch("/api/auth/start", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: "{}",
+  });
+  if (!startResponse.ok) {
+    throw new Error(await errorMessage(startResponse, "Login could not start"));
+  }
+  const start = (await startResponse.json()) as LoginStart;
+  const event = makeAuthEvent(credential, start.challenge, start.relayUrl);
+  const sessionResponse = await fetch("/api/auth/session", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ attemptId: start.attemptId, event }),
+  });
+  if (!sessionResponse.ok) {
+    throw new Error(await errorMessage(sessionResponse, "Login failed"));
+  }
+  storeCredential(credential);
+}
+
+export function LoginForm({
+  nextPath,
+  pairingRelayUrl,
+}: {
+  nextPath: string;
+  pairingRelayUrl: string;
+}) {
   const [nsec, setNsec] = useState("");
   const [authTag, setAuthTag] = useState("");
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [pairing, setPairing] = useState<PairingSnapshot | null>(null);
+  const [copied, setCopied] = useState(false);
   const automaticAttempt = useRef(false);
+  const pairingSession = useRef<BrowserPairingSession | null>(null);
+  const redirectTimer = useRef<number | null>(null);
+
+  const authenticate = useCallback(async (credential: BrowserCredential) => {
+    setPending(true);
+    setError(null);
+    try {
+      await createBrowserSession(credential);
+      return true;
+    } catch (caught) {
+      forgetCredential();
+      setError(caught instanceof Error ? caught.message : "Login failed");
+      setPending(false);
+      return false;
+    }
+  }, []);
 
   const login = useCallback(
     async (credential: BrowserCredential) => {
-      setPending(true);
-      setError(null);
-      try {
-        const startResponse = await fetch("/api/auth/start", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: "{}",
-        });
-        if (!startResponse.ok) {
-          throw new Error(
-            await errorMessage(startResponse, "Login could not start"),
+      if (await authenticate(credential)) window.location.assign(nextPath);
+    },
+    [authenticate, nextPath],
+  );
+
+  const startPairing = useCallback(async () => {
+    pairingSession.current?.dispose();
+    setCopied(false);
+    setError(null);
+    const session = new BrowserPairingSession(pairingRelayUrl, {
+      onChange: (snapshot) => {
+        setPairing(snapshot);
+        if (snapshot.step === "complete") {
+          redirectTimer.current = window.setTimeout(
+            () => window.location.assign(nextPath),
+            250,
           );
         }
-        const start = (await startResponse.json()) as LoginStart;
-        const event = makeAuthEvent(
-          credential,
-          start.challenge,
-          start.relayUrl,
-        );
-        const sessionResponse = await fetch("/api/auth/session", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ attemptId: start.attemptId, event }),
-        });
-        if (!sessionResponse.ok) {
-          throw new Error(await errorMessage(sessionResponse, "Login failed"));
-        }
-        storeCredential(credential);
-        window.location.assign(nextPath);
-      } catch (caught) {
-        forgetCredential();
-        setError(caught instanceof Error ? caught.message : "Login failed");
-        setPending(false);
-      }
-    },
-    [nextPath],
-  );
+      },
+      onNsec: (receivedNsec) =>
+        authenticate({ nsec: receivedNsec, authTag: null }),
+    });
+    pairingSession.current = session;
+    setPairing({
+      step: "connecting",
+      qrUri: "",
+      appUri: "",
+      sasCode: null,
+      error: null,
+    });
+    try {
+      await session.start();
+    } catch {
+      // The session publishes its user-facing failure through onChange.
+    }
+  }, [authenticate, nextPath, pairingRelayUrl]);
 
   useEffect(() => {
     if (automaticAttempt.current) return;
@@ -87,6 +144,16 @@ export function LoginForm({ nextPath }: { nextPath: string }) {
     if (stored) void login(stored);
   }, [login]);
 
+  useEffect(
+    () => () => {
+      pairingSession.current?.dispose();
+      if (redirectTimer.current !== null) {
+        window.clearTimeout(redirectTimer.current);
+      }
+    },
+    [],
+  );
+
   const submit = (event: FormEvent) => {
     event.preventDefault();
     try {
@@ -94,6 +161,24 @@ export function LoginForm({ nextPath }: { nextPath: string }) {
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Login failed");
     }
+  };
+
+  const copyPairingCode = async () => {
+    if (!pairing?.qrUri) return;
+    try {
+      await navigator.clipboard.writeText(pairing.qrUri);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 2_000);
+    } catch {
+      setError("Could not copy the pairing code.");
+    }
+  };
+
+  const cancelPairing = () => {
+    pairingSession.current?.dispose();
+    pairingSession.current = null;
+    setPairing(null);
+    setPending(false);
   };
 
   return (
@@ -106,10 +191,144 @@ export function LoginForm({ nextPath }: { nextPath: string }) {
           <p className="eyebrow">Buzz for the web</p>
           <h1 id="login-title">Sign in to your workspace</h1>
           <p>
-            Your nsec stays in this browser tab. Buzz receives only signed
-            authentication proofs and signed messages.
+            Pair with Buzz Android or enter your nsec. The private key stays in
+            this browser tab.
           </p>
         </div>
+
+        <section className="pairing-card" aria-label="Pair with Buzz Android">
+          {pairing === null ? (
+            <>
+              <div className="pairing-heading">
+                <Smartphone aria-hidden="true" size={20} />
+                <div>
+                  <strong>Pair with Buzz Android</strong>
+                  <span>No secret-key copy and paste</span>
+                </div>
+              </div>
+              <button
+                className="pairing-button"
+                onClick={() => void startPairing()}
+                type="button"
+              >
+                <ShieldCheck aria-hidden="true" size={18} />
+                Start secure pairing
+              </button>
+            </>
+          ) : null}
+
+          {pairing?.step === "connecting" ? (
+            <div className="pairing-status" role="status">
+              <LoaderCircle aria-hidden="true" className="spin" size={23} />
+              <strong>Creating a one-time pairing code…</strong>
+            </div>
+          ) : null}
+
+          {pairing?.step === "waiting" ? (
+            <div className="pairing-flow">
+              <div className="pairing-qr">
+                <QRCodeSVG
+                  aria-label="Buzz Android pairing QR code"
+                  bgColor="#ffffff"
+                  fgColor="#15151a"
+                  level="M"
+                  marginSize={2}
+                  size={188}
+                  title="Buzz Android pairing QR code"
+                  value={pairing.qrUri}
+                />
+              </div>
+              <strong>Open this code in your signed-in Buzz phone</strong>
+              <p>
+                On this phone, tap below. On another phone, scan the QR from
+                Settings → Send identity to desktop.
+              </p>
+              <a className="pairing-button" href={pairing.appUri}>
+                <Smartphone aria-hidden="true" size={18} />
+                Open Buzz Android
+              </a>
+              <div className="pairing-secondary-actions">
+                <button onClick={() => void copyPairingCode()} type="button">
+                  {copied ? (
+                    <Check aria-hidden="true" size={15} />
+                  ) : (
+                    <Copy aria-hidden="true" size={15} />
+                  )}
+                  {copied ? "Copied" : "Copy code"}
+                </button>
+                <button onClick={cancelPairing} type="button">
+                  <X aria-hidden="true" size={15} />
+                  Cancel
+                </button>
+              </div>
+            </div>
+          ) : null}
+
+          {pairing?.step === "confirming" && pairing.sasCode ? (
+            <div className="pairing-flow">
+              <ShieldCheck aria-hidden="true" className="pairing-shield" />
+              <strong>Does this code match Buzz Android?</strong>
+              <div
+                className="pairing-sas"
+                aria-label={`Code ${pairing.sasCode}`}
+                role="status"
+              >
+                {pairing.sasCode.slice(0, 3)} {pairing.sasCode.slice(3)}
+              </div>
+              <p>Only approve if the six digits are identical in both apps.</p>
+              <button
+                className="pairing-button"
+                onClick={() => pairingSession.current?.confirmSas()}
+                type="button"
+              >
+                <Check aria-hidden="true" size={18} />
+                Codes match
+              </button>
+              <button
+                className="pairing-cancel"
+                onClick={() => pairingSession.current?.denySas()}
+                type="button"
+              >
+                Codes do not match
+              </button>
+            </div>
+          ) : null}
+
+          {pairing?.step === "receiving" ? (
+            <div className="pairing-status" role="status">
+              <LoaderCircle aria-hidden="true" className="spin" size={23} />
+              <strong>Waiting for approval in Buzz Android…</strong>
+              <span>Return here after confirming the same code there.</span>
+            </div>
+          ) : null}
+
+          {pairing?.step === "complete" ? (
+            <div className="pairing-status pairing-success" role="status">
+              <Check aria-hidden="true" size={24} />
+              <strong>Identity received securely</strong>
+            </div>
+          ) : null}
+
+          {pairing?.step === "error" ? (
+            <div className="pairing-status pairing-failure" role="alert">
+              <X aria-hidden="true" size={23} />
+              <strong>{pairing.error ?? "Pairing failed."}</strong>
+              <button
+                className="pairing-button"
+                onClick={() => void startPairing()}
+                type="button"
+              >
+                <RefreshCw aria-hidden="true" size={17} />
+                Try again
+              </button>
+            </div>
+          ) : null}
+        </section>
+
+        <div className="login-divider">
+          <span>or enter an nsec</span>
+        </div>
+
         <form onSubmit={submit}>
           <label className="field-label" htmlFor="nsec">
             Secret key
@@ -161,7 +380,7 @@ export function LoginForm({ nextPath }: { nextPath: string }) {
           </button>
         </form>
         <p className="login-footnote">
-          The key is kept in session storage so it is forgotten when this tab
+          The key is kept in session storage and is forgotten when this tab
           session ends.
         </p>
       </section>

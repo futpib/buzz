@@ -30,11 +30,13 @@ class PairingPage extends HookConsumerWidget {
   /// (user is already authenticated with at least one community).
   final bool addingCommunity;
   final bool identityRecoveryOnly;
+  final String? initialCode;
 
   const PairingPage({
     super.key,
     this.addingCommunity = false,
     this.identityRecoveryOnly = false,
+    this.initialCode,
   });
 
   @override
@@ -42,6 +44,7 @@ class PairingPage extends HookConsumerWidget {
     final pairingState = ref.watch(pairingProvider);
     final enrolledBiometrics = ref.watch(enrolledBiometricsProvider);
     final codeController = useTextEditingController();
+    final initialCodeHandled = useRef(false);
     final fallbackScannerVisible = useState(false);
     final pairingCodeExpanded = useState(false);
     final isBusy =
@@ -86,6 +89,16 @@ class PairingPage extends HookConsumerWidget {
       final code = await showDynamicIslandPairingQrScanner(context);
       await handleScannerResult(code);
     }
+
+    useEffect(() {
+      final code = initialCode;
+      if (initialCodeHandled.value || code == null) return null;
+      initialCodeHandled.value = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (context.mounted) unawaited(handleScannerResult(code));
+      });
+      return null;
+    }, [initialCode]);
 
     final isVerifyingSas = pairingState.status == PairingStatus.confirmingSas;
     final onboardingSystemOverlayStyle = SystemUiOverlayStyle.dark.copyWith(

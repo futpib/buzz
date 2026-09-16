@@ -3,10 +3,13 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
+import '../../shared/auth/auth.dart';
 import '../../shared/deeplink/deep_link.dart';
 import '../../shared/deeplink/pending_deep_link_provider.dart';
 import '../invites/invite_join_provider.dart';
 import '../invites/invite_join_sheet.dart';
+import '../pairing/pairing_page.dart';
+import '../pairing/pairing_provider.dart';
 import 'channel.dart';
 import 'channel_detail_page.dart';
 import 'channels_provider.dart';
@@ -39,6 +42,7 @@ class DeepLinkDispatcher extends ConsumerStatefulWidget {
 
 class _DeepLinkDispatcherState extends ConsumerState<DeepLinkDispatcher> {
   bool _preparingInvite = false;
+  bool _preparingPairing = false;
 
   @override
   void initState() {
@@ -65,9 +69,13 @@ class _DeepLinkDispatcherState extends ConsumerState<DeepLinkDispatcher> {
   }
 
   void _maybeDispatch(BuzzDeepLink? link) {
-    if (link == null || _preparingInvite) return;
+    if (link == null || _preparingInvite || _preparingPairing) return;
     if (link is InviteDeepLink) {
       _maybeDispatchInvite(link);
+      return;
+    }
+    if (link is PairingDeepLink) {
+      _maybeDispatchPairing(link);
       return;
     }
     if ((link is! MessageDeepLink && link is! ChannelDeepLink) ||
@@ -80,6 +88,68 @@ class _DeepLinkDispatcherState extends ConsumerState<DeepLinkDispatcher> {
     }
 
     _dispatchNavigableLink(link);
+  }
+
+  void _maybeDispatchPairing(PairingDeepLink link) {
+    final auth = ref.read(authProvider).value;
+    final community = auth?.community;
+    if (auth?.status != AuthStatus.authenticated || community == null) return;
+
+    _preparingPairing = true;
+    final navigatorContext = context;
+    Future.microtask(() async {
+      final pairing = ref.read(pairingProvider.notifier);
+      try {
+        final authorized = await pairing.authorizeIdentityExport(
+          community: community,
+        );
+        if (!mounted || ref.read(pendingDeepLinkProvider) != link) return;
+        if (!authorized) {
+          ref.read(pendingDeepLinkProvider.notifier).consume();
+          final message = ref.read(pairingProvider).errorMessage;
+          if (navigatorContext.mounted && message != null) {
+            ScaffoldMessenger.maybeOf(
+              navigatorContext,
+            )?.showSnackBar(SnackBar(content: Text(message)));
+          }
+          return;
+        }
+
+        final resumed = await _waitForPairingResumeFrame();
+        if (!mounted || ref.read(pendingDeepLinkProvider) != link) return;
+        if (!resumed) {
+          ref.read(pendingDeepLinkProvider.notifier).consume();
+          if (navigatorContext.mounted) {
+            ScaffoldMessenger.maybeOf(navigatorContext)?.showSnackBar(
+              const SnackBar(
+                content: Text(
+                  'Buzz did not return to the foreground. Try pairing again.',
+                ),
+              ),
+            );
+          }
+          return;
+        }
+
+        ref.read(pendingDeepLinkProvider.notifier).consume();
+        if (!navigatorContext.mounted) return;
+        await Navigator.of(navigatorContext).push(
+          MaterialPageRoute<void>(
+            builder: (_) => PairingPage(
+              addingCommunity: true,
+              identityRecoveryOnly: true,
+              initialCode: link.code,
+            ),
+          ),
+        );
+      } finally {
+        pairing.reset();
+        _preparingPairing = false;
+        if (mounted) {
+          _maybeDispatch(ref.read(pendingDeepLinkProvider));
+        }
+      }
+    });
   }
 
   Future<void> _dispatchNotificationLink(MessageDeepLink link) async {
@@ -218,4 +288,27 @@ class _DeepLinkDispatcherState extends ConsumerState<DeepLinkDispatcher> {
       }
     });
   }
+}
+
+const _pairingResumeWaitTimeout = Duration(seconds: 5);
+
+Future<bool> _waitForPairingResumeFrame() async {
+  final binding = WidgetsBinding.instance;
+  if (binding.lifecycleState != AppLifecycleState.resumed) {
+    final resumed = Completer<void>();
+    final listener = AppLifecycleListener(
+      onResume: () {
+        if (!resumed.isCompleted) resumed.complete();
+      },
+    );
+    try {
+      await resumed.future.timeout(_pairingResumeWaitTimeout);
+    } on TimeoutException {
+      return false;
+    } finally {
+      listener.dispose();
+    }
+  }
+  await binding.endOfFrame;
+  return true;
 }

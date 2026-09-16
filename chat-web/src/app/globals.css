@@ -731,7 +731,9 @@ a {
 
 .login-page {
   display: grid;
+  height: 100dvh;
   min-height: 100dvh;
+  overflow-y: auto;
   place-items: center;
   padding: 28px;
   background:
@@ -763,7 +765,7 @@ a {
 }
 
 .login-copy {
-  margin: 24px 0 25px;
+  margin: 20px 0 21px;
 }
 
 .login-copy .eyebrow {
@@ -786,6 +788,172 @@ a {
   margin: 0;
   color: var(--muted);
   line-height: 1.55;
+}
+
+.pairing-card {
+  display: grid;
+  gap: 14px;
+  padding: 16px;
+  border: 1px solid color-mix(in srgb, var(--accent) 26%, var(--line));
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--accent-soft) 38%, var(--panel));
+}
+
+.pairing-heading {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  color: var(--accent-strong);
+}
+
+.pairing-heading > div {
+  display: grid;
+  gap: 2px;
+}
+
+.pairing-heading strong,
+.pairing-flow > strong,
+.pairing-status strong {
+  color: var(--ink);
+  font-size: 13px;
+}
+
+.pairing-heading span,
+.pairing-status span {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.pairing-button {
+  display: flex;
+  min-height: 42px;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 8px 13px;
+  border: 0;
+  border-radius: 10px;
+  background: var(--accent);
+  color: #fff;
+  cursor: pointer;
+  font: inherit;
+  font-weight: 680;
+  text-decoration: none;
+}
+
+.pairing-button:hover {
+  background: var(--accent-strong);
+}
+
+.pairing-flow,
+.pairing-status {
+  display: grid;
+  justify-items: center;
+  gap: 11px;
+  text-align: center;
+}
+
+.pairing-flow > p {
+  margin: -3px 0 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.pairing-flow > .pairing-button,
+.pairing-status > .pairing-button {
+  width: 100%;
+}
+
+.pairing-qr {
+  display: grid;
+  width: 204px;
+  height: 204px;
+  place-items: center;
+  border: 1px solid #dedde2;
+  border-radius: 12px;
+  background: #fff;
+}
+
+.pairing-secondary-actions {
+  display: grid;
+  width: 100%;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.pairing-secondary-actions button,
+.pairing-cancel {
+  display: inline-flex;
+  min-height: 35px;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border: 1px solid var(--input-border);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--muted);
+  cursor: pointer;
+  font: inherit;
+  font-size: 11px;
+}
+
+.pairing-cancel {
+  width: 100%;
+}
+
+.pairing-shield {
+  width: 34px;
+  height: 34px;
+  color: var(--accent);
+}
+
+.pairing-sas {
+  padding: 11px 16px 11px 22px;
+  border: 2px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  border-radius: 11px;
+  background: color-mix(in srgb, var(--accent-soft) 70%, var(--panel));
+  color: var(--ink);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 28px;
+  font-weight: 760;
+  letter-spacing: 0.14em;
+}
+
+.pairing-status {
+  padding: 12px 4px;
+  color: var(--accent);
+}
+
+.pairing-success {
+  color: var(--green);
+}
+
+.pairing-failure {
+  color: var(--error);
+}
+
+.pairing-failure strong {
+  color: var(--error);
+  line-height: 1.45;
+}
+
+.login-divider {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 18px 0;
+  color: var(--muted);
+  font-size: 10px;
+  text-transform: uppercase;
+}
+
+.login-divider::before,
+.login-divider::after {
+  height: 1px;
+  flex: 1;
+  background: var(--line);
+  content: "";
 }
 
 .field-label {

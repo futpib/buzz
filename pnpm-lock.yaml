@@ -66,6 +66,12 @@ importers:
 
   chat-web:
     dependencies:
+      '@noble/curves':
+        specifier: ^2.0.1
+        version: 2.0.1
+      '@noble/hashes':
+        specifier: ^2.0.1
+        version: 2.2.0
       lucide-react:
         specifier: ^1.0.0
         version: 1.16.0(react@19.2.8)
@@ -75,6 +81,9 @@ importers:
       nostr-tools:
         specifier: ^2.23.3
         version: 2.23.12(typescript@6.0.3)
+      qrcode.react:
+        specifier: ^4.2.0
+        version: 4.2.0(react@19.2.8)
       react:
         specifier: ^19.1.0
         version: 19.2.8

@@ -4,6 +4,7 @@ import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/features/channels/deep_link_dispatcher.dart';
 import 'package:buzz/features/invites/invite_join_provider.dart';
+import 'package:buzz/features/pairing/pairing_provider.dart';
 import 'package:buzz/shared/auth/auth.dart';
 import 'package:buzz/shared/deeplink/deep_link.dart';
 import 'package:buzz/shared/deeplink/pending_deep_link_provider.dart';
@@ -623,6 +624,44 @@ void main() {
     },
   );
 
+  testWidgets('authorizes and opens a same-phone recovery handoff', (
+    tester,
+  ) async {
+    const code = 'nostrpair://desktop?mode=recover';
+    const link = PairingDeepLink(code: code);
+    final pairing = _RecordingPairingNotifier();
+    final container = ProviderContainer(
+      overrides: [
+        pendingDeepLinkProvider.overrideWith(
+          () => _FakePendingDeepLinkNotifier(link),
+        ),
+        authProvider.overrideWith(_AuthenticatedAuthNotifier.new),
+        pairingProvider.overrideWith(() => pairing),
+      ],
+    );
+    addTearDown(container.dispose);
+    await container.read(authProvider.future);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: const MaterialApp(
+          home: DeepLinkDispatcher(child: Scaffold(body: SizedBox())),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump();
+    await tester.pump();
+    await tester.pump();
+    await tester.pump();
+
+    expect(pairing.authorizationCalls, 1);
+    expect(pairing.pairedCodes, [code]);
+    expect(find.text('Send to Desktop'), findsOneWidget);
+  });
+
   testWidgets('continues a successful invite into welcome-everyone', (
     tester,
   ) async {
@@ -813,6 +852,40 @@ class _FakePendingDeepLinkNotifier extends PendingDeepLinkNotifier {
 
   @override
   BuzzDeepLink? build() => link;
+}
+
+class _AuthenticatedAuthNotifier extends AuthNotifier {
+  @override
+  Future<AuthState> build() async => AuthState(
+    status: AuthStatus.authenticated,
+    community: Community(
+      id: 'community',
+      name: 'Test',
+      relayUrl: 'https://relay.example.com',
+      nsec: 'nsec',
+      addedAt: DateTime.utc(2026),
+    ),
+  );
+}
+
+class _RecordingPairingNotifier extends PairingNotifier {
+  int authorizationCalls = 0;
+  final pairedCodes = <String>[];
+
+  @override
+  PairingState build() => const PairingState();
+
+  @override
+  Future<bool> authorizeIdentityExport({required Community community}) async {
+    authorizationCalls++;
+    return true;
+  }
+
+  @override
+  Future<void> pair(String rawInput) async => pairedCodes.add(rawInput);
+
+  @override
+  void reset() {}
 }
 
 class _FakeChannelsNotifier extends ChannelsNotifier {
