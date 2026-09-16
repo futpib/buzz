@@ -12,6 +12,7 @@ type Entry<T> = {
   lastAccessedAt: number;
   generation: number;
   refresh: Promise<void> | null;
+  refreshGeneration: number | null;
 };
 
 type ViewCacheOptions = {
@@ -112,6 +113,7 @@ export class ViewCache<T> {
         lastAccessedAt: now,
         generation: 0,
         refresh: null,
+        refreshGeneration: null,
       });
       this.evictIfNeeded(key);
     }
@@ -159,7 +161,14 @@ export class ViewCache<T> {
     entry: Entry<T>,
     load: () => Promise<T>,
   ): Promise<void> {
-    if (entry.refresh) return entry.refresh;
+    if (entry.refresh) {
+      if (entry.refreshGeneration === entry.generation) return entry.refresh;
+      const obsolete = entry.refresh;
+      return obsolete.then(
+        () => this.startRefresh(key, entry, load),
+        () => this.startRefresh(key, entry, load),
+      );
+    }
     const generation = entry.generation;
     const refresh = load()
       .then((value) => {
@@ -175,10 +184,14 @@ export class ViewCache<T> {
         entry.lastAccessedAt = now;
       })
       .finally(() => {
-        if (entry.refresh === refresh) entry.refresh = null;
+        if (entry.refresh === refresh) {
+          entry.refresh = null;
+          entry.refreshGeneration = null;
+        }
         this.evictIfNeeded(key);
       });
     entry.refresh = refresh;
+    entry.refreshGeneration = generation;
     return refresh;
   }
 
@@ -189,6 +202,7 @@ export class ViewCache<T> {
       lastAccessedAt: this.now(),
       generation: 0,
       refresh: null,
+      refreshGeneration: null,
     };
   }
 

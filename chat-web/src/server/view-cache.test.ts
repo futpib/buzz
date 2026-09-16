@@ -99,6 +99,41 @@ test("a stale in-flight generation cannot overwrite an invalidated view", async 
   assert.equal(current.state, "refreshed");
 });
 
+test("a refresh waiter advances past an invalidated in-flight generation", async () => {
+  let now = 1_000;
+  let loads = 0;
+  const cache = new ViewCache<string>({
+    maxEntries: 4,
+    staleAfterMs: 10,
+    now: () => now,
+  });
+  cache.set("session:channel", "old");
+  now += 11;
+  const obsolete = deferred<string>();
+  assert.equal(
+    (
+      await cache.get("session:channel", () => {
+        loads += 1;
+        return obsolete.promise;
+      })
+    ).state,
+    "stale",
+  );
+  cache.markStale((key) => key === "session:channel");
+  const current = cache.refresh("session:channel", async () => {
+    loads += 1;
+    return "current";
+  });
+
+  obsolete.resolve("obsolete");
+  assert.deepEqual(await current, {
+    value: "current",
+    state: "refreshed",
+    ageMs: 0,
+  });
+  assert.equal(loads, 2);
+});
+
 test("bounds idle entries by least-recent access", async () => {
   let now = 1;
   const cache = new ViewCache<string>({
