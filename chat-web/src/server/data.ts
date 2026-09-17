@@ -13,6 +13,7 @@ import {
   projectTimeline,
 } from "@/server/projector";
 import {
+  loadChannelMessageWindow,
   loadCompleteChannelHistory,
   loadProjectionAuxClosure,
   loadProjectionAuxClosureForChannels,
@@ -23,21 +24,19 @@ import type {
   ChannelSnapshot,
   ChannelTimelineCursor,
   ChannelView,
-  NostrEvent,
   ThreadsWorkspaceView,
   WorkspaceView,
 } from "@/server/types";
 import { ViewCache } from "@/server/view-cache";
 
 const CHANNEL_WINDOW_LIMIT = 20;
-const CHANNEL_SCAN_LIMIT = 500;
 const THREAD_WINDOW_LIMIT = 100;
 const INDEX_STALE_AFTER_MS = 10_000;
 const WORKSPACE_STALE_AFTER_MS = 3_000;
 const THREADS_STALE_AFTER_MS = 15_000;
 const HISTORY_STALE_AFTER_MS = 10_000;
-const THREAD_PREWARM_LIMIT = 40;
-const THREAD_PREWARM_TARGET_LIMIT = 400;
+const THREAD_PREWARM_LIMIT = 20;
+const THREAD_PREWARM_TARGET_LIMIT = 200;
 const CHANNEL_MESSAGE_KINDS = [9, 40002, 40008, 45001, 45003];
 
 type WorkspaceIndex = {
@@ -89,72 +88,6 @@ function threadFilters(channelId: string, rootId: string): RelayFilter[] {
 
 function mergeEvents<T extends { id: string }>(...groups: T[][]): T[] {
   return [...new Map(groups.flat().map((event) => [event.id, event])).values()];
-}
-
-type ChannelMessageWindow = {
-  events: NostrEvent[];
-  hasMore: boolean;
-  nextCursor: ChannelTimelineCursor | null;
-};
-
-async function scanChannelMessageWindow(
-  session: AuthSession,
-  channelId: string,
-  cursor: ChannelTimelineCursor | null,
-): Promise<ChannelMessageWindow> {
-  const events = new Map<string, NostrEvent>();
-  let scanCursor = cursor;
-  for (;;) {
-    const filter: RelayFilter = {
-      kinds: CHANNEL_MESSAGE_KINDS,
-      "#h": [channelId],
-      limit: CHANNEL_SCAN_LIMIT,
-    };
-    if (scanCursor) {
-      filter.until = scanCursor.createdAt;
-      filter.before_id = scanCursor.id;
-    }
-    const page = await session.relay.query([filter]);
-    for (const event of page) events.set(event.id, event);
-    const tail = page.at(-1);
-    const scannedMore = page.length === CHANNEL_SCAN_LIMIT;
-    const roots = projectTimeline(
-      [...events.values()],
-      channelId,
-      new Map(),
-      session.pubkey,
-    );
-    if (roots.length >= CHANNEL_WINDOW_LIMIT) {
-      const oldestVisible = roots.at(-CHANNEL_WINDOW_LIMIT);
-      const hasMore = scannedMore || roots.length > CHANNEL_WINDOW_LIMIT;
-      return {
-        events: [...events.values()],
-        hasMore,
-        nextCursor:
-          hasMore && oldestVisible
-            ? { createdAt: oldestVisible.createdAt, id: oldestVisible.id }
-            : null,
-      };
-    }
-    if (!scannedMore) {
-      return {
-        events: [...events.values()],
-        hasMore: false,
-        nextCursor: null,
-      };
-    }
-    const nextCursor = tail
-      ? { createdAt: tail.created_at, id: tail.id }
-      : null;
-    if (
-      !nextCursor ||
-      (scanCursor?.createdAt === nextCursor.createdAt &&
-        scanCursor.id === nextCursor.id)
-    ) {
-      throw new Error(`Channel history pagination stalled for ${channelId}`);
-    }
-    scanCursor = nextCursor;
-  }
 }
 
 function timelinePageFromCompleteHistory(
@@ -217,8 +150,7 @@ export async function loadWorkspaceIndex(
 async function loadThreadsWorkspaceFresh(
   session: AuthSession,
 ): Promise<ThreadsWorkspacePayload> {
-  const index = await loadWorkspaceIndexFresh(session);
-  workspaceIndexCache.set(session.cacheScope, index);
+  const index = await loadWorkspaceIndex(session);
   const { channels } = index;
   const [historyGroups, deletions] = await Promise.all([
     Promise.all(
@@ -255,20 +187,11 @@ async function loadThreadsWorkspaceFresh(
     session.pubkey,
   );
   const targetIdsByChannel = new Map(
-    channels.map((channel, index) => {
-      const targets = new Set(
-        projectTimeline(
-          baseEventGroups[index] ?? [],
-          channel.id,
-          new Map(),
-          session.pubkey,
-        )
-          .slice(-CHANNEL_WINDOW_LIMIT)
-          .map((message) => message.id),
-      );
-      return [channel.id, targets] as const;
-    }),
+    channels.map((channel) => [channel.id, new Set<string>()] as const),
   );
+  for (const summary of provisionalThreads) {
+    targetIdsByChannel.get(summary.channel.id)?.add(summary.root.id);
+  }
   const prewarmedThreadIds = new Set<string>();
   let prewarmedThreadTargetCount = 0;
   for (const summary of provisionalThreads.slice(0, THREAD_PREWARM_LIMIT)) {
@@ -284,20 +207,18 @@ async function loadThreadsWorkspaceFresh(
     );
     const targets = targetIdsByChannel.get(summary.channel.id);
     if (!targets) continue;
-    const threadTargetIds = [thread.root, ...thread.replies]
-      .filter((message) => message !== null)
-      .map((message) => message.id);
-    const additionalTargetCount = threadTargetIds.filter(
+    const threadTargetIds = thread.replies.map((message) => message.id);
+    const additionalTargetIds = threadTargetIds.filter(
       (id) => !targets.has(id),
-    ).length;
+    );
     if (
-      prewarmedThreadTargetCount + additionalTargetCount >
+      prewarmedThreadTargetCount + additionalTargetIds.length >
       THREAD_PREWARM_TARGET_LIMIT
     ) {
       continue;
     }
-    for (const id of threadTargetIds) targets.add(id);
-    prewarmedThreadTargetCount += additionalTargetCount;
+    for (const id of additionalTargetIds) targets.add(id);
+    prewarmedThreadTargetCount += additionalTargetIds.length;
     prewarmedThreadIds.add(summary.root.id);
   }
   const auxiliary = await loadProjectionAuxClosureForChannels(
@@ -361,7 +282,6 @@ async function loadThreadsWorkspaceFresh(
     const channelIndex = channels.findIndex(
       (channel) => channel.id === summary.channel.id,
     );
-    const channelEvents = eventGroups[channelIndex] ?? [];
     const page = timelinePages.get(summary.channel.id);
     workspaceCache.set(
       workspaceCacheKey(session, summary.channel.id, summary.root.id),
@@ -373,7 +293,7 @@ async function loadThreadsWorkspaceFresh(
         timelineHasMore: page?.hasMore ?? false,
         timelineCursor: page?.nextCursor ?? null,
         thread: projectThread(
-          channelEvents,
+          eventGroups[channelIndex] ?? [],
           summary.channel.id,
           summary.root.id,
           profiles,
@@ -422,32 +342,47 @@ async function loadWorkspaceFresh(
   channelId: string,
   rootId: string | null,
 ): Promise<WorkspacePayload> {
-  const [indexEvents, messageWindow, threadEvents] = await Promise.all([
-    session.relay.query(baseFilters(session.pubkey)),
-    scanChannelMessageWindow(session, channelId, null),
+  const [{ channels }, messageWindow, threadEvents] = await Promise.all([
+    loadWorkspaceIndex(session),
+    loadChannelMessageWindow(
+      (filters) => session.relay.query(filters),
+      channelId,
+      session.pubkey,
+      null,
+      CHANNEL_WINDOW_LIMIT,
+    ),
     rootId
       ? session.relay.query(threadFilters(channelId, rootId))
       : Promise.resolve([]),
   ]);
-  const messageEvents = mergeEvents(messageWindow.events, threadEvents).filter(
-    (event) => CHANNEL_MESSAGE_KINDS.includes(event.kind),
+  const threadMessageEvents = threadEvents.filter((event) =>
+    CHANNEL_MESSAGE_KINDS.includes(event.kind),
   );
-  const decorations = await loadProjectionAuxClosure(
-    (filters) => session.relay.query(filters),
-    channelId,
-    messageEvents.map((event) => event.id),
+  const threadDecorations = rootId
+    ? await loadProjectionAuxClosure(
+        (filters) => session.relay.query(filters),
+        channelId,
+        threadMessageEvents.map((event) => event.id),
+      )
+    : [];
+  const combined = mergeEvents(
+    messageWindow.events,
+    threadEvents,
+    threadDecorations,
   );
-  const events = mergeEvents(indexEvents, messageWindow.events, decorations);
-  const combined = mergeEvents(events, threadEvents);
+  const visibleTimelineIds = new Set(
+    projectTimeline(messageWindow.events, channelId, new Map(), session.pubkey)
+      .slice(-CHANNEL_WINDOW_LIMIT)
+      .map((message) => message.id),
+  );
+  const profileSources = mergeEvents(
+    messageWindow.events.filter((event) => visibleTimelineIds.has(event.id)),
+    threadMessageEvents,
+  );
   const profileEvents = await session.relay.query([
-    profileFilter(combined, session.pubkey),
+    profileFilter(profileSources, session.pubkey),
   ]);
   const viewerPubkey = session.pubkey;
-  const channels = projectChannels(events, viewerPubkey);
-  workspaceIndexCache.set(session.cacheScope, {
-    channels,
-    defaultChannel: pickDefaultChannel(channels),
-  });
   const selectedChannel = channels.find((channel) => channel.id === channelId);
   if (!selectedChannel) {
     throw new UnknownChannelError(`Channel ${channelId} is not available`);
@@ -523,25 +458,24 @@ async function loadChannelHistoryPageFresh(
   if (!channels.some((channel) => channel.id === channelId)) {
     throw new UnknownChannelError(`Channel ${channelId} is not available`);
   }
-  const messageWindow = await scanChannelMessageWindow(
-    session,
-    channelId,
-    cursor,
-  );
-  const decorations = await loadProjectionAuxClosure(
+  const messageWindow = await loadChannelMessageWindow(
     (filters) => session.relay.query(filters),
     channelId,
-    messageWindow.events
-      .filter((event) => CHANNEL_MESSAGE_KINDS.includes(event.kind))
-      .map((event) => event.id),
+    session.pubkey,
+    cursor,
+    CHANNEL_WINDOW_LIMIT,
   );
-  const events = mergeEvents(messageWindow.events, decorations);
   const profileEvents = await session.relay.query([
-    profileFilter(events, session.pubkey),
+    profileFilter(
+      messageWindow.events.filter((event) =>
+        CHANNEL_MESSAGE_KINDS.includes(event.kind),
+      ),
+      session.pubkey,
+    ),
   ]);
   return {
     messages: projectTimeline(
-      events,
+      messageWindow.events,
       channelId,
       projectProfiles(profileEvents),
       session.pubkey,

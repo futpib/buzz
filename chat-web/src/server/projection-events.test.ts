@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   CHANNEL_HISTORY_KINDS,
+  loadChannelMessageWindow,
   loadCompleteChannelHistory,
   loadProjectionAuxClosure,
   type RelayQuery,
@@ -136,4 +137,58 @@ test("targeted projection closure includes deletion of a reaction atomically", a
   );
   assert.equal(rows[0].content, "after");
   assert.deepEqual(rows[0].reactions, []);
+});
+
+test("channel scan decorates candidate roots without targeting crossed replies", async () => {
+  const channelId = "channel-a";
+  const root = event("7", 9, "root", [["h", channelId]], 20);
+  const reply = event(
+    "8",
+    9,
+    "reply",
+    [
+      ["h", channelId],
+      ["e", root.id, "", "reply"],
+    ],
+    21,
+  );
+  const reaction = event(
+    "9",
+    7,
+    "🔥",
+    [
+      ["h", channelId],
+      ["e", root.id],
+    ],
+    22,
+  );
+  const filters: Record<string, unknown>[] = [];
+  const query: RelayQuery = async ([filter]) => {
+    filters.push(filter);
+    if (!("#e" in filter)) return [reply, root];
+    if ((filter.kinds as number[]).includes(7)) return [reaction];
+    return [];
+  };
+
+  const window = await loadChannelMessageWindow(
+    query,
+    channelId,
+    root.pubkey,
+    null,
+    1,
+    2,
+  );
+  const rows = projectTimeline(
+    window.events,
+    channelId,
+    new Map(),
+    root.pubkey,
+  );
+
+  assert.equal(window.hasMore, true);
+  assert.deepEqual(rows[0].reactions, [
+    { emoji: "🔥", count: 1, reactedByMe: true },
+  ]);
+  assert.deepEqual(filters[1]["#e"], [root.id]);
+  assert.equal((filters[1]["#e"] as string[]).includes(reply.id), false);
 });

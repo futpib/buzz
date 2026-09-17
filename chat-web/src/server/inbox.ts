@@ -26,7 +26,7 @@ function profileFilter(events: NostrEvent[], viewerPubkey: string) {
 async function loadInboxWorkspaceFresh(
   session: AuthSession,
 ): Promise<InboxWorkspacePayload> {
-  const [{ channels }, mentions, needsAction] = await Promise.all([
+  const [{ channels }, feedEvents] = await Promise.all([
     loadWorkspaceIndex(session),
     session.relay.query([
       {
@@ -34,8 +34,6 @@ async function loadInboxWorkspaceFresh(
         feed_types: ["mentions"],
         limit: INBOX_LIMIT,
       },
-    ]),
-    session.relay.query([
       {
         "#p": [session.pubkey],
         feed_types: ["needs_action"],
@@ -44,9 +42,7 @@ async function loadInboxWorkspaceFresh(
     ]),
   ]);
   const events = [
-    ...new Map(
-      [...mentions, ...needsAction].map((event) => [event.id, event]),
-    ).values(),
+    ...new Map(feedEvents.map((event) => [event.id, event])).values(),
   ];
   const profileEvents = await session.relay.query([
     profileFilter(events, session.pubkey),

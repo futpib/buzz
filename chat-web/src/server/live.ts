@@ -15,6 +15,7 @@ export function listenForChannelChanges(
   onTyping: (typing: TypingIndicatorView) => void,
   signal: AbortSignal,
 ): Promise<void> {
+  let caughtUpChange = false;
   return session.relay.subscribe(
     {
       kinds: [
@@ -36,13 +37,17 @@ export function listenForChannelChanges(
         Math.ceil(TYPING_INDICATOR_TTL_MS / 1_000),
     },
     {
-      onEose: onDirty,
+      onEose() {
+        if (caughtUpChange) onDirty();
+      },
       onEvent(event, isLive) {
         if (event.kind === TYPING_INDICATOR_KIND) {
           const typing = projectTypingIndicator(event, channelId);
           if (typing) onTyping(typing);
         } else if (isLive) {
           onDirty();
+        } else {
+          caughtUpChange = true;
         }
       },
     },

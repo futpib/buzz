@@ -1,9 +1,9 @@
 import "server-only";
 
 import { randomUUID } from "node:crypto";
-import { verifyEvent } from "nostr-tools";
 
 import { getServerConfig } from "@/server/env";
+import { EventVerificationCache } from "@/server/event-verification";
 import type { NostrEvent } from "@/server/types";
 
 export type RelayFilter = Record<string, unknown>;
@@ -14,6 +14,8 @@ type FrameListener = (frame: RelayFrame) => void;
 const OPEN_TIMEOUT_MS = 4_000;
 const REQUEST_TIMEOUT_MS = 15_000;
 const MAX_QUERY_EVENTS = 5_000;
+const VERIFIED_EVENT_CACHE_LIMIT = 20_000;
+const verifiedEvents = new EventVerificationCache(VERIFIED_EVENT_CACHE_LIMIT);
 
 function parseFrame(data: unknown): RelayFrame | null {
   if (typeof data !== "string") return null;
@@ -192,7 +194,8 @@ export class RelayConnection {
         if (frame[1] !== subscriptionId) return;
         if (frame[0] === "EVENT") {
           const event = asEvent(frame[2]);
-          if (event && verifyEvent(event)) events.set(event.id, event);
+          if (event && verifiedEvents.accepts(event))
+            events.set(event.id, event);
           if (events.size > MAX_QUERY_EVENTS) {
             finish(new Error("Relay query exceeded the event limit"));
           }
@@ -252,7 +255,7 @@ export class RelayConnection {
           handlers.onEose();
         } else if (frame[0] === "EVENT") {
           const event = asEvent(frame[2]);
-          if (event && verifyEvent(event)) {
+          if (event && verifiedEvents.accepts(event)) {
             handlers.onEvent(event, sawEose);
           }
         } else if (frame[0] === "CLOSED") {
