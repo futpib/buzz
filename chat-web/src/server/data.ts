@@ -37,6 +37,7 @@ const WORKSPACE_STALE_AFTER_MS = 3_000;
 const THREADS_STALE_AFTER_MS = 15_000;
 const HISTORY_STALE_AFTER_MS = 10_000;
 const THREAD_PREWARM_LIMIT = 40;
+const THREAD_PREWARM_TARGET_LIMIT = 400;
 const CHANNEL_MESSAGE_KINDS = [9, 40002, 40008, 45001, 45003];
 
 type WorkspaceIndex = {
@@ -268,6 +269,8 @@ async function loadThreadsWorkspaceFresh(
       return [channel.id, targets] as const;
     }),
   );
+  const prewarmedThreadIds = new Set<string>();
+  let prewarmedThreadTargetCount = 0;
   for (const summary of provisionalThreads.slice(0, THREAD_PREWARM_LIMIT)) {
     const channelIndex = channels.findIndex(
       (channel) => channel.id === summary.channel.id,
@@ -281,8 +284,21 @@ async function loadThreadsWorkspaceFresh(
     );
     const targets = targetIdsByChannel.get(summary.channel.id);
     if (!targets) continue;
-    if (thread.root) targets.add(thread.root.id);
-    for (const reply of thread.replies) targets.add(reply.id);
+    const threadTargetIds = [thread.root, ...thread.replies]
+      .filter((message) => message !== null)
+      .map((message) => message.id);
+    const additionalTargetCount = threadTargetIds.filter(
+      (id) => !targets.has(id),
+    ).length;
+    if (
+      prewarmedThreadTargetCount + additionalTargetCount >
+      THREAD_PREWARM_TARGET_LIMIT
+    ) {
+      continue;
+    }
+    for (const id of threadTargetIds) targets.add(id);
+    prewarmedThreadTargetCount += additionalTargetCount;
+    prewarmedThreadIds.add(summary.root.id);
   }
   const auxiliary = await loadProjectionAuxClosureForChannels(
     (filters) => session.relay.query(filters),
@@ -339,7 +355,9 @@ async function loadThreadsWorkspaceFresh(
       generatedAt,
     });
   }
-  for (const summary of threads.slice(0, THREAD_PREWARM_LIMIT)) {
+  for (const summary of threads.filter((summary) =>
+    prewarmedThreadIds.has(summary.root.id),
+  )) {
     const channelIndex = channels.findIndex(
       (channel) => channel.id === summary.channel.id,
     );
