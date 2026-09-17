@@ -13,7 +13,7 @@ import {
   projectTimeline,
 } from "@/server/projector";
 import {
-  loadCompleteChannelProjection,
+  loadCompleteChannelProjectionBase,
   loadProjectionAuxClosure,
 } from "@/server/projection-events";
 import type { RelayFilter } from "@/server/relay";
@@ -218,13 +218,63 @@ async function loadThreadsWorkspaceFresh(
   const index = await loadWorkspaceIndexFresh(session);
   workspaceIndexCache.set(session.cacheScope, index);
   const { channels } = index;
-  const eventGroups = await Promise.all(
+  const baseEventGroups = await Promise.all(
     channels.map((channel) =>
-      loadCompleteChannelProjection(
+      loadCompleteChannelProjectionBase(
         (filters) => session.relay.query(filters),
         channel.id,
       ),
     ),
+  );
+  const provisionalEvents = mergeEvents(...baseEventGroups);
+  const provisionalThreads = projectThreadIndex(
+    provisionalEvents,
+    channels,
+    new Map(),
+    session.pubkey,
+  );
+  const targetIdsByChannel = new Map(
+    channels.map((channel, index) => {
+      const targets = new Set(
+        projectTimeline(
+          baseEventGroups[index] ?? [],
+          channel.id,
+          new Map(),
+          session.pubkey,
+        )
+          .slice(-CHANNEL_WINDOW_LIMIT)
+          .map((message) => message.id),
+      );
+      return [channel.id, targets] as const;
+    }),
+  );
+  for (const summary of provisionalThreads.slice(0, THREAD_PREWARM_LIMIT)) {
+    const channelIndex = channels.findIndex(
+      (channel) => channel.id === summary.channel.id,
+    );
+    const thread = projectThread(
+      baseEventGroups[channelIndex] ?? [],
+      summary.channel.id,
+      summary.root.id,
+      new Map(),
+      session.pubkey,
+    );
+    const targets = targetIdsByChannel.get(summary.channel.id);
+    if (!targets) continue;
+    if (thread.root) targets.add(thread.root.id);
+    for (const reply of thread.replies) targets.add(reply.id);
+  }
+  const auxiliaryGroups = await Promise.all(
+    channels.map((channel) =>
+      loadProjectionAuxClosure(
+        (filters) => session.relay.query(filters),
+        channel.id,
+        [...(targetIdsByChannel.get(channel.id) ?? [])],
+      ),
+    ),
+  );
+  const eventGroups = baseEventGroups.map((group, index) =>
+    mergeEvents(group, auxiliaryGroups[index] ?? []),
   );
   const events = mergeEvents(...eventGroups);
   const profileEvents = await session.relay.query([

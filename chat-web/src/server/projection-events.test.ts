@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  CHANNEL_MESSAGE_KINDS,
-  loadCompleteChannelProjection,
+  CHANNEL_PROJECTION_BASE_KINDS,
+  loadCompleteChannelProjectionBase,
   loadProjectionAuxClosure,
   type RelayQuery,
 } from "./projection-events";
@@ -51,16 +51,18 @@ test("complete thread-index history bakes reactions into its first projection", 
     return pages.shift() ?? [];
   };
 
-  const events = await loadCompleteChannelProjection(query, channelId, 1);
+  const base = await loadCompleteChannelProjectionBase(query, channelId, 1);
+  const auxiliary = await loadProjectionAuxClosure(query, channelId, [root.id]);
+  const events = [...base, ...auxiliary];
   const rows = projectTimeline(events, channelId, new Map(), root.pubkey);
 
   assert.deepEqual(rows[0].reactions, [
     { emoji: "🔥", count: 1, reactedByMe: true },
   ]);
-  assert.equal(new Set<number>(CHANNEL_MESSAGE_KINDS).has(7), false);
+  assert.equal(new Set<number>(CHANNEL_PROJECTION_BASE_KINDS).has(7), false);
   assert.equal(filters.length, 4);
   assert.deepEqual(filters[1], {
-    kinds: [...CHANNEL_MESSAGE_KINDS],
+    kinds: [...CHANNEL_PROJECTION_BASE_KINDS],
     "#h": [channelId],
     limit: 1,
     until: root.created_at,
