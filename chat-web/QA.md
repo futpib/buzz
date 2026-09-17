@@ -34,6 +34,16 @@ the browser. A pass is not complete until it covers the checks below.
   thread summaries, nested branches, search results, and thread close. Large
   result sets may warm on pointer/focus/touch intent; the bounded sidebar set
   must be eagerly prefetched.
+- From a cold Threads load, open a root with existing reactions and require
+  those reactions in the first painted thread snapshot. A later live refresh
+  must not be needed to fill reaction state into a prewarmed cache entry.
+- With stale channel, Threads, Inbox, and search projections, require the stale
+  content to remain usable while a visible `Updating`/search spinner persists
+  for exactly the fresh request and disappears after success or failure.
+- Type trusted non-empty input in a channel and a nested thread. Require a
+  signed kind-20002 event with the canonical channel/root/reply scope, throttle
+  repeated sends, exclude the current identity, separate channel and branch
+  indicators, clear an author when their message arrives, and expire silence.
 - Open a rendered message link with trusted input and require a new tab with
   an isolated opener while the Buzz application remains on its current route.
 - Exercise channel navigation, opening and closing a real thread, search,

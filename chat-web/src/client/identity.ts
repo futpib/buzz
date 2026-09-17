@@ -4,6 +4,7 @@ import { finalizeEvent, getPublicKey, nip19 } from "nostr-tools";
 
 import type { NostrEvent } from "@/server/types";
 import { BROWSER_CREDENTIAL_KEY } from "@/shared/auth";
+import { TYPING_INDICATOR_KIND } from "@/shared/typing";
 
 export type BrowserCredential = {
   nsec: string;
@@ -95,6 +96,33 @@ export function makeMessageEvent(
       created_at: Math.floor(Date.now() / 1000),
       tags,
       content: input.content,
+    },
+    secretKey(credential.nsec),
+  ) as NostrEvent;
+}
+
+export function makeTypingEvent(
+  credential: BrowserCredential,
+  input: {
+    channelId: string;
+    threadHeadId?: string | null;
+    rootId?: string | null;
+  },
+): NostrEvent {
+  const tags = [["h", input.channelId]];
+  if (input.threadHeadId) {
+    if (input.rootId && input.rootId !== input.threadHeadId) {
+      tags.push(["e", input.rootId, "", "root"]);
+    }
+    tags.push(["e", input.threadHeadId, "", "reply"]);
+  }
+  if (credential.authTag) tags.push([...credential.authTag]);
+  return finalizeEvent(
+    {
+      kind: TYPING_INDICATOR_KIND,
+      created_at: Math.floor(Date.now() / 1000),
+      tags,
+      content: "",
     },
     secretKey(credential.nsec),
   ) as NostrEvent;

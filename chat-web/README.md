@@ -22,6 +22,13 @@ the relay live stream and the Threads index refreshes in the background.
 Channel timelines scan the relay with a composite cursor until they contain a
 real page of top-level roots; reaching the top loads the next page without
 dropping the reader's scroll position.
+Every cache seed awaits the message set and its reaction/edit/deletion closure
+as one server projection, so opening a prewarmed thread cannot paint first and
+fill reactions in during a later refresh.
+Warm stale views remain on screen with a compact updating indicator while their
+fresh projection is requested. Channel and thread composers also publish and
+receive short-lived, signed typing indicators using the same branch scope as
+Buzz Desktop, without treating ephemeral delivery failure as a logout.
 Successful and explicitly submitted searches are kept as a bounded,
 browser-only recent-search list scoped to the signed-in public key. The empty
 search dialog can rerun, remove, or clear those entries.

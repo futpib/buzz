@@ -19,14 +19,23 @@ import {
   useState,
 } from "react";
 
+import {
+  clearCompletedTyping,
+  type ClientTypingEntry,
+  pruneTypingEntries,
+  registerTypingEntry,
+} from "@/client/typing-state";
 import type {
   ChannelHistoryPage,
   ChannelSnapshot,
+  TypingIndicatorView,
   WorkspaceView,
 } from "@/server/types";
 import { Composer } from "@/ui/Composer";
 import { MessageRow } from "@/ui/MessageRow";
 import { SearchDialog } from "@/ui/SearchDialog";
+import type { TypingParticipant } from "@/ui/TypingIndicator";
+import { ViewRefreshIndicator } from "@/ui/ViewRefreshIndicator";
 import { WorkspaceSidebar } from "@/ui/WorkspaceSidebar";
 import { ViewLink } from "@/ui/ViewLink";
 
@@ -55,6 +64,10 @@ export function WorkspaceShell({
   const [timelineCursor, setTimelineCursor] = useState(initial.timelineCursor);
   const [historyError, setHistoryError] = useState<string | null>(null);
   const [historyLoading, setHistoryLoading] = useState(false);
+  const [revalidating, setRevalidating] = useState(
+    initial.cacheState === "stale",
+  );
+  const [typingEntries, setTypingEntries] = useState<ClientTypingEntry[]>([]);
   const timelineScroller = useRef<HTMLDivElement>(null);
   const timelineEnd = useRef<HTMLDivElement>(null);
   const timelinePinnedToBottom = useRef(true);
@@ -84,6 +97,8 @@ export function WorkspaceShell({
     setMobileNavOpen(false);
     setSearchOpen(false);
     setReplyTarget(null);
+    setRevalidating(initial.cacheState === "stale");
+    setTypingEntries([]);
   }, [initial]);
 
   useEffect(() => {
@@ -93,6 +108,7 @@ export function WorkspaceShell({
     source.onopen = () => setLiveState("live");
     source.onerror = () => {
       setLiveState("reconnecting");
+      setRevalidating(false);
       void fetch("/api/auth/status", { cache: "no-store" })
         .then((response) => {
           if (response.status === 401) {
@@ -113,10 +129,35 @@ export function WorkspaceShell({
         setTimelineCursor(snapshot.timelineCursor);
       }
       setThread(snapshot.thread);
+      setTypingEntries((current) => clearCompletedTyping(current, snapshot));
+      setRevalidating(false);
       setLiveState("live");
     });
+    source.addEventListener("typing", (event) => {
+      const typing = JSON.parse(
+        (event as MessageEvent<string>).data,
+      ) as TypingIndicatorView;
+      setTypingEntries((current) =>
+        registerTypingEntry(current, typing, initial.identity.pubkey),
+      );
+    });
+    source.addEventListener("status", (event) => {
+      const status = JSON.parse((event as MessageEvent<string>).data) as {
+        state?: string;
+      };
+      if (status.state === "degraded") setRevalidating(false);
+    });
     return () => source.close();
-  }, [initial.selectedChannel.id, rootId]);
+  }, [initial.identity.pubkey, initial.selectedChannel.id, rootId]);
+
+  useEffect(() => {
+    if (typingEntries.length === 0) return;
+    const interval = window.setInterval(
+      () => setTypingEntries((current) => pruneTypingEntries(current)),
+      1_000,
+    );
+    return () => window.clearInterval(interval);
+  }, [typingEntries.length]);
 
   useEffect(() => {
     if (timeline.length >= 0 && timelinePinnedToBottom.current) {
@@ -145,6 +186,32 @@ export function WorkspaceShell({
       ].sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id)),
     [olderTimeline, timeline],
   );
+
+  const typingParticipants = useMemo(() => {
+    const names = new Map<string, string>();
+    names.set(initial.identity.pubkey, initial.identity.name);
+    for (const message of [
+      ...renderedTimeline,
+      thread?.root,
+      ...(thread?.replies ?? []),
+    ]) {
+      if (message) names.set(message.author.pubkey, message.author.name);
+    }
+    const forScope = (threadHeadId: string | null): TypingParticipant[] =>
+      typingEntries
+        .filter((entry) => entry.threadHeadId === threadHeadId)
+        .map((entry) => ({
+          pubkey: entry.pubkey,
+          name:
+            names.get(entry.pubkey) ??
+            `${entry.pubkey.slice(0, 8)}…${entry.pubkey.slice(-4)}`,
+        }))
+        .sort((a, b) => a.name.localeCompare(b.name));
+    return {
+      channel: forScope(null),
+      thread: thread ? forScope(thread.rootId) : [],
+    };
+  }, [initial.identity, renderedTimeline, thread, typingEntries]);
 
   const loadOlder = useCallback(async () => {
     const cursor = timelineCursor;
@@ -304,6 +371,7 @@ export function WorkspaceShell({
             </div>
           </div>
           <div className="header-actions">
+            <ViewRefreshIndicator active={revalidating} />
             <span className={`live-status live-${liveState}`}>
               <span /> {liveLabel}
             </span>
@@ -385,6 +453,7 @@ export function WorkspaceShell({
           channelName={initial.selectedChannel.name}
           expectedPubkey={initial.identity.pubkey}
           forum={forum}
+          typingParticipants={typingParticipants.channel}
         />
       </section>
 
@@ -476,6 +545,8 @@ export function WorkspaceShell({
             cancelReply={() => setReplyTarget(null)}
             onSent={() => setReplyTarget(null)}
             rootId={thread.outerRootId}
+            typingParticipants={typingParticipants.thread}
+            typingThreadHeadId={thread.rootId}
           />
         </aside>
       ) : (

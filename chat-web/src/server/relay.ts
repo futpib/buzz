@@ -222,7 +222,10 @@ export class RelayConnection {
 
   subscribe(
     filter: RelayFilter,
-    onDirty: () => void,
+    handlers: {
+      onEose: () => void;
+      onEvent: (event: NostrEvent, isLive: boolean) => void;
+    },
     signal: AbortSignal,
   ): Promise<void> {
     this.assertReady();
@@ -246,9 +249,12 @@ export class RelayConnection {
         if (frame[1] !== subscriptionId) return;
         if (frame[0] === "EOSE") {
           sawEose = true;
-          onDirty();
-        } else if (frame[0] === "EVENT" && sawEose) {
-          onDirty();
+          handlers.onEose();
+        } else if (frame[0] === "EVENT") {
+          const event = asEvent(frame[2]);
+          if (event && verifyEvent(event)) {
+            handlers.onEvent(event, sawEose);
+          }
         } else if (frame[0] === "CLOSED") {
           finish(
             new Error(String(frame[2] ?? "Relay closed the subscription")),

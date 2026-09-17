@@ -78,6 +78,7 @@ export async function GET(request: Request): Promise<Response> {
           markWorkspaceViewsStale(session, channelId);
           void refresh();
         },
+        (typing) => emit("typing", typing),
         abort.signal,
       ).catch((error) => {
         emit("status", {

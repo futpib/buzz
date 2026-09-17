@@ -128,6 +128,12 @@ export type ChannelSnapshot = Pick<
   revision: string;
 };
 
+export type TypingIndicatorView = {
+  pubkey: string;
+  threadHeadId: string | null;
+  createdAt: number;
+};
+
 export type SearchResultView = {
   id: string;
   channelId: string;

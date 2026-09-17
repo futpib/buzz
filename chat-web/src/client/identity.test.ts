@@ -9,6 +9,7 @@ import {
   makeAuthEvent,
   makeMediaGetAuthEvent,
   makeMessageEvent,
+  makeTypingEvent,
   storeCredential,
 } from "./identity";
 
@@ -55,6 +56,26 @@ test("nested browser replies carry canonical root and parent markers", () => {
     ["e", rootId, "", "root"],
     ["e", parentId, "", "reply"],
   ]);
+});
+
+test("browser typing indicators use the channel and thread scope", () => {
+  const rootId = "a".repeat(64);
+  const threadHeadId = "b".repeat(64);
+  const event = makeTypingEvent(credential, {
+    channelId: "90db6dbb-a9f1-4c04-a4bb-eb5d2beec82b",
+    rootId,
+    threadHeadId,
+  });
+
+  assert.equal(verifyEvent(event), true);
+  assert.equal(event.kind, 20_002);
+  assert.equal(event.content, "");
+  assert.deepEqual(event.tags.slice(0, 3), [
+    ["h", "90db6dbb-a9f1-4c04-a4bb-eb5d2beec82b"],
+    ["e", rootId, "", "root"],
+    ["e", threadHeadId, "", "reply"],
+  ]);
+  assert.equal(JSON.stringify(event).includes(credential.nsec), false);
 });
 
 test("browser media auth is public, scoped, fresh, and key-free", () => {

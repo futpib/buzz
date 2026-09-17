@@ -6,6 +6,7 @@ import { useEffect, useState } from "react";
 import type { ThreadsWorkspaceView } from "@/server/types";
 import { Avatar } from "@/ui/Avatar";
 import { SearchDialog } from "@/ui/SearchDialog";
+import { ViewRefreshIndicator } from "@/ui/ViewRefreshIndicator";
 import { WorkspaceSidebar } from "@/ui/WorkspaceSidebar";
 import { ViewLink } from "@/ui/ViewLink";
 
@@ -34,16 +35,22 @@ export function ThreadsShell({ initial }: { initial: ThreadsWorkspaceView }) {
   const [view, setView] = useState(initial);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
+  const [revalidating, setRevalidating] = useState(
+    initial.cacheState === "stale",
+  );
 
   useEffect(() => {
     setView(initial);
-    if (
-      initial.cacheState !== "stale" &&
-      Date.now() - initial.generatedAt < THREADS_CLIENT_REVALIDATE_AFTER_MS
-    ) {
+    const shouldRevalidate =
+      initial.cacheState === "stale" ||
+      Date.now() - initial.generatedAt >= THREADS_CLIENT_REVALIDATE_AFTER_MS;
+    setRevalidating(shouldRevalidate);
+    if (!shouldRevalidate) {
+      setRevalidating(false);
       return;
     }
     const controller = new AbortController();
+    let disposed = false;
     void fetch("/api/threads?fresh=1", {
       cache: "no-store",
       signal: controller.signal,
@@ -61,8 +68,14 @@ export function ThreadsShell({ initial }: { initial: ThreadsWorkspaceView }) {
       .then((fresh) => {
         if (fresh && !controller.signal.aborted) setView(fresh);
       })
-      .catch(() => undefined);
-    return () => controller.abort();
+      .catch(() => undefined)
+      .finally(() => {
+        if (!disposed) setRevalidating(false);
+      });
+    return () => {
+      disposed = true;
+      controller.abort();
+    };
   }, [initial]);
 
   return (
@@ -103,6 +116,7 @@ export function ThreadsShell({ initial }: { initial: ThreadsWorkspaceView }) {
             </div>
           </div>
           <div className="header-actions">
+            <ViewRefreshIndicator active={revalidating} />
             <span className="thread-total">{view.threads.length} total</span>
             <button
               aria-controls="workspace-search"

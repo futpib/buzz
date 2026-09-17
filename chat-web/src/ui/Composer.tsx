@@ -3,7 +3,13 @@
 import { ArrowUp, LoaderCircle, X } from "lucide-react";
 import { useRef, useState, useTransition } from "react";
 
-import { loadSigningCredential, makeMessageEvent } from "@/client/identity";
+import {
+  loadSigningCredential,
+  makeMessageEvent,
+  makeTypingEvent,
+} from "@/client/identity";
+import { TYPING_SEND_INTERVAL_MS } from "@/shared/typing";
+import { TypingIndicator, type TypingParticipant } from "@/ui/TypingIndicator";
 
 async function returnToLogin(): Promise<void> {
   await fetch("/api/auth/logout", {
@@ -26,6 +32,8 @@ export function Composer({
   onSent,
   forum = false,
   expectedPubkey,
+  typingParticipants = [],
+  typingThreadHeadId = null,
 }: {
   channelId: string;
   channelName: string;
@@ -36,11 +44,41 @@ export function Composer({
   onSent?: () => void;
   forum?: boolean;
   expectedPubkey: string;
+  typingParticipants?: TypingParticipant[];
+  typingThreadHeadId?: string | null;
 }) {
   const [content, setContent] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [pending, startTransition] = useTransition();
   const textarea = useRef<HTMLTextAreaElement>(null);
+  const lastTypingSentAt = useRef(0);
+
+  const sendTyping = (value: string) => {
+    const now = Date.now();
+    if (
+      forum ||
+      !value.trim() ||
+      now - lastTypingSentAt.current < TYPING_SEND_INTERVAL_MS
+    ) {
+      return;
+    }
+    lastTypingSentAt.current = now;
+    void loadSigningCredential(expectedPubkey)
+      .then((credential) => {
+        if (!credential) return;
+        const event = makeTypingEvent(credential, {
+          channelId,
+          threadHeadId: typingThreadHeadId,
+          rootId,
+        });
+        return fetch("/api/typing", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(event),
+        });
+      })
+      .catch(() => undefined);
+  };
 
   const send = () => {
     const message = content.trim();
@@ -78,6 +116,7 @@ export function Composer({
           throw new Error(body?.error || "Message was not sent");
         }
         setContent("");
+        lastTypingSentAt.current = 0;
         onSent?.();
         textarea.current?.focus();
       } catch (caught) {
@@ -90,6 +129,7 @@ export function Composer({
 
   return (
     <div className={rootId ? "composer composer-thread" : "composer"}>
+      <TypingIndicator participants={typingParticipants} />
       {rootId && replyingTo ? (
         <div className="composer-reply-target">
           <span>
@@ -104,7 +144,10 @@ export function Composer({
         <textarea
           aria-label={rootId ? "Reply to thread" : `Message ${channelName}`}
           disabled={pending}
-          onChange={(event) => setContent(event.target.value)}
+          onChange={(event) => {
+            setContent(event.target.value);
+            sendTyping(event.target.value);
+          }}
           onKeyDown={(event) => {
             if (
               event.key === "Enter" &&

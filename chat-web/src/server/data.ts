@@ -12,6 +12,10 @@ import {
   projectThreadIndex,
   projectTimeline,
 } from "@/server/projector";
+import {
+  loadCompleteChannelProjection,
+  loadProjectionAuxClosure,
+} from "@/server/projection-events";
 import type { RelayFilter } from "@/server/relay";
 import type {
   ChannelHistoryPage,
@@ -27,10 +31,6 @@ import { ViewCache } from "@/server/view-cache";
 const CHANNEL_WINDOW_LIMIT = 20;
 const CHANNEL_SCAN_LIMIT = 500;
 const THREAD_WINDOW_LIMIT = 100;
-// Keep each history page comfortably below the relay/WebSocket request timeout.
-// The composite cursor makes these bounded pages exhaustive without dropping
-// events that share a timestamp.
-const THREAD_INDEX_EVENT_LIMIT = 500;
 const INDEX_STALE_AFTER_MS = 10_000;
 const WORKSPACE_STALE_AFTER_MS = 3_000;
 const THREADS_STALE_AFTER_MS = 15_000;
@@ -73,19 +73,11 @@ function baseFilters(viewerPubkey: string): RelayFilter[] {
   ];
 }
 
-function channelDecorationFilter(channelId: string): RelayFilter {
-  return {
-    kinds: [5, 7, 9005, 39005, 40003],
-    "#h": [channelId],
-    limit: 500,
-  };
-}
-
 function threadFilters(channelId: string, rootId: string): RelayFilter[] {
   return [
     { ids: [rootId], limit: 1 },
     {
-      kinds: [5, 7, 9, 9005, 39005, 40002, 40003, 40008, 45003],
+      kinds: [9, 39005, 40002, 40008, 45003],
       "#h": [channelId],
       "#e": [rootId],
       limit: THREAD_WINDOW_LIMIT * 2,
@@ -182,40 +174,6 @@ function timelinePageFromCompleteHistory(
   };
 }
 
-async function loadChannelHistory(
-  session: AuthSession,
-  channelId: string,
-): Promise<NostrEvent[]> {
-  const events = new Map<string, NostrEvent>();
-  let until: number | undefined;
-  let beforeId: string | undefined;
-  for (;;) {
-    const filter: RelayFilter = {
-      kinds: [9, 39005, 40002, 40003, 40008, 45001, 45003],
-      "#h": [channelId],
-      limit: THREAD_INDEX_EVENT_LIMIT,
-    };
-    if (until !== undefined && beforeId !== undefined) {
-      filter.until = until;
-      filter.before_id = beforeId;
-    }
-    const page = await session.relay.query([filter]);
-    for (const event of page) events.set(event.id, event);
-    if (page.length < THREAD_INDEX_EVENT_LIMIT) break;
-    const tail = page.at(-1);
-    if (
-      !tail ||
-      (until === tail.created_at && beforeId === tail.id) ||
-      tail.created_at < 0
-    ) {
-      throw new Error(`Thread history pagination stalled for ${channelId}`);
-    }
-    until = tail.created_at;
-    beforeId = tail.id;
-  }
-  return [...events.values()];
-}
-
 function profileFilter(events: { pubkey: string }[], viewerPubkey: string) {
   const authors = [
     ...new Set([viewerPubkey, ...events.map((event) => event.pubkey)]),
@@ -260,25 +218,11 @@ async function loadThreadsWorkspaceFresh(
   const index = await loadWorkspaceIndexFresh(session);
   workspaceIndexCache.set(session.cacheScope, index);
   const { channels } = index;
-  const [historyGroups, deletions] = await Promise.all([
-    Promise.all(
-      channels.map((channel) => loadChannelHistory(session, channel.id)),
-    ),
-    channels.length > 0
-      ? session.relay.query([
-          {
-            kinds: [5, 9005],
-            "#h": channels.map((channel) => channel.id),
-            limit: 500,
-          },
-        ])
-      : Promise.resolve([]),
-  ]);
-  const eventGroups = channels.map((channel, index) =>
-    mergeEvents(
-      historyGroups[index] ?? [],
-      deletions.filter((event) =>
-        event.tags.some((tag) => tag[0] === "h" && tag[1] === channel.id),
+  const eventGroups = await Promise.all(
+    channels.map((channel) =>
+      loadCompleteChannelProjection(
+        (filters) => session.relay.query(filters),
+        channel.id,
       ),
     ),
   );
@@ -387,15 +331,21 @@ async function loadWorkspaceFresh(
   channelId: string,
   rootId: string | null,
 ): Promise<WorkspacePayload> {
-  const [indexEvents, messageWindow, decorations, threadEvents] =
-    await Promise.all([
-      session.relay.query(baseFilters(session.pubkey)),
-      scanChannelMessageWindow(session, channelId, null),
-      session.relay.query([channelDecorationFilter(channelId)]),
-      rootId
-        ? session.relay.query(threadFilters(channelId, rootId))
-        : Promise.resolve([]),
-    ]);
+  const [indexEvents, messageWindow, threadEvents] = await Promise.all([
+    session.relay.query(baseFilters(session.pubkey)),
+    scanChannelMessageWindow(session, channelId, null),
+    rootId
+      ? session.relay.query(threadFilters(channelId, rootId))
+      : Promise.resolve([]),
+  ]);
+  const messageEvents = mergeEvents(messageWindow.events, threadEvents).filter(
+    (event) => CHANNEL_MESSAGE_KINDS.includes(event.kind),
+  );
+  const decorations = await loadProjectionAuxClosure(
+    (filters) => session.relay.query(filters),
+    channelId,
+    messageEvents.map((event) => event.id),
+  );
   const events = mergeEvents(indexEvents, messageWindow.events, decorations);
   const combined = mergeEvents(events, threadEvents);
   const profileEvents = await session.relay.query([
@@ -482,10 +432,18 @@ async function loadChannelHistoryPageFresh(
   if (!channels.some((channel) => channel.id === channelId)) {
     throw new UnknownChannelError(`Channel ${channelId} is not available`);
   }
-  const [messageWindow, decorations] = await Promise.all([
-    scanChannelMessageWindow(session, channelId, cursor),
-    session.relay.query([channelDecorationFilter(channelId)]),
-  ]);
+  const messageWindow = await scanChannelMessageWindow(
+    session,
+    channelId,
+    cursor,
+  );
+  const decorations = await loadProjectionAuxClosure(
+    (filters) => session.relay.query(filters),
+    channelId,
+    messageWindow.events
+      .filter((event) => CHANNEL_MESSAGE_KINDS.includes(event.kind))
+      .map((event) => event.id),
+  );
   const events = mergeEvents(messageWindow.events, decorations);
   const profileEvents = await session.relay.query([
     profileFilter(events, session.pubkey),

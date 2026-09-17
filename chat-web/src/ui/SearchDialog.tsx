@@ -133,7 +133,7 @@ export function SearchDialog({
     }
     const controller = new AbortController();
     const timeout = window.setTimeout(async () => {
-      if (!cached) setLoading(true);
+      setLoading(true);
       setError(null);
       try {
         const response = await fetch(
@@ -225,7 +225,11 @@ export function SearchDialog({
             value={query}
           />
           {loading ? (
-            <LoaderCircle aria-label="Searching" className="spin" size={18} />
+            <LoaderCircle
+              aria-label={results.length > 0 ? "Updating search" : "Searching"}
+              className="spin"
+              size={18}
+            />
           ) : null}
         </div>
         <div aria-live="polite" className="search-results">
