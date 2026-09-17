@@ -1,9 +1,7 @@
 import type { RelayFilter } from "@/server/relay";
 import type { NostrEvent } from "@/server/types";
 
-export const CHANNEL_PROJECTION_KINDS = [
-  5, 7, 9, 9005, 39005, 40002, 40003, 40008, 45001, 45003,
-] as const;
+export const CHANNEL_MESSAGE_KINDS = [9, 40002, 40008, 45001, 45003] as const;
 
 const AUXILIARY_KINDS = [5, 7, 9005, 40003];
 const AUXILIARY_DELETION_KINDS = [5, 9005];
@@ -75,8 +73,9 @@ export async function loadProjectionAuxClosure(
 
 /**
  * Build the complete event set used by the all-channel Threads projection.
- * Reaction events are part of the same awaited history scan as messages, so a
- * cache seed can never publish message rows first and fill reactions later.
+ * Page only durable message rows, then await their exact auxiliary closure.
+ * This keeps the cache seed atomic without making the cursor walk unrelated
+ * reaction history for the channel.
  */
 export async function loadCompleteChannelProjection(
   query: RelayQuery,
@@ -88,7 +87,7 @@ export async function loadCompleteChannelProjection(
   let beforeId: string | undefined;
   for (;;) {
     const filter: RelayFilter = {
-      kinds: [...CHANNEL_PROJECTION_KINDS],
+      kinds: [...CHANNEL_MESSAGE_KINDS],
       "#h": [channelId],
       limit: pageLimit,
     };
@@ -110,5 +109,11 @@ export async function loadCompleteChannelProjection(
     until = tail.created_at;
     beforeId = tail.id;
   }
-  return [...events.values()];
+  const messages = [...events.values()];
+  const auxiliary = await loadProjectionAuxClosure(
+    query,
+    channelId,
+    messages.map((event) => event.id),
+  );
+  return mergeEvents(messages, auxiliary);
 }

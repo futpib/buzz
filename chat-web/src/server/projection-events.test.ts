@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  CHANNEL_PROJECTION_KINDS,
+  CHANNEL_MESSAGE_KINDS,
   loadCompleteChannelProjection,
   loadProjectionAuxClosure,
   type RelayQuery,
@@ -41,29 +41,36 @@ test("complete thread-index history bakes reactions into its first projection", 
     ],
     19,
   );
-  const pages = [[root, reaction], []];
+  const pages = [[root], []];
   const filters: Record<string, unknown>[] = [];
   const query: RelayQuery = async ([filter]) => {
     filters.push(filter);
+    const kinds = filter.kinds as number[];
+    if (kinds.includes(7)) return [reaction];
+    if (filter["#e"]) return [];
     return pages.shift() ?? [];
   };
 
-  const events = await loadCompleteChannelProjection(query, channelId, 2);
+  const events = await loadCompleteChannelProjection(query, channelId, 1);
   const rows = projectTimeline(events, channelId, new Map(), root.pubkey);
 
   assert.deepEqual(rows[0].reactions, [
     { emoji: "🔥", count: 1, reactedByMe: true },
   ]);
-  assert(CHANNEL_PROJECTION_KINDS.includes(7));
-  assert(CHANNEL_PROJECTION_KINDS.includes(5));
-  assert(CHANNEL_PROJECTION_KINDS.includes(9005));
-  assert.equal(filters.length, 2);
+  assert.equal(new Set<number>(CHANNEL_MESSAGE_KINDS).has(7), false);
+  assert.equal(filters.length, 4);
   assert.deepEqual(filters[1], {
-    kinds: [...CHANNEL_PROJECTION_KINDS],
+    kinds: [...CHANNEL_MESSAGE_KINDS],
     "#h": [channelId],
-    limit: 2,
-    until: reaction.created_at,
-    before_id: reaction.id,
+    limit: 1,
+    until: root.created_at,
+    before_id: root.id,
+  });
+  assert.deepEqual(filters[2], {
+    kinds: [5, 7, 9005, 40003],
+    "#h": [channelId],
+    "#e": [root.id],
+    limit: 5_000,
   });
 });
 
