@@ -13,7 +13,7 @@ import {
   projectTimeline,
 } from "@/server/projector";
 import {
-  loadCompleteChannelProjectionBase,
+  loadCompleteChannelHistory,
   loadProjectionAuxClosure,
 } from "@/server/projection-events";
 import type { RelayFilter } from "@/server/relay";
@@ -218,11 +218,30 @@ async function loadThreadsWorkspaceFresh(
   const index = await loadWorkspaceIndexFresh(session);
   workspaceIndexCache.set(session.cacheScope, index);
   const { channels } = index;
-  const baseEventGroups = await Promise.all(
-    channels.map((channel) =>
-      loadCompleteChannelProjectionBase(
-        (filters) => session.relay.query(filters),
-        channel.id,
+  const [historyGroups, deletions] = await Promise.all([
+    Promise.all(
+      channels.map((channel) =>
+        loadCompleteChannelHistory(
+          (filters) => session.relay.query(filters),
+          channel.id,
+        ),
+      ),
+    ),
+    channels.length > 0
+      ? session.relay.query([
+          {
+            kinds: [5, 9005],
+            "#h": channels.map((channel) => channel.id),
+            limit: 500,
+          },
+        ])
+      : Promise.resolve([]),
+  ]);
+  const baseEventGroups = channels.map((channel, index) =>
+    mergeEvents(
+      historyGroups[index] ?? [],
+      deletions.filter((event) =>
+        event.tags.some((tag) => tag[0] === "h" && tag[1] === channel.id),
       ),
     ),
   );

@@ -1,8 +1,8 @@
 import type { RelayFilter } from "@/server/relay";
 import type { NostrEvent } from "@/server/types";
 
-export const CHANNEL_PROJECTION_BASE_KINDS = [
-  5, 9, 9005, 40002, 40003, 40008, 45001, 45003,
+export const CHANNEL_HISTORY_KINDS = [
+  9, 39005, 40002, 40003, 40008, 45001, 45003,
 ] as const;
 
 const AUXILIARY_KINDS = [5, 7, 9005, 40003];
@@ -74,12 +74,12 @@ export async function loadProjectionAuxClosure(
 }
 
 /**
- * Build the complete non-reaction event set used by the all-channel Threads
- * projection. Reactions are fetched later for only the rows that will seed a
- * visible workspace cache; walking all channel reaction history made cold
- * Threads loads scale with invisible activity.
+ * Build the complete message history used by the all-channel Threads
+ * projection. Reactions and deletions are fetched separately: walking those
+ * high-volume event kinds with the message cursor made cold Threads loads
+ * scale with invisible auxiliary history.
  */
-export async function loadCompleteChannelProjectionBase(
+export async function loadCompleteChannelHistory(
   query: RelayQuery,
   channelId: string,
   pageLimit = 500,
@@ -89,7 +89,7 @@ export async function loadCompleteChannelProjectionBase(
   let beforeId: string | undefined;
   for (;;) {
     const filter: RelayFilter = {
-      kinds: [...CHANNEL_PROJECTION_BASE_KINDS],
+      kinds: [...CHANNEL_HISTORY_KINDS],
       "#h": [channelId],
       limit: pageLimit,
     };
