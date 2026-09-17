@@ -15,6 +15,7 @@ import {
 import {
   loadCompleteChannelHistory,
   loadProjectionAuxClosure,
+  loadProjectionAuxClosureForChannels,
 } from "@/server/projection-events";
 import type { RelayFilter } from "@/server/relay";
 import type {
@@ -283,17 +284,20 @@ async function loadThreadsWorkspaceFresh(
     if (thread.root) targets.add(thread.root.id);
     for (const reply of thread.replies) targets.add(reply.id);
   }
-  const auxiliaryGroups = await Promise.all(
-    channels.map((channel) =>
-      loadProjectionAuxClosure(
-        (filters) => session.relay.query(filters),
-        channel.id,
-        [...(targetIdsByChannel.get(channel.id) ?? [])],
-      ),
-    ),
+  const auxiliary = await loadProjectionAuxClosureForChannels(
+    (filters) => session.relay.query(filters),
+    channels.map((channel) => channel.id),
+    [...targetIdsByChannel.values()].flatMap((targets) => [...targets]),
   );
   const eventGroups = baseEventGroups.map((group, index) =>
-    mergeEvents(group, auxiliaryGroups[index] ?? []),
+    mergeEvents(
+      group,
+      auxiliary.filter((event) =>
+        event.tags.some(
+          (tag) => tag[0] === "h" && tag[1] === channels[index]?.id,
+        ),
+      ),
+    ),
   );
   const events = mergeEvents(...eventGroups);
   const profileEvents = await session.relay.query([

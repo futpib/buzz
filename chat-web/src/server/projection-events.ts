@@ -7,7 +7,7 @@ export const CHANNEL_HISTORY_KINDS = [
 
 const AUXILIARY_KINDS = [5, 7, 9005, 40003];
 const AUXILIARY_DELETION_KINDS = [5, 9005];
-const AUXILIARY_TARGET_CHUNK = 100;
+const AUXILIARY_TARGET_CHUNK = 1_000;
 const AUXILIARY_QUERY_LIMIT = 5_000;
 
 export type RelayQuery = (filters: RelayFilter[]) => Promise<NostrEvent[]>;
@@ -26,7 +26,7 @@ function chunks<T>(values: T[], size: number): T[][] {
 
 async function queryByTarget(
   query: RelayQuery,
-  channelId: string,
+  channelIds: string[],
   targetIds: string[],
   kinds: number[],
 ): Promise<NostrEvent[]> {
@@ -38,7 +38,7 @@ async function queryByTarget(
       await query([
         {
           kinds,
-          "#h": [channelId],
+          "#h": channelIds,
           "#e": targetGroup,
           limit: AUXILIARY_QUERY_LIMIT,
         },
@@ -58,15 +58,23 @@ export async function loadProjectionAuxClosure(
   channelId: string,
   messageIds: string[],
 ): Promise<NostrEvent[]> {
+  return loadProjectionAuxClosureForChannels(query, [channelId], messageIds);
+}
+
+export async function loadProjectionAuxClosureForChannels(
+  query: RelayQuery,
+  channelIds: string[],
+  messageIds: string[],
+): Promise<NostrEvent[]> {
   const firstHop = await queryByTarget(
     query,
-    channelId,
+    channelIds,
     messageIds,
     AUXILIARY_KINDS,
   );
   const secondHop = await queryByTarget(
     query,
-    channelId,
+    channelIds,
     firstHop.map((event) => event.id),
     AUXILIARY_DELETION_KINDS,
   );
