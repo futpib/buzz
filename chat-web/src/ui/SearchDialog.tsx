@@ -1,8 +1,14 @@
 "use client";
 
-import { LoaderCircle, Search, X } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { History, LoaderCircle, Search, Trash2, X } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
+import {
+  clearRecentSearches,
+  loadRecentSearches,
+  rememberRecentSearch,
+  removeRecentSearch,
+} from "@/client/search-history";
 import type { SearchResultView, SearchView } from "@/server/types";
 import { Avatar } from "@/ui/Avatar";
 import { ViewLink } from "@/ui/ViewLink";
@@ -25,14 +31,25 @@ function ResultTime({ timestamp }: { timestamp: number }) {
   );
 }
 
-function Result({ result }: { result: SearchResultView }) {
+function Result({
+  onOpen,
+  result,
+}: {
+  onOpen: () => void;
+  result: SearchResultView;
+}) {
   const href = `/channels/${result.channelId}?${new URLSearchParams({
     thread: result.threadId,
     message: result.id,
   })}`;
   return (
     <li>
-      <ViewLink className="search-result" href={href} scroll={false}>
+      <ViewLink
+        className="search-result"
+        href={href}
+        onClick={onOpen}
+        scroll={false}
+      >
         <Avatar profile={result.author} small />
         <span className="search-result-body">
           <span className="search-result-meta">
@@ -60,20 +77,45 @@ export function SearchDialog({
   const [searched, setSearched] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [recentSearches, setRecentSearches] = useState<string[]>([]);
   const input = useRef<HTMLInputElement>(null);
+  const lastSuccessfulQuery = useRef("");
+
+  useEffect(() => {
+    setRecentSearches(loadRecentSearches(viewerPubkey));
+  }, [viewerPubkey]);
+
+  const remember = useCallback(
+    (value: string) => {
+      setRecentSearches(rememberRecentSearch(viewerPubkey, value));
+    },
+    [viewerPubkey],
+  );
+
+  const closeWithHistory = useCallback(() => {
+    const normalized = query.trim();
+    if (
+      normalized &&
+      normalized.toLowerCase() === lastSuccessfulQuery.current.toLowerCase()
+    ) {
+      remember(normalized);
+    }
+    close();
+  }, [close, query, remember]);
 
   useEffect(() => {
     input.current?.focus();
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") close();
+      if (event.key === "Escape") closeWithHistory();
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [close]);
+  }, [closeWithHistory]);
 
   useEffect(() => {
     const normalized = query.trim();
     if (!normalized) {
+      lastSuccessfulQuery.current = "";
       setResults([]);
       setSearched(false);
       setLoading(false);
@@ -83,6 +125,7 @@ export function SearchDialog({
     const cacheKey = `${viewerPubkey}\u0000${normalized.toLowerCase()}`;
     const cached = searchViewCache.get(cacheKey);
     if (cached) {
+      lastSuccessfulQuery.current = normalized;
       setResults(cached.results);
       setSearched(true);
       setLoading(false);
@@ -105,6 +148,7 @@ export function SearchDialog({
         }
         const body = (await response.json()) as SearchView & { error?: string };
         if (!response.ok) throw new Error(body.error || "Search failed");
+        lastSuccessfulQuery.current = normalized;
         searchViewCache.set(cacheKey, body);
         setResults(body.results);
         setSearched(true);
@@ -139,7 +183,7 @@ export function SearchDialog({
       <button
         aria-label="Close search"
         className="search-backdrop"
-        onClick={close}
+        onClick={closeWithHistory}
         type="button"
       />
       <section
@@ -154,7 +198,11 @@ export function SearchDialog({
             <Search aria-hidden="true" size={19} />
             <h2 id="search-title">Search messages</h2>
           </div>
-          <button aria-label="Close search" onClick={close} type="button">
+          <button
+            aria-label="Close search"
+            onClick={closeWithHistory}
+            type="button"
+          >
             <X aria-hidden="true" size={19} />
           </button>
         </header>
@@ -165,6 +213,11 @@ export function SearchDialog({
             autoComplete="off"
             maxLength={256}
             onChange={(event) => setQuery(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && !event.nativeEvent.isComposing) {
+                remember(query);
+              }
+            }}
             placeholder="Search across your channels"
             ref={input}
             spellCheck={false}
@@ -177,7 +230,58 @@ export function SearchDialog({
         </div>
         <div aria-live="polite" className="search-results">
           {!query.trim() ? (
-            <p>Find messages in every channel you can access.</p>
+            recentSearches.length > 0 ? (
+              <section
+                aria-labelledby="recent-searches-title"
+                className="recent-searches"
+              >
+                <header>
+                  <h3 id="recent-searches-title">Recent searches</h3>
+                  <button
+                    onClick={() => {
+                      setRecentSearches(clearRecentSearches(viewerPubkey));
+                      input.current?.focus();
+                    }}
+                    type="button"
+                  >
+                    Clear all
+                  </button>
+                </header>
+                <ul>
+                  {recentSearches.map((recent) => (
+                    <li key={recent.toLowerCase()}>
+                      <button
+                        className="recent-search-query"
+                        onClick={() => {
+                          remember(recent);
+                          setQuery(recent);
+                          input.current?.focus();
+                        }}
+                        type="button"
+                      >
+                        <History aria-hidden="true" size={16} />
+                        <span>{recent}</span>
+                      </button>
+                      <button
+                        aria-label={`Remove “${recent}” from recent searches`}
+                        className="recent-search-remove"
+                        onClick={() => {
+                          setRecentSearches(
+                            removeRecentSearch(viewerPubkey, recent),
+                          );
+                          input.current?.focus();
+                        }}
+                        type="button"
+                      >
+                        <Trash2 aria-hidden="true" size={15} />
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              </section>
+            ) : (
+              <p>Find messages in every channel you can access.</p>
+            )
           ) : null}
           {error ? <p className="search-error">{error}</p> : null}
           {!loading && searched && !error && results.length === 0 ? (
@@ -190,7 +294,11 @@ export function SearchDialog({
               </p>
               <ul>
                 {results.map((result) => (
-                  <Result key={result.id} result={result} />
+                  <Result
+                    key={result.id}
+                    onOpen={() => remember(query)}
+                    result={result}
+                  />
                 ))}
               </ul>
             </>

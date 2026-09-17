@@ -34,10 +34,15 @@ the browser. A pass is not complete until it covers the checks below.
   thread summaries, nested branches, search results, and thread close. Large
   result sets may warm on pointer/focus/touch intent; the bounded sidebar set
   must be eagerly prefetched.
+- Open a rendered message link with trusted input and require a new tab with
+  an isolated opener while the Buzz application remains on its current route.
 - Exercise channel navigation, opening and closing a real thread, search,
   mobile drawer navigation, sending, a direct reply, a reply to that reply,
   and deletion propagation. Inspect the signed nested reply for distinct
   NIP-10 `root` and `reply` markers.
+- Commit a search, reload the application, and require it to appear in the
+  signed-in identity's recent-search list. Exercise one-click rerun, per-entry
+  removal, and clear-all; verify another identity cannot read that history.
 - On a channel with more than one timeline page, scroll to the top with trusted
   input, require older top-level messages to be prepended, and verify the
   reader's scroll anchor is preserved. Require a visible load-more fallback; a

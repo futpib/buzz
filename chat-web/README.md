@@ -22,6 +22,9 @@ the relay live stream and the Threads index refreshes in the background.
 Channel timelines scan the relay with a composite cursor until they contain a
 real page of top-level roots; reaching the top loads the next page without
 dropping the reader's scroll position.
+Successful and explicitly submitted searches are kept as a bounded,
+browser-only recent-search list scoped to the signed-in public key. The empty
+search dialog can rerun, remove, or clear those entries.
 
 ## Run
 
