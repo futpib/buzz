@@ -40,10 +40,6 @@ function threadIds(event: NostrEvent): {
   return legacy ? { rootId: legacy, parentId: legacy } : null;
 }
 
-function threadRootId(event: NostrEvent): string | null {
-  return threadIds(event)?.rootId ?? null;
-}
-
 function isNewer(candidate: NostrEvent, current: NostrEvent): boolean {
   return (
     candidate.created_at > current.created_at ||
@@ -360,6 +356,21 @@ export function projectTimeline(
   profiles: Map<string, ProfileView>,
   viewerPubkey: string,
 ): MessageView[] {
+  return projectMessages(events, channelId, profiles, viewerPubkey).filter(
+    (message) => message.threadRootId === null,
+  );
+}
+
+/**
+ * Project every visible message in one channel, including replies, after
+ * folding its edit, deletion, summary, and reaction closure.
+ */
+export function projectMessages(
+  events: NostrEvent[],
+  channelId: string,
+  profiles: Map<string, ProfileView>,
+  viewerPubkey: string,
+): MessageView[] {
   const deleted = deletedIds(events);
   const edits = latestEdits(events, deleted);
   const summaries = projectSummaries(events);
@@ -369,7 +380,6 @@ export function projectTimeline(
       (event) =>
         MESSAGE_KINDS.has(event.kind) &&
         tagValue(event, "h") === channelId &&
-        threadRootId(event) === null &&
         !deleted.has(event.id),
     )
     .map((event) =>

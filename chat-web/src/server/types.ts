@@ -104,6 +104,21 @@ export type InboxWorkspaceView = {
   cacheState: ViewCacheState;
 };
 
+export type SentItemView = {
+  id: string;
+  channel: ChannelView;
+  threadId: string;
+  message: MessageView;
+};
+
+export type SentWorkspaceView = {
+  identity: ProfileView;
+  channels: ChannelView[];
+  items: SentItemView[];
+  generatedAt: number;
+  cacheState: ViewCacheState;
+};
+
 export type WorkspaceView = {
   identity: ProfileView;
   channels: ChannelView[];

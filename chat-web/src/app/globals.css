@@ -1054,6 +1054,21 @@ a {
   opacity: 0.9;
 }
 
+.sent-reactions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.sent-reactions > span {
+  padding: 1px 5px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--soft);
+}
+
 .thread-index-replies {
   color: var(--accent);
   font-size: 10px;

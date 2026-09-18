@@ -3,6 +3,7 @@ import { markWorkspaceViewsStale } from "@/server/data";
 import { markInboxViewsStale } from "@/server/inbox";
 import { publishMessage } from "@/server/messages";
 import { markSearchViewsStale } from "@/server/search";
+import { markSentViewsStale } from "@/server/sent";
 import type { NostrEvent } from "@/server/types";
 
 export const dynamic = "force-dynamic";
@@ -22,6 +23,7 @@ export async function POST(request: Request): Promise<Response> {
     markWorkspaceViewsStale(session, channelId);
     markInboxViewsStale(session);
     markSearchViewsStale(session);
+    markSentViewsStale(session);
     return Response.json({ id });
   } catch (error) {
     return Response.json(

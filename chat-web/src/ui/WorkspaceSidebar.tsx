@@ -8,6 +8,7 @@ import {
   LockKeyhole,
   LogOut,
   MessageSquareText,
+  Send,
   X,
 } from "lucide-react";
 import { useMemo, useState } from "react";
@@ -24,7 +25,7 @@ export function WorkspaceSidebar({
   identity,
   selectedId,
 }: {
-  activePage: "channel" | "inbox" | "threads";
+  activePage: "channel" | "inbox" | "sent" | "threads";
   channels: ChannelView[];
   close: () => void;
   identity: ProfileView;
@@ -89,6 +90,14 @@ export function WorkspaceSidebar({
           prefetchMode="eager"
         >
           <Inbox aria-hidden="true" size={18} /> Inbox
+        </ViewLink>
+        <ViewLink
+          className={activePage === "sent" ? "primary-nav-active" : undefined}
+          href="/sent"
+          onClick={close}
+          prefetchMode="eager"
+        >
+          <Send aria-hidden="true" size={18} /> Sent
         </ViewLink>
         <ViewLink
           className={
