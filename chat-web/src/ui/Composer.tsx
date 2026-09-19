@@ -80,6 +80,7 @@ export function Composer({
   const textarea = useRef<HTMLTextAreaElement>(null);
   const fileInput = useRef<HTMLInputElement>(null);
   const lastTypingSentAt = useRef(0);
+  const attachmentSequence = useRef(0);
   const uploadTail = useRef(Promise.resolve());
   const uploadControllers = useRef(new Map<string, AbortController>());
 
@@ -163,7 +164,7 @@ export function Composer({
       MAX_ATTACHMENTS_PER_MESSAGE - attachments.length,
     );
     const selected = [...files].slice(0, available).map((file, index) => ({
-      id: `${Date.now()}-${index}-${crypto.randomUUID()}`,
+      id: `${Date.now()}-${index}-${attachmentSequence.current++}`,
       file,
       filename: sanitizeAttachmentFilename(file.name),
       status: "preparing" as const,
