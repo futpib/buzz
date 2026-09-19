@@ -8,6 +8,7 @@ import {
   loadPersistentCredential,
   makeAuthEvent,
   makeMediaGetAuthEvent,
+  makeMediaUploadAuthEvent,
   makeMessageEvent,
   makeTypingEvent,
   storeCredential,
@@ -58,6 +59,26 @@ test("nested browser replies carry canonical root and parent markers", () => {
   ]);
 });
 
+test("browser messages carry attachment metadata inside the signature", () => {
+  const imeta = [
+    "imeta",
+    `url https://relay.example/media/${"a".repeat(64)}.pdf`,
+    "m application/pdf",
+    `x ${"a".repeat(64)}`,
+    "size 1234",
+    "filename report.pdf",
+  ];
+  const message = makeMessageEvent(credential, {
+    channelId: "90db6dbb-a9f1-4c04-a4bb-eb5d2beec82b",
+    content: "[report.pdf](https://relay.example/media/file.pdf)",
+    imetaTags: [imeta],
+  });
+
+  assert.equal(verifyEvent(message), true);
+  assert.deepEqual(message.tags.at(-2), imeta);
+  assert.deepEqual(message.tags.at(-1), credential.authTag);
+});
+
 test("browser typing indicators use the channel and thread scope", () => {
   const rootId = "a".repeat(64);
   const threadHeadId = "b".repeat(64);
@@ -99,6 +120,27 @@ test("browser media auth is public, scoped, fresh, and key-free", () => {
     Buffer.from(authorization.slice(6), "base64url").toString("utf8"),
   );
   assert.equal(decoded.id, event.id);
+});
+
+test("browser upload auth is public and bound to hash and relay", () => {
+  const createdAt = 1_700_000_000;
+  const hash = "a".repeat(64);
+  const event = makeMediaUploadAuthEvent(
+    credential,
+    "Relay.Example:443",
+    hash,
+    "application/pdf",
+    createdAt,
+  );
+
+  assert.equal(verifyEvent(event), true);
+  assert.deepEqual(event.tags, [
+    ["t", "upload"],
+    ["x", hash],
+    ["expiration", String(createdAt + 600)],
+    ["server", "relay.example:443"],
+  ]);
+  assert.equal(JSON.stringify(event).includes(credential.nsec), false);
 });
 
 class MemoryStorage implements Storage {

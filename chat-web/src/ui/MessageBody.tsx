@@ -1,11 +1,14 @@
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 
+import { AuthenticatedAttachmentLink } from "@/ui/AuthenticatedAttachmentLink";
 import { AuthenticatedImage } from "@/ui/AuthenticatedImage";
 
 const markdownComponents: Components = {
-  a: ({ node: _node, ...props }) => (
-    <a {...props} rel="noopener noreferrer" target="_blank" />
+  a: ({ node: _node, children, href, title }) => (
+    <AuthenticatedAttachmentLink href={href} title={title}>
+      {children}
+    </AuthenticatedAttachmentLink>
   ),
   img: ({ alt = "", src, title }) =>
     typeof src === "string" ? (

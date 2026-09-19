@@ -71,6 +71,7 @@ export function makeMessageEvent(
     rootId?: string | null;
     parentId?: string | null;
     forum?: boolean;
+    imetaTags?: string[][];
   },
 ): NostrEvent {
   const tags = [["h", input.channelId]];
@@ -81,6 +82,10 @@ export function makeMessageEvent(
     } else {
       tags.push(["e", input.rootId, "", "reply"]);
     }
+  }
+  for (const tag of input.imetaTags ?? []) {
+    if (tag[0] !== "imeta") throw new Error("Attachment metadata is invalid");
+    tags.push([...tag]);
   }
   if (credential.authTag) tags.push([...credential.authTag]);
   const kind = input.rootId
@@ -147,6 +152,37 @@ export function makeMediaGetAuthEvent(
         ["server", authority],
       ],
       content: "Get buzz-media",
+    },
+    secretKey(credential.nsec),
+  ) as NostrEvent;
+}
+
+export function makeMediaUploadAuthEvent(
+  credential: BrowserCredential,
+  server: string,
+  hash: string,
+  mime: string,
+  createdAt = Math.floor(Date.now() / 1000),
+): NostrEvent {
+  const authority = server.trim().toLowerCase();
+  if (!authority || /[/@]/.test(authority)) {
+    throw new Error("Media server is invalid");
+  }
+  if (!/^[0-9a-f]{64}$/.test(hash)) {
+    throw new Error("Attachment hash is invalid");
+  }
+  const lifetime = mime.toLowerCase() === "video/mp4" ? 3_600 : 600;
+  return finalizeEvent(
+    {
+      kind: 24_242,
+      created_at: createdAt,
+      tags: [
+        ["t", "upload"],
+        ["x", hash],
+        ["expiration", String(createdAt + lifetime)],
+        ["server", authority],
+      ],
+      content: "Upload file",
     },
     secretKey(credential.nsec),
   ) as NostrEvent;
