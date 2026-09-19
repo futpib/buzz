@@ -52,6 +52,12 @@ the browser. A pass is not complete until it covers the checks below.
   fields, a failed publish can retry without re-uploading the blob, and the
   rendered protected attachment opens exact bytes in an opener-isolated tab
   without replacing Buzz. Delete the temporary attachment message afterward.
+- Select a JPEG carrying EXIF/comment metadata and require the browser to bake
+  its visible orientation into metadata-free bytes before hashing and upload;
+  the original private bytes must never reach `/api/upload`. Exercise PNG,
+  GIF, and WebP structural metadata removal too, preserving animation and the
+  single allowlisted Buzz snapshot payload while rejecting animated color or
+  orientation metadata that cannot be removed without changing appearance.
 - Exercise channel navigation, opening and closing a real thread, search,
   mobile drawer navigation, sending, a direct reply, a reply to that reply,
   and deletion propagation. Inspect the signed nested reply for distinct

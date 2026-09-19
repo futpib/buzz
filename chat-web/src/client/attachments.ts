@@ -8,6 +8,7 @@ import {
   makeMediaUploadAuthEvent,
   type BrowserCredential,
 } from "@/client/identity";
+import { sanitizeImageAttachment } from "@/client/image-sanitizer";
 import {
   attachmentSizeLimit,
   type BlobDescriptor,
@@ -83,8 +84,15 @@ export async function uploadAttachment(
     );
   }
   onPhase("preparing", 0);
-  const hash = await hashAttachment(file, signal, (progress) =>
-    onPhase("preparing", progress),
+  const preparedFile = await sanitizeImageAttachment(file, signal);
+  onPhase("preparing", 0.25);
+  if (preparedFile.size > limit) {
+    throw new Error(
+      `Prepared file is larger than ${Math.floor(limit / (1024 * 1024))} MB`,
+    );
+  }
+  const hash = await hashAttachment(preparedFile, signal, (progress) =>
+    onPhase("preparing", 0.25 + progress * 0.75),
   );
   const server = await uploadServer();
   const authorization = encodeNostrAuthorization(
@@ -138,10 +146,10 @@ export async function uploadAttachment(
       }
     };
     onPhase("uploading", 0);
-    request.send(file);
+    request.send(preparedFile);
   });
 
-  if (descriptor.sha256 !== hash || descriptor.size !== file.size) {
+  if (descriptor.sha256 !== hash || descriptor.size !== preparedFile.size) {
     throw new Error("Upload response does not match the selected file");
   }
   return descriptor;

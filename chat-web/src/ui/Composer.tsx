@@ -322,7 +322,9 @@ export function Composer({
                     : attachment.status === "uploading"
                       ? `Uploading ${Math.round(attachment.progress * 100)}%`
                       : attachment.status === "ready"
-                        ? formatAttachmentBytes(attachment.file.size)
+                        ? formatAttachmentBytes(
+                            attachment.descriptor?.size ?? attachment.file.size,
+                          )
                         : attachment.error || "Upload failed"}
                 </span>
                 {attachment.status === "preparing" ||
