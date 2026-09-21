@@ -127,7 +127,12 @@ test("applies server-side edits, deletions, reactions, and thread summaries", ()
     ["Bob"],
   );
   assert.deepEqual(rows[0].reactions, [
-    { emoji: "🔥", count: 1, reactedByMe: true },
+    {
+      emoji: "🔥",
+      count: 1,
+      reactedByMe: true,
+      ownEventId: reaction.id,
+    },
   ]);
 });
 

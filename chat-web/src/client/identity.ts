@@ -106,6 +106,85 @@ export function makeMessageEvent(
   ) as NostrEvent;
 }
 
+function actionTags(
+  credential: BrowserCredential,
+  tags: string[][],
+): string[][] {
+  const result = tags.map((tag) => [...tag]);
+  if (credential.authTag) result.push([...credential.authTag]);
+  return result;
+}
+
+/** Kind 7 — a NIP-25 reaction to one delivered message. */
+export function makeReactionEvent(
+  credential: BrowserCredential,
+  targetId: string,
+  emoji: string,
+  createdAt = Math.floor(Date.now() / 1_000),
+): NostrEvent {
+  const value = emoji.trim();
+  if (!/^[0-9a-f]{64}$/i.test(targetId)) {
+    throw new Error("Reaction target is invalid");
+  }
+  if (!value || [...value].length > 64) {
+    throw new Error("Reaction emoji is invalid");
+  }
+  return finalizeEvent(
+    {
+      kind: 7,
+      created_at: createdAt,
+      tags: actionTags(credential, [["e", targetId]]),
+      content: value,
+    },
+    secretKey(credential.nsec),
+  ) as NostrEvent;
+}
+
+/** Kind 40003 — replace a message's visible text. */
+export function makeMessageEditEvent(
+  credential: BrowserCredential,
+  input: { channelId: string; targetId: string; content: string },
+  createdAt = Math.floor(Date.now() / 1_000),
+): NostrEvent {
+  const content = input.content.trim();
+  if (!content) throw new Error("Edited message cannot be empty");
+  return finalizeEvent(
+    {
+      kind: 40_003,
+      created_at: createdAt,
+      tags: actionTags(credential, [
+        ["h", input.channelId],
+        ["e", input.targetId],
+      ]),
+      content,
+    },
+    secretKey(credential.nsec),
+  ) as NostrEvent;
+}
+
+/** Kind 5 — remove a message, or remove one of the viewer's reactions. */
+export function makeDeletionEvent(
+  credential: BrowserCredential,
+  input: { targetId: string; channelId?: string | null },
+  createdAt = Math.floor(Date.now() / 1_000),
+): NostrEvent {
+  const tags = input.channelId
+    ? [
+        ["h", input.channelId],
+        ["e", input.targetId],
+      ]
+    : [["e", input.targetId]];
+  return finalizeEvent(
+    {
+      kind: 5,
+      created_at: createdAt,
+      tags: actionTags(credential, tags),
+      content: "",
+    },
+    secretKey(credential.nsec),
+  ) as NostrEvent;
+}
+
 export function makeTypingEvent(
   credential: BrowserCredential,
   input: {

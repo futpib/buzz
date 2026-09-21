@@ -292,15 +292,16 @@ function projectReactions(
   deleted: Set<string>,
   viewerPubkey: string,
 ): Map<string, ReactionView[]> {
-  const targets = new Map<string, Map<string, Set<string>>>();
+  const targets = new Map<string, Map<string, Map<string, string>>>();
   for (const event of events) {
     if (event.kind !== 7 || deleted.has(event.id)) continue;
     const target = tagValues(event, "e").at(-1);
     const emoji = event.content.trim();
     if (!target || !emoji) continue;
-    const byEmoji = targets.get(target) ?? new Map<string, Set<string>>();
-    const authors = byEmoji.get(emoji) ?? new Set<string>();
-    authors.add(event.pubkey);
+    const byEmoji =
+      targets.get(target) ?? new Map<string, Map<string, string>>();
+    const authors = byEmoji.get(emoji) ?? new Map<string, string>();
+    authors.set(event.pubkey, event.id);
     byEmoji.set(emoji, authors);
     targets.set(target, byEmoji);
   }
@@ -313,6 +314,9 @@ function projectReactions(
           emoji,
           count: authors.size,
           reactedByMe: authors.has(viewerPubkey),
+          ...(authors.get(viewerPubkey)
+            ? { ownEventId: authors.get(viewerPubkey) }
+            : {}),
         }))
         .sort((a, b) => b.count - a.count || a.emoji.localeCompare(b.emoji)),
     ]),

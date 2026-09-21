@@ -58,7 +58,12 @@ test("complete thread-index history bakes reactions into its first projection", 
   const rows = projectTimeline(events, channelId, new Map(), root.pubkey);
 
   assert.deepEqual(rows[0].reactions, [
-    { emoji: "🔥", count: 1, reactedByMe: true },
+    {
+      emoji: "🔥",
+      count: 1,
+      reactedByMe: true,
+      ownEventId: reaction.id,
+    },
   ]);
   assert.equal(new Set<number>(CHANNEL_HISTORY_KINDS).has(7), false);
   assert.equal(filters.length, 4);
@@ -187,7 +192,12 @@ test("channel scan decorates candidate roots without targeting crossed replies",
 
   assert.equal(window.hasMore, true);
   assert.deepEqual(rows[0].reactions, [
-    { emoji: "🔥", count: 1, reactedByMe: true },
+    {
+      emoji: "🔥",
+      count: 1,
+      reactedByMe: true,
+      ownEventId: reaction.id,
+    },
   ]);
   assert.deepEqual(filters[1]["#e"], [root.id]);
   assert.equal((filters[1]["#e"] as string[]).includes(reply.id), false);

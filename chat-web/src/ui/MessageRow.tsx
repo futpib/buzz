@@ -1,9 +1,24 @@
-import { MessageCircle } from "lucide-react";
+"use client";
 
+import { MessageCircle, MoreHorizontal } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+
+import {
+  isMessageForcedUnread,
+  isThreadFollowed,
+  setMessageForcedUnread,
+  setThreadFollowed,
+} from "@/client/message-context-state";
 import type { MessageView } from "@/server/types";
 import { Avatar } from "@/ui/Avatar";
 import { MessageBody } from "@/ui/MessageBody";
+import { MessageContextMenu } from "@/ui/MessageContextMenu";
 import { ViewLink } from "@/ui/ViewLink";
+
+const LONG_PRESS_MS = 500;
+const LONG_PRESS_MOVE_PX = 12;
+
+type MenuState = { x: number; y: number };
 
 function MessageTime({ timestamp }: { timestamp: number }) {
   const date = new Date(timestamp * 1000);
@@ -20,21 +35,109 @@ export function MessageRow({
   compact = false,
   hideThreadLink = false,
   onReply,
+  onContextReply = onReply,
   replyingTo,
   highlighted = false,
+  expectedPubkey,
+  onMessageChange,
 }: {
   message: MessageView;
   channelId: string;
   compact?: boolean;
   hideThreadLink?: boolean;
   onReply?: () => void;
+  onContextReply?: () => void;
   replyingTo?: string | null;
   highlighted?: boolean;
+  expectedPubkey: string;
+  onMessageChange: (message: MessageView | null) => void;
 }) {
+  const [menu, setMenu] = useState<MenuState | null>(null);
+  const [isUnread, setIsUnread] = useState(false);
+  const [isFollowing, setIsFollowing] = useState(false);
+  const longPress = useRef<{
+    pointerId: number;
+    x: number;
+    y: number;
+    timer: number;
+  } | null>(null);
+  const suppressClick = useRef(false);
+  const threadFollowId = message.threadRootId ?? message.id;
+
+  useEffect(() => {
+    setIsUnread(isMessageForcedUnread(expectedPubkey, message.id));
+    setIsFollowing(isThreadFollowed(expectedPubkey, threadFollowId));
+  }, [expectedPubkey, message.id, threadFollowId]);
+
+  const cancelLongPress = () => {
+    if (longPress.current) window.clearTimeout(longPress.current.timer);
+    longPress.current = null;
+  };
+  const openMenu = (x: number, y: number) => {
+    cancelLongPress();
+    setMenu({ x, y });
+  };
+  const closeMenu = () => {
+    setMenu(null);
+  };
+
   return (
     <article
-      className={`${compact ? "message-row message-row-compact" : "message-row"}${highlighted ? " message-row-highlighted" : ""}`}
+      aria-label={`Message from ${message.author.name}`}
+      className={`${compact ? "message-row message-row-compact" : "message-row"}${highlighted ? " message-row-highlighted" : ""}${isUnread ? " message-row-unread" : ""}`}
       data-message-id={message.id}
+      onClickCapture={(event) => {
+        if (!suppressClick.current) return;
+        suppressClick.current = false;
+        event.preventDefault();
+        event.stopPropagation();
+      }}
+      onContextMenu={(event) => {
+        event.preventDefault();
+        openMenu(event.clientX, event.clientY);
+      }}
+      onKeyDown={(event) => {
+        if (
+          event.key !== "ContextMenu" &&
+          !(event.key === "F10" && event.shiftKey)
+        ) {
+          return;
+        }
+        event.preventDefault();
+        const rect = event.currentTarget.getBoundingClientRect();
+        openMenu(rect.right, rect.top + Math.min(rect.height / 2, 36));
+      }}
+      onPointerCancel={cancelLongPress}
+      onPointerDownCapture={(event) => {
+        if (
+          (event.pointerType !== "touch" && event.pointerType !== "pen") ||
+          !event.isPrimary
+        ) {
+          return;
+        }
+        cancelLongPress();
+        const pointerId = event.pointerId;
+        const x = event.clientX;
+        const y = event.clientY;
+        const timer = window.setTimeout(() => {
+          if (longPress.current?.pointerId !== pointerId) return;
+          suppressClick.current = true;
+          navigator.vibrate?.(12);
+          openMenu(x, y);
+        }, LONG_PRESS_MS);
+        longPress.current = { pointerId, x, y, timer };
+      }}
+      onPointerMoveCapture={(event) => {
+        const press = longPress.current;
+        if (!press || press.pointerId !== event.pointerId) return;
+        if (
+          Math.hypot(event.clientX - press.x, event.clientY - press.y) >
+          LONG_PRESS_MOVE_PX
+        ) {
+          cancelLongPress();
+        }
+      }}
+      onPointerUpCapture={cancelLongPress}
     >
       <Avatar profile={message.author} small={compact} />
       <div className="message-content">
@@ -44,6 +147,17 @@ export function MessageRow({
           <MessageTime timestamp={message.createdAt} />
           {message.editedAt ? <span>edited</span> : null}
         </div>
+        <button
+          aria-label={`Actions for message from ${message.author.name}`}
+          className="message-menu-trigger"
+          onClick={(event) => {
+            const rect = event.currentTarget.getBoundingClientRect();
+            openMenu(rect.right, rect.bottom);
+          }}
+          type="button"
+        >
+          <MoreHorizontal aria-hidden="true" size={17} />
+        </button>
         {replyingTo ? (
           <p className="message-reply-context">Replying to {replyingTo}</p>
         ) : null}
@@ -106,6 +220,29 @@ export function MessageRow({
           </button>
         ) : null}
       </div>
+      {menu ? (
+        <MessageContextMenu
+          channelId={channelId}
+          close={closeMenu}
+          expectedPubkey={expectedPubkey}
+          isFollowing={isFollowing}
+          isUnread={isUnread}
+          message={message}
+          onChange={onMessageChange}
+          onFollowChange={(following) => {
+            setIsFollowing(
+              setThreadFollowed(expectedPubkey, threadFollowId, following),
+            );
+          }}
+          onReply={onContextReply}
+          onUnreadChange={(unread) => {
+            setIsUnread(
+              setMessageForcedUnread(expectedPubkey, message.id, unread),
+            );
+          }}
+          point={menu}
+        />
+      ) : null}
     </article>
   );
 }

@@ -31,6 +31,7 @@ export type ReactionView = {
   emoji: string;
   count: number;
   reactedByMe: boolean;
+  ownEventId?: string;
 };
 
 export type MessageView = {

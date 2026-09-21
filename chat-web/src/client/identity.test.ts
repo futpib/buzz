@@ -9,7 +9,10 @@ import {
   makeAuthEvent,
   makeMediaGetAuthEvent,
   makeMediaUploadAuthEvent,
+  makeDeletionEvent,
+  makeMessageEditEvent,
   makeMessageEvent,
+  makeReactionEvent,
   makeTypingEvent,
   storeCredential,
 } from "./identity";
@@ -57,6 +60,44 @@ test("nested browser replies carry canonical root and parent markers", () => {
     ["e", rootId, "", "root"],
     ["e", parentId, "", "reply"],
   ]);
+});
+
+test("browser message actions match Android's signed relay shapes", () => {
+  const createdAt = 1_700_000_000;
+  const channelId = "90db6dbb-a9f1-4c04-a4bb-eb5d2beec82b";
+  const targetId = "a".repeat(64);
+  const reaction = makeReactionEvent(credential, targetId, "🔥", createdAt);
+  const edit = makeMessageEditEvent(
+    credential,
+    { channelId, targetId, content: "edited" },
+    createdAt,
+  );
+  const deletion = makeDeletionEvent(
+    credential,
+    { channelId, targetId },
+    createdAt,
+  );
+  const reactionDeletion = makeDeletionEvent(
+    credential,
+    { targetId: reaction.id },
+    createdAt,
+  );
+
+  for (const event of [reaction, edit, deletion, reactionDeletion]) {
+    assert.equal(verifyEvent(event), true);
+    assert.equal(JSON.stringify(event).includes(credential.nsec), false);
+    assert.deepEqual(event.tags.at(-1), credential.authTag);
+  }
+  assert.deepEqual(reaction.tags.slice(0, -1), [["e", targetId]]);
+  assert.deepEqual(edit.tags.slice(0, -1), [
+    ["h", channelId],
+    ["e", targetId],
+  ]);
+  assert.deepEqual(deletion.tags.slice(0, -1), [
+    ["h", channelId],
+    ["e", targetId],
+  ]);
+  assert.deepEqual(reactionDeletion.tags.slice(0, -1), [["e", reaction.id]]);
 });
 
 test("browser messages carry attachment metadata inside the signature", () => {

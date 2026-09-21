@@ -18,6 +18,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { useRouter } from "next/navigation";
 
 import {
   clearCompletedTyping,
@@ -49,6 +50,7 @@ export function WorkspaceShell({
   initial: WorkspaceView;
   targetMessageId?: string | null;
 }) {
+  const router = useRouter();
   const [timeline, setTimeline] = useState(initial.timeline);
   const [thread, setThread] = useState(initial.thread);
   const [liveState, setLiveState] = useState<LiveState>("connecting");
@@ -212,6 +214,38 @@ export function WorkspaceShell({
       thread: thread ? forScope(thread.rootId) : [],
     };
   }, [initial.identity, renderedTimeline, thread, typingEntries]);
+
+  const updateMessage = useCallback(
+    (id: string, next: (typeof timeline)[number] | null) => {
+      const updateList = (messages: typeof timeline) =>
+        next
+          ? messages.map((message) => (message.id === id ? next : message))
+          : messages.filter((message) => message.id !== id);
+      setTimeline(updateList);
+      setOlderTimeline(updateList);
+      setThread((current) => {
+        if (!current) return current;
+        return {
+          ...current,
+          root: current.root?.id === id ? next : current.root,
+          replies: updateList(current.replies),
+        };
+      });
+    },
+    [],
+  );
+
+  const openMessageThread = useCallback(
+    (messageId: string) => {
+      router.push(
+        `/channels/${initial.selectedChannel.id}?${new URLSearchParams({
+          thread: messageId,
+        })}`,
+        { scroll: false },
+      );
+    },
+    [initial.selectedChannel.id, router],
+  );
 
   const loadOlder = useCallback(async () => {
     const cursor = timelineCursor;
@@ -441,8 +475,11 @@ export function WorkspaceShell({
             renderedTimeline.map((message) => (
               <MessageRow
                 channelId={initial.selectedChannel.id}
+                expectedPubkey={initial.identity.pubkey}
                 key={message.id}
                 message={message}
+                onContextReply={() => openMessageThread(message.id)}
+                onMessageChange={(next) => updateMessage(message.id, next)}
               />
             ))
           )}
@@ -490,9 +527,13 @@ export function WorkspaceShell({
               {thread.root ? (
                 <MessageRow
                   channelId={initial.selectedChannel.id}
+                  expectedPubkey={initial.identity.pubkey}
                   hideThreadLink
                   highlighted={thread.root.id === targetMessageId}
                   message={thread.root}
+                  onMessageChange={(next) =>
+                    updateMessage(thread.root?.id ?? thread.rootId, next)
+                  }
                   onReply={() =>
                     setReplyTarget({
                       id: thread.root?.id ?? thread.rootId,
@@ -516,9 +557,11 @@ export function WorkspaceShell({
                 <MessageRow
                   channelId={initial.selectedChannel.id}
                   compact
+                  expectedPubkey={initial.identity.pubkey}
                   highlighted={message.id === targetMessageId}
                   key={message.id}
                   message={message}
+                  onMessageChange={(next) => updateMessage(message.id, next)}
                   onReply={() =>
                     setReplyTarget({
                       id: message.id,
