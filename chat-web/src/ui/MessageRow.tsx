@@ -9,7 +9,7 @@ import {
   setMessageForcedUnread,
   setThreadFollowed,
 } from "@/client/message-context-state";
-import type { MessageView } from "@/server/types";
+import type { ChannelView, MessageView } from "@/server/types";
 import { Avatar } from "@/ui/Avatar";
 import { MessageBody } from "@/ui/MessageBody";
 import { MessageContextMenu } from "@/ui/MessageContextMenu";
@@ -40,6 +40,7 @@ export function MessageRow({
   highlighted = false,
   expectedPubkey,
   onMessageChange,
+  channels,
 }: {
   message: MessageView;
   channelId: string;
@@ -51,6 +52,7 @@ export function MessageRow({
   highlighted?: boolean;
   expectedPubkey: string;
   onMessageChange: (message: MessageView | null) => void;
+  channels: ChannelView[];
 }) {
   const [menu, setMenu] = useState<MenuState | null>(null);
   const [isUnread, setIsUnread] = useState(false);
@@ -161,7 +163,7 @@ export function MessageRow({
         {replyingTo ? (
           <p className="message-reply-context">Replying to {replyingTo}</p>
         ) : null}
-        <MessageBody content={message.content} />
+        <MessageBody channels={channels} content={message.content} />
         {message.reactions.length > 0 ? (
           <ul className="reaction-list" aria-label="Reactions">
             {message.reactions.map((reaction) => (

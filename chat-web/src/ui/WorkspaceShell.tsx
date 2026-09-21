@@ -475,6 +475,7 @@ export function WorkspaceShell({
             renderedTimeline.map((message) => (
               <MessageRow
                 channelId={initial.selectedChannel.id}
+                channels={initial.channels}
                 expectedPubkey={initial.identity.pubkey}
                 key={message.id}
                 message={message}
@@ -527,6 +528,7 @@ export function WorkspaceShell({
               {thread.root ? (
                 <MessageRow
                   channelId={initial.selectedChannel.id}
+                  channels={initial.channels}
                   expectedPubkey={initial.identity.pubkey}
                   hideThreadLink
                   highlighted={thread.root.id === targetMessageId}
@@ -556,6 +558,7 @@ export function WorkspaceShell({
               {thread.replies.map((message) => (
                 <MessageRow
                   channelId={initial.selectedChannel.id}
+                  channels={initial.channels}
                   compact
                   expectedPubkey={initial.identity.pubkey}
                   highlighted={message.id === targetMessageId}
