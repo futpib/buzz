@@ -12,6 +12,7 @@
     "check": "biome check . && pnpm typecheck && pnpm test"
   },
   "dependencies": {
+    "@emoji-mart/data": "^1.2.1",
     "@noble/curves": "^2.0.1",
     "@noble/hashes": "^2.0.1",
     "lucide-react": "^1.0.0",

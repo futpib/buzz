@@ -62,6 +62,10 @@ the browser. A pass is not complete until it covers the checks below.
   mobile drawer navigation, sending, a direct reply, a reply to that reply,
   and deletion propagation. Inspect the signed nested reply for distinct
   NIP-10 `root` and `reply` markers.
+- Open a message's expanded reaction picker, search by shortcode, name, and
+  keyword, and submit both a search result and a directly typed or pasted emoji
+  with trusted input. Require the exact browser-signed reaction content and
+  delete each temporary reaction afterward.
 - Commit a search, reload the application, and require it to appear in the
   signed-in identity's recent-search list. Exercise one-click rerun, per-entry
   removal, and clear-all; verify another identity cannot read that history.

@@ -25,30 +25,9 @@ import {
   makeReactionEvent,
 } from "@/client/identity";
 import type { MessageView, NostrEvent, ReactionView } from "@/server/types";
+import { EmojiReactionPicker } from "@/ui/EmojiReactionPicker";
 
 const QUICK_REACTIONS = ["👍", "❤️", "😂", "🎉", "🔥"] as const;
-const MORE_REACTIONS = [
-  "😀",
-  "😅",
-  "🥹",
-  "😍",
-  "🤔",
-  "😮",
-  "😢",
-  "😡",
-  "👏",
-  "🙌",
-  "🤝",
-  "🙏",
-  "💪",
-  "👀",
-  "💯",
-  "✅",
-  "🚀",
-  "💡",
-  "🎯",
-  "❤️‍🔥",
-] as const;
 
 type MenuPoint = { x: number; y: number };
 type MenuMode = "actions" | "edit" | "delete";
@@ -177,6 +156,7 @@ export function MessageContextMenu({
   const [pending, setPending] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const dialog = useRef<HTMLDivElement>(null);
+  const expandedEmojiRef = useRef(false);
   const returnFocus = useRef<HTMLElement | null>(null);
 
   useEffect(() => {
@@ -189,7 +169,10 @@ export function MessageContextMenu({
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         event.preventDefault();
-        if (mode === "actions") close();
+        if (mode === "actions" && expandedEmojiRef.current) {
+          expandedEmojiRef.current = false;
+          setExpandedEmoji(false);
+        } else if (mode === "actions") close();
         else {
           setMode("actions");
           setError(null);
@@ -199,7 +182,7 @@ export function MessageContextMenu({
       if (event.key !== "Tab" || !node) return;
       const focusable = [
         ...node.querySelectorAll<HTMLElement>(
-          "button:not([disabled]), textarea:not([disabled])",
+          "button:not([disabled]), input:not([disabled]), textarea:not([disabled])",
         ),
       ];
       if (focusable.length === 0) return;
@@ -328,32 +311,27 @@ export function MessageContextMenu({
                 </button>
               ))}
               <button
+                aria-controls="message-reaction-picker"
                 aria-expanded={expandedEmoji}
                 aria-label="More reactions"
                 disabled={Boolean(pending)}
-                onClick={() => setExpandedEmoji((value) => !value)}
+                onClick={() => {
+                  const next = !expandedEmojiRef.current;
+                  expandedEmojiRef.current = next;
+                  setExpandedEmoji(next);
+                }}
                 type="button"
               >
                 <Plus aria-hidden="true" size={20} />
               </button>
             </fieldset>
             {expandedEmoji ? (
-              <fieldset
-                aria-label="More reactions"
-                className="message-menu-emoji-grid"
-              >
-                {MORE_REACTIONS.map((emoji) => (
-                  <button
-                    aria-label={`React with ${emoji}`}
-                    disabled={Boolean(pending)}
-                    key={emoji}
-                    onClick={() => void toggleReaction(emoji)}
-                    type="button"
-                  >
-                    {emoji}
-                  </button>
-                ))}
-              </fieldset>
+              <div id="message-reaction-picker">
+                <EmojiReactionPicker
+                  disabled={Boolean(pending)}
+                  onSelect={(emoji) => void toggleReaction(emoji)}
+                />
+              </div>
             ) : null}
             <div className="message-menu-actions" role="menu">
               {onReply ? (
