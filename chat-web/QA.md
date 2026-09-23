@@ -95,6 +95,9 @@ the browser. A pass is not complete until it covers the checks below.
 ## Rendering
 
 - Check desktop and phone viewports in light and dark system schemes.
+- With a thread open on desktop, resize its panel with both pointer drag and
+  keyboard arrows. Require bounded channel/thread widths, persistence across a
+  reload, and no resize handle on the full-screen phone thread.
 - Require zero horizontal overflow, page exceptions, console errors, failed
   requests, and HTTP errors.
 - Capture painted framebuffer evidence for real avatars and protected message

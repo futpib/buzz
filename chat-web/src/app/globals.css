@@ -74,8 +74,11 @@ a {
   background: var(--bg);
 }
 
-.workspace-thread-open {
-  grid-template-columns: 244px minmax(430px, 1fr) minmax(340px, 410px);
+.workspace.workspace-thread-open {
+  grid-template-columns: 244px minmax(430px, 1fr) var(
+      --thread-panel-width,
+      410px
+    );
 }
 
 .sidebar {
@@ -1392,12 +1395,47 @@ a {
 }
 
 .thread-panel {
+  position: relative;
   display: grid;
   min-width: 0;
   min-height: 0;
   grid-template-rows: auto minmax(0, 1fr) auto;
   border-left: 1px solid var(--line);
   background: var(--panel);
+}
+
+.thread-panel-resize-handle {
+  position: absolute;
+  z-index: 8;
+  top: 0;
+  bottom: 0;
+  left: -6px;
+  width: 11px;
+  height: auto;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  outline: none;
+  background: transparent;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.thread-panel-resize-handle::after {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 5px;
+  width: 2px;
+  background: transparent;
+  content: "";
+  transition: background 120ms ease;
+}
+
+.thread-panel-resize-handle:hover::after,
+.thread-panel-resize-handle:focus-visible::after,
+.workspace-thread-resizing .thread-panel-resize-handle::after {
+  background: var(--accent);
 }
 
 .workspace-threads {
@@ -2536,8 +2574,8 @@ a {
 }
 
 @media (max-width: 1050px) {
-  .workspace-thread-open {
-    grid-template-columns: 220px minmax(360px, 1fr) 350px;
+  .workspace.workspace-thread-open {
+    grid-template-columns: 220px minmax(0, 1fr) var(--thread-panel-width, 350px);
   }
 
   .workspace,
@@ -2588,7 +2626,7 @@ a {
   }
 
   .workspace,
-  .workspace-thread-open {
+  .workspace.workspace-thread-open {
     min-width: 0;
     grid-template-columns: minmax(0, 1fr);
   }
@@ -2696,6 +2734,10 @@ a {
     inset: 0;
     padding-top: env(safe-area-inset-top);
     box-shadow: -12px 0 40px var(--shadow);
+  }
+
+  .thread-panel-resize-handle {
+    display: none;
   }
 
   .search-layer {
@@ -2807,4 +2849,10 @@ a {
     animation-duration: 0.01ms;
     animation-iteration-count: 1;
   }
+}
+
+.workspace.workspace-thread-resizing,
+.workspace.workspace-thread-resizing * {
+  cursor: col-resize;
+  user-select: none;
 }

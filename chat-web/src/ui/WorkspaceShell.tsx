@@ -11,6 +11,8 @@ import {
   X,
 } from "lucide-react";
 import {
+  type CSSProperties,
+  type PointerEvent as ReactPointerEvent,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -26,6 +28,13 @@ import {
   pruneTypingEntries,
   registerTypingEntry,
 } from "@/client/typing-state";
+import {
+  clampThreadPanelWidth,
+  defaultThreadPanelWidth,
+  readThreadPanelWidth,
+  threadPanelWidthBounds,
+  writeThreadPanelWidth,
+} from "@/client/thread-panel-size";
 import type {
   ChannelHistoryPage,
   ChannelSnapshot,
@@ -42,6 +51,7 @@ import { ViewLink } from "@/ui/ViewLink";
 
 type LiveState = "connecting" | "live" | "reconnecting";
 type ReplyTarget = { id: string; name: string };
+type WorkspaceStyle = CSSProperties & { "--thread-panel-width": string };
 
 export function WorkspaceShell({
   initial,
@@ -57,6 +67,11 @@ export function WorkspaceShell({
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [replyTarget, setReplyTarget] = useState<ReplyTarget | null>(null);
+  const [preferredThreadPanelWidth, setPreferredThreadPanelWidth] = useState<
+    number | null
+  >(null);
+  const [viewportWidth, setViewportWidth] = useState<number | null>(null);
+  const [threadPanelResizing, setThreadPanelResizing] = useState(false);
   const [olderTimeline, setOlderTimeline] = useState(
     initial.timeline.slice(0, 0),
   );
@@ -82,8 +97,30 @@ export function WorkspaceShell({
   const threadScroller = useRef<HTMLDivElement>(null);
   const threadContent = useRef<HTMLDivElement>(null);
   const threadPinnedToBottom = useRef(true);
+  const threadPanelWidthRef = useRef<number | null>(null);
+  const threadResize = useRef<{
+    pointerId: number;
+    startWidth: number;
+    startX: number;
+  } | null>(null);
   const rootId = initial.thread?.rootId ?? null;
   const openThreadId = thread?.rootId ?? null;
+
+  useLayoutEffect(() => {
+    const width = window.innerWidth;
+    const preferred =
+      readThreadPanelWidth(window.localStorage) ??
+      defaultThreadPanelWidth(width);
+    threadPanelWidthRef.current = clampThreadPanelWidth(preferred, width);
+    setPreferredThreadPanelWidth(preferred);
+    setViewportWidth(width);
+  }, []);
+
+  useEffect(() => {
+    const updateViewportWidth = () => setViewportWidth(window.innerWidth);
+    window.addEventListener("resize", updateViewportWidth);
+    return () => window.removeEventListener("resize", updateViewportWidth);
+  }, []);
 
   useEffect(() => {
     setTimeline(initial.timeline);
@@ -359,11 +396,49 @@ export function WorkspaceShell({
       : liveState === "connecting"
         ? "Connecting"
         : "Reconnecting";
+  const threadPanelWidth =
+    viewportWidth === null
+      ? null
+      : clampThreadPanelWidth(
+          preferredThreadPanelWidth ?? defaultThreadPanelWidth(viewportWidth),
+          viewportWidth,
+        );
+  const threadPanelBounds =
+    viewportWidth === null ? null : threadPanelWidthBounds(viewportWidth);
+  const workspaceStyle =
+    threadPanelWidth === null
+      ? undefined
+      : ({
+          "--thread-panel-width": `${threadPanelWidth}px`,
+        } as WorkspaceStyle);
+
+  const updateThreadPanelWidth = (width: number): number => {
+    const next = clampThreadPanelWidth(width, window.innerWidth);
+    threadPanelWidthRef.current = next;
+    setPreferredThreadPanelWidth(next);
+    return next;
+  };
+
+  const finishThreadPanelResize = useCallback(
+    (event: ReactPointerEvent<HTMLHRElement>) => {
+      const resize = threadResize.current;
+      if (!resize || resize.pointerId !== event.pointerId) return;
+      threadResize.current = null;
+      if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+        event.currentTarget.releasePointerCapture(event.pointerId);
+      }
+      setThreadPanelResizing(false);
+      const width = threadPanelWidthRef.current;
+      if (width !== null) writeThreadPanelWidth(window.localStorage, width);
+    },
+    [],
+  );
 
   return (
     <main
-      className={`${thread ? "workspace workspace-thread-open" : "workspace"}${mobileNavOpen ? " mobile-nav-open" : ""}`}
+      className={`${thread ? "workspace workspace-thread-open" : "workspace"}${mobileNavOpen ? " mobile-nav-open" : ""}${threadPanelResizing ? " workspace-thread-resizing" : ""}`}
       data-cache-state={initial.cacheState}
+      style={workspaceStyle}
     >
       <button
         aria-label="Dismiss channel navigation"
@@ -497,6 +572,71 @@ export function WorkspaceShell({
 
       {thread ? (
         <aside className="thread-panel">
+          <hr
+            aria-label="Resize thread panel"
+            aria-orientation="vertical"
+            aria-valuemax={threadPanelBounds?.max}
+            aria-valuemin={threadPanelBounds?.min}
+            aria-valuenow={threadPanelWidth ?? undefined}
+            aria-valuetext={
+              threadPanelWidth === null
+                ? undefined
+                : `${threadPanelWidth} pixels wide`
+            }
+            className="thread-panel-resize-handle"
+            onKeyDown={(event) => {
+              if (threadPanelWidth === null || threadPanelBounds === null) {
+                return;
+              }
+              let next: number;
+              switch (event.key) {
+                case "ArrowLeft":
+                  next = threadPanelWidth + (event.shiftKey ? 50 : 16);
+                  break;
+                case "ArrowRight":
+                  next = threadPanelWidth - (event.shiftKey ? 50 : 16);
+                  break;
+                case "Home":
+                  next = threadPanelBounds.min;
+                  break;
+                case "End":
+                  next = threadPanelBounds.max;
+                  break;
+                default:
+                  return;
+              }
+              event.preventDefault();
+              writeThreadPanelWidth(
+                window.localStorage,
+                updateThreadPanelWidth(next),
+              );
+            }}
+            onLostPointerCapture={finishThreadPanelResize}
+            onPointerCancel={finishThreadPanelResize}
+            onPointerDown={(event) => {
+              if (event.button !== 0 || threadPanelWidth === null) return;
+              event.preventDefault();
+              threadPanelWidthRef.current = threadPanelWidth;
+              threadResize.current = {
+                pointerId: event.pointerId,
+                startWidth: threadPanelWidth,
+                startX: event.clientX,
+              };
+              event.currentTarget.setPointerCapture(event.pointerId);
+              setThreadPanelResizing(true);
+            }}
+            onPointerMove={(event) => {
+              const resize = threadResize.current;
+              if (!resize || resize.pointerId !== event.pointerId) return;
+              event.preventDefault();
+              updateThreadPanelWidth(
+                resize.startWidth + resize.startX - event.clientX,
+              );
+            }}
+            onPointerUp={finishThreadPanelResize}
+            tabIndex={0}
+            title="Drag to resize the thread panel"
+          />
           <header className="thread-header">
             <div>
               <h2>Thread</h2>
