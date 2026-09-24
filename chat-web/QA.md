@@ -66,6 +66,10 @@ the browser. A pass is not complete until it covers the checks below.
   keyword, and submit both a search result and a directly typed or pasted emoji
   with trusted input. Require the exact browser-signed reaction content and
   delete each temporary reaction afterward.
+- With a media-bearing thread scrolled to the bottom and emoji search focused,
+  deliver a live snapshot. Require the painted media node and thread scroll
+  geometry to remain stable, and require the picker to retain its DOM node,
+  value, and focus so a phone keyboard is not dismissed.
 - Commit a search, reload the application, and require it to appear in the
   signed-in identity's recent-search list. Exercise one-click rerun, per-entry
   removal, and clear-all; verify another identity cannot read that history.

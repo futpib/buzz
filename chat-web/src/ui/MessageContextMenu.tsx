@@ -158,9 +158,19 @@ export function MessageContextMenu({
   const dialog = useRef<HTMLDivElement>(null);
   const expandedEmojiRef = useRef(false);
   const returnFocus = useRef<HTMLElement | null>(null);
+  const closeRef = useRef(close);
+  closeRef.current = close;
 
   useEffect(() => {
     returnFocus.current = document.activeElement as HTMLElement | null;
+    return () => {
+      if (returnFocus.current?.isConnected) {
+        returnFocus.current.focus({ preventScroll: true });
+      }
+    };
+  }, []);
+
+  useEffect(() => {
     const node = dialog.current;
     const first = node?.querySelector<HTMLElement>(
       mode === "edit" ? "textarea:not([disabled])" : "button:not([disabled])",
@@ -172,7 +182,7 @@ export function MessageContextMenu({
         if (mode === "actions" && expandedEmojiRef.current) {
           expandedEmojiRef.current = false;
           setExpandedEmoji(false);
-        } else if (mode === "actions") close();
+        } else if (mode === "actions") closeRef.current();
         else {
           setMode("actions");
           setError(null);
@@ -200,11 +210,8 @@ export function MessageContextMenu({
     window.addEventListener("keydown", onKeyDown);
     return () => {
       window.removeEventListener("keydown", onKeyDown);
-      if (returnFocus.current?.isConnected) {
-        returnFocus.current.focus({ preventScroll: true });
-      }
     };
-  }, [close, mode]);
+  }, [mode]);
 
   const run = async (name: string, action: () => Promise<void>) => {
     if (pending) return;

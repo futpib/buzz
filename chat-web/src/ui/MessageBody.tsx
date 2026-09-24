@@ -1,4 +1,4 @@
-import { Children, type ReactNode } from "react";
+import { Children, memo, type ReactNode } from "react";
 import ReactMarkdown, {
   type Components,
   defaultUrlTransform,
@@ -21,7 +21,7 @@ function childText(children: ReactNode): string {
     .join("");
 }
 
-export function MessageBody({
+export const MessageBody = memo(function MessageBody({
   channels = [],
   content,
 }: {
@@ -70,4 +70,4 @@ export function MessageBody({
       </ReactMarkdown>
     </div>
   );
-}
+});

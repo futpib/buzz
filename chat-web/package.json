@@ -26,9 +26,11 @@
     "server-only": "^0.0.1"
   },
   "devDependencies": {
+    "@types/jsdom": "^27.0.0",
     "@types/node": "^24.10.0",
     "@types/react": "^19.1.8",
     "@types/react-dom": "^19.1.6",
+    "jsdom": "^27.4.0",
     "tsx": "^4.20.6",
     "typescript": "~6.0.0"
   }
