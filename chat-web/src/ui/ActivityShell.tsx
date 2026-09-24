@@ -3,9 +3,12 @@
 import { Bell, Bot, Menu } from "lucide-react";
 import { useEffect, useState } from "react";
 
-import type { ActivityItemView, ActivityWorkspaceView } from "@/server/types";
-import { Avatar } from "@/ui/Avatar";
-import { ViewLink } from "@/ui/ViewLink";
+import type {
+  ActivityItemView,
+  ActivityWorkspaceView,
+  ChannelView,
+} from "@/server/types";
+import { MessageSurfaceCard } from "@/ui/MessageSurfaceCard";
 import { ViewRefreshIndicator } from "@/ui/ViewRefreshIndicator";
 import { WorkspaceSidebar } from "@/ui/WorkspaceSidebar";
 
@@ -45,59 +48,46 @@ function kindLabel(item: ActivityItemView): string {
   }
 }
 
-function ActivityRow({
+export function ActivityRow({
+  channels,
   generatedAt,
   item,
 }: {
+  channels: ChannelView[];
   generatedAt: number;
   item: ActivityItemView;
 }) {
-  const content = (
-    <>
-      <Avatar profile={item.author} />
-      <span className="thread-index-content">
-        <span className="thread-index-meta">
-          <strong>{item.author.name}</strong>
-          {item.isOwn ? <span>you</span> : null}
-          <span>{kindLabel(item)}</span>
-          {item.channel ? <span>#{item.channel.name}</span> : null}
-          <time dateTime={new Date(item.createdAt * 1_000).toISOString()}>
-            {relativeTime(item.createdAt, generatedAt)}
-          </time>
-        </span>
-        <span className="inbox-preview">{item.content || "Attachment"}</span>
-        {item.itemCount > 1 ? (
-          <span className="thread-index-replies">
-            {item.itemCount} updates in this conversation
-          </span>
-        ) : null}
-      </span>
-    </>
-  );
-
-  if (!item.channel || !item.threadId) {
-    return (
-      <article
-        className="thread-index-row inbox-row-static"
-        data-activity-id={item.id}
-      >
-        {content}
-      </article>
-    );
-  }
-
+  const href =
+    item.channel && item.threadId
+      ? `/channels/${item.channel.id}?${new URLSearchParams({
+          thread: item.threadId,
+          message: item.id,
+        })}`
+      : null;
   return (
-    <ViewLink
-      className="thread-index-row"
-      data-activity-id={item.id}
-      href={`/channels/${item.channel.id}?${new URLSearchParams({
-        thread: item.threadId,
-        message: item.id,
-      })}`}
-      scroll={false}
-    >
-      {content}
-    </ViewLink>
+    <MessageSurfaceCard
+      articleProps={{
+        className: href ? undefined : "inbox-row-static",
+        "data-activity-id": item.id,
+      }}
+      author={item.author}
+      channels={channels}
+      content={item.content}
+      createdAt={item.createdAt}
+      footer={
+        item.itemCount > 1
+          ? `${item.itemCount} updates in this conversation`
+          : null
+      }
+      href={href}
+      isOwn={item.isOwn}
+      labels={[
+        kindLabel(item),
+        item.channel ? `#${item.channel.name}` : null,
+      ].filter((label): label is string => Boolean(label))}
+      openLabel="Open activity"
+      timeLabel={relativeTime(item.createdAt, generatedAt)}
+    />
   );
 }
 
@@ -214,6 +204,7 @@ export function ActivityShell({ initial }: { initial: ActivityWorkspaceView }) {
           ) : (
             view.items.map((item) => (
               <ActivityRow
+                channels={view.channels}
                 generatedAt={view.generatedAt}
                 item={item}
                 key={`${item.channel?.id ?? "global"}:${item.conversationId}`}

@@ -4,12 +4,12 @@ import { Inbox, Menu } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import type {
+  ChannelView,
   InboxCategory,
   InboxItemView,
   InboxWorkspaceView,
 } from "@/server/types";
-import { Avatar } from "@/ui/Avatar";
-import { ViewLink } from "@/ui/ViewLink";
+import { MessageSurfaceCard } from "@/ui/MessageSurfaceCard";
 import { ViewRefreshIndicator } from "@/ui/ViewRefreshIndicator";
 import { WorkspaceSidebar } from "@/ui/WorkspaceSidebar";
 
@@ -40,56 +40,43 @@ function categoryLabel(categories: InboxCategory[]): string {
   return "Thread";
 }
 
-function InboxRow({
+export function InboxRow({
+  channels,
   item,
   generatedAt,
 }: {
+  channels: ChannelView[];
   item: InboxItemView;
   generatedAt: number;
 }) {
-  const content = (
-    <>
-      <Avatar profile={item.author} />
-      <span className="thread-index-content">
-        <span className="thread-index-meta">
-          <strong>{item.author.name}</strong>
-          <span>{categoryLabel(item.categories)}</span>
-          {item.channel ? <span>#{item.channel.name}</span> : null}
-          <time dateTime={new Date(item.createdAt * 1_000).toISOString()}>
-            {relativeTime(item.createdAt, generatedAt)}
-          </time>
-        </span>
-        <span className="inbox-preview">{item.content || "Attachment"}</span>
-        <span className="thread-index-replies">
-          {item.itemCount === 1
-            ? "1 update"
-            : `${item.itemCount} grouped updates`}
-        </span>
-      </span>
-    </>
-  );
-  if (!item.channel || !item.threadId) {
-    return (
-      <article
-        className="thread-index-row inbox-row-static"
-        data-inbox-id={item.id}
-      >
-        {content}
-      </article>
-    );
-  }
+  const href =
+    item.channel && item.threadId
+      ? `/channels/${item.channel.id}?${new URLSearchParams({
+          thread: item.threadId,
+          message: item.id,
+        })}`
+      : null;
   return (
-    <ViewLink
-      className="thread-index-row"
-      data-inbox-id={item.id}
-      href={`/channels/${item.channel.id}?${new URLSearchParams({
-        thread: item.threadId,
-        message: item.id,
-      })}`}
-      scroll={false}
-    >
-      {content}
-    </ViewLink>
+    <MessageSurfaceCard
+      articleProps={{
+        className: href ? undefined : "inbox-row-static",
+        "data-inbox-id": item.id,
+      }}
+      author={item.author}
+      channels={channels}
+      content={item.content}
+      createdAt={item.createdAt}
+      footer={
+        item.itemCount === 1 ? "1 update" : `${item.itemCount} grouped updates`
+      }
+      href={href}
+      labels={[
+        categoryLabel(item.categories),
+        item.channel ? `#${item.channel.name}` : null,
+      ].filter((label): label is string => Boolean(label))}
+      openLabel="Open conversation"
+      timeLabel={relativeTime(item.createdAt, generatedAt)}
+    />
   );
 }
 
@@ -189,6 +176,7 @@ export function InboxShell({ initial }: { initial: InboxWorkspaceView }) {
           ) : (
             view.items.map((item) => (
               <InboxRow
+                channels={view.channels}
                 generatedAt={view.generatedAt}
                 item={item}
                 key={item.conversationId}

@@ -1707,27 +1707,48 @@ a {
   padding: 10px 0 24px;
 }
 
-.thread-index-row {
-  display: grid;
-  grid-template-columns: 38px minmax(0, 1fr);
-  gap: 11px;
-  padding: 11px 28px;
-  color: inherit;
+.message-surface-row {
+  padding-block: 11px;
+}
+
+.message-surface-row .message-meta time {
+  margin-left: auto;
+  white-space: nowrap;
+}
+
+.message-surface-footer {
+  display: flex;
+  min-height: 24px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 5px;
+}
+
+.message-surface-detail {
+  color: var(--accent);
+  font-size: 10px;
+  font-weight: 680;
+}
+
+.message-surface-open {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 3px;
+  padding: 3px 5px;
+  border-radius: 6px;
+  color: var(--link);
+  font-size: 10px;
+  font-weight: 680;
   text-decoration: none;
 }
 
-.thread-index-row:hover {
-  background: var(--hover);
-}
-
-.thread-index-content {
-  position: relative;
-  min-width: 0;
-}
-
-.thread-index-unread {
-  box-shadow: inset 3px 0 var(--accent);
-  background: color-mix(in srgb, var(--accent-soft) 30%, transparent);
+.message-surface-open:hover,
+.message-surface-open:focus-visible {
+  outline: none;
+  background: var(--accent-soft);
+  text-decoration: underline;
 }
 
 .thread-unread-badge {
@@ -1751,79 +1772,8 @@ a {
   background: var(--accent);
 }
 
-.thread-index-meta {
-  display: flex;
-  min-width: 0;
-  align-items: baseline;
-  gap: 7px;
-}
-
-.thread-index-meta strong {
-  overflow: hidden;
-  max-width: 45%;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.thread-index-meta span,
-.thread-index-meta time {
-  color: var(--muted);
-  font-size: 10px;
-}
-
-.thread-index-meta time {
-  margin-left: auto;
-}
-
-.thread-index-content > p {
-  display: -webkit-box;
-  margin: 3px 0 5px;
-  overflow: hidden;
-  color: var(--message-ink);
-  font-size: 13px;
-  line-height: 1.45;
-  overflow-wrap: anywhere;
-  white-space: pre-wrap;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 3;
-}
-
-.inbox-preview {
-  display: -webkit-box;
-  margin: 3px 0 5px;
-  overflow: hidden;
-  color: var(--message-ink);
-  font-size: 13px;
-  line-height: 1.45;
-  overflow-wrap: anywhere;
-  white-space: pre-wrap;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 3;
-}
-
 .inbox-row-static {
   opacity: 0.9;
-}
-
-.sent-reactions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 5px;
-  color: var(--muted);
-  font-size: 10px;
-}
-
-.sent-reactions > span {
-  padding: 1px 5px;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  background: var(--soft);
-}
-
-.thread-index-replies {
-  color: var(--accent);
-  font-size: 10px;
-  font-weight: 680;
 }
 
 .thread-header {
@@ -2347,57 +2297,6 @@ a {
 .search-result:focus-visible {
   outline: 0;
   background: var(--hover);
-}
-
-.search-result-body {
-  display: grid;
-  min-width: 0;
-  gap: 4px;
-}
-
-.search-result-meta {
-  display: flex;
-  min-width: 0;
-  align-items: baseline;
-  gap: 7px;
-  color: var(--muted);
-  font-size: 10px;
-}
-
-.search-result-meta strong {
-  overflow: hidden;
-  color: var(--ink);
-  font-size: 12px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.search-result-meta i {
-  padding: 1px 4px;
-  border-radius: 4px;
-  background: var(--accent-soft);
-  color: var(--accent-strong);
-  font-size: 8px;
-  font-style: normal;
-  font-weight: 700;
-  text-transform: uppercase;
-}
-
-.search-result-meta time {
-  margin-left: auto;
-  white-space: nowrap;
-}
-
-.search-result-content {
-  display: -webkit-box;
-  overflow: hidden;
-  color: var(--message-ink);
-  font-size: 12px;
-  line-height: 1.45;
-  overflow-wrap: anywhere;
-  white-space: pre-wrap;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 3;
 }
 
 .login-page {
@@ -3179,6 +3078,11 @@ a {
     margin-left: -8px;
   }
 
+  .message-surface-open {
+    min-height: 44px;
+    padding-inline: 8px;
+  }
+
   .sidebar-close-button {
     display: inline-flex;
     width: 42px;
@@ -3299,12 +3203,6 @@ a {
 
   .threads-list {
     padding-top: 5px;
-  }
-
-  .thread-index-row {
-    grid-template-columns: 34px minmax(0, 1fr);
-    gap: 9px;
-    padding: 10px 16px;
   }
 
   .thread-total {

@@ -9,32 +9,27 @@ import {
   rememberRecentSearch,
   removeRecentSearch,
 } from "@/client/search-history";
-import type { SearchResultView, SearchView } from "@/server/types";
-import { Avatar } from "@/ui/Avatar";
-import { ViewLink } from "@/ui/ViewLink";
+import type { ChannelView, SearchResultView, SearchView } from "@/server/types";
+import { MessageSurfaceCard } from "@/ui/MessageSurfaceCard";
 
 const searchViewCache = new Map<string, SearchView>();
 
-function ResultTime({ timestamp }: { timestamp: number }) {
+function resultTimeLabel(timestamp: number): string {
   const date = new Date(timestamp * 1_000);
-  return (
-    <time dateTime={date.toISOString()} suppressHydrationWarning>
-      {date.toLocaleDateString([], {
-        month: "short",
-        day: "numeric",
-        year:
-          date.getFullYear() === new Date().getFullYear()
-            ? undefined
-            : "numeric",
-      })}
-    </time>
-  );
+  return date.toLocaleDateString([], {
+    month: "short",
+    day: "numeric",
+    year:
+      date.getFullYear() === new Date().getFullYear() ? undefined : "numeric",
+  });
 }
 
-function Result({
+export function SearchResult({
+  channels,
   onOpen,
   result,
 }: {
+  channels: ChannelView[];
   onOpen: () => void;
   result: SearchResultView;
 }) {
@@ -44,31 +39,33 @@ function Result({
   })}`;
   return (
     <li>
-      <ViewLink
-        className="search-result"
+      <MessageSurfaceCard
+        articleProps={{
+          className: "search-result",
+          "data-search-id": result.id,
+        }}
+        author={result.author}
+        channels={channels}
+        compact
+        content={result.content}
+        createdAt={result.createdAt}
         href={href}
-        onClick={onOpen}
-        scroll={false}
-      >
-        <Avatar profile={result.author} small />
-        <span className="search-result-body">
-          <span className="search-result-meta">
-            <strong>{result.author.name}</strong>
-            {result.isOwn ? <i>you</i> : null}
-            <span>#{result.channelName}</span>
-            <ResultTime timestamp={result.createdAt} />
-          </span>
-          <span className="search-result-content">{result.content}</span>
-        </span>
-      </ViewLink>
+        isOwn={result.isOwn}
+        labels={[`#${result.channelName}`]}
+        onOpen={onOpen}
+        openLabel="Open result"
+        timeLabel={resultTimeLabel(result.createdAt)}
+      />
     </li>
   );
 }
 
 export function SearchDialog({
+  channels,
   close,
   viewerPubkey,
 }: {
+  channels: ChannelView[];
   close: () => void;
   viewerPubkey: string;
 }) {
@@ -298,7 +295,8 @@ export function SearchDialog({
               </p>
               <ul>
                 {results.map((result) => (
-                  <Result
+                  <SearchResult
+                    channels={channels}
                     key={result.id}
                     onOpen={() => remember(query)}
                     result={result}

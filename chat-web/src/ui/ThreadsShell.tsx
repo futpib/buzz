@@ -4,14 +4,14 @@ import { Menu, MessageSquareText } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import {
+  type ChannelNavigationMeta,
   navigationUnreadForThread,
   useWorkspaceNavigation,
 } from "@/client/workspace-navigation";
-import type { ThreadsWorkspaceView } from "@/server/types";
-import { Avatar } from "@/ui/Avatar";
+import type { ThreadSummaryView, ThreadsWorkspaceView } from "@/server/types";
+import { MessageSurfaceCard } from "@/ui/MessageSurfaceCard";
 import { ViewRefreshIndicator } from "@/ui/ViewRefreshIndicator";
 import { WorkspaceSidebar } from "@/ui/WorkspaceSidebar";
-import { ViewLink } from "@/ui/ViewLink";
 
 const THREADS_CLIENT_REVALIDATE_AFTER_MS = 10_000;
 
@@ -32,6 +32,55 @@ function relativeTime(timestamp: number, now: number): string {
         ? undefined
         : "numeric",
   });
+}
+
+export function ThreadSurfaceRow({
+  channels,
+  generatedAt,
+  summary: { activityAt, channel, root },
+  unread,
+}: {
+  channels: ThreadsWorkspaceView["channels"];
+  generatedAt: number;
+  summary: ThreadSummaryView;
+  unread: Pick<ChannelNavigationMeta, "unreadCount" | "highPriorityCount">;
+}) {
+  return (
+    <MessageSurfaceCard
+      articleProps={{
+        className: unread.unreadCount > 0 ? "message-row-unread" : undefined,
+        "data-channel-id": channel.id,
+        "data-thread-id": root.id,
+      }}
+      author={root.author}
+      channels={channels}
+      content={root.content}
+      createdAt={root.createdAt}
+      editedAt={root.editedAt}
+      footer={
+        <>
+          {root.replyCount} {root.replyCount === 1 ? "reply" : "replies"}
+          {unread.unreadCount > 0 ? (
+            <span
+              className={
+                unread.highPriorityCount > 0
+                  ? "thread-unread-badge thread-unread-priority"
+                  : "thread-unread-badge"
+              }
+            >
+              {unread.unreadCount > 99 ? "99+" : unread.unreadCount}
+            </span>
+          ) : null}
+        </>
+      }
+      href={`/channels/${channel.id}?thread=${root.id}`}
+      isOwn={root.isOwn}
+      labels={[`#${channel.name}`]}
+      openLabel="Open thread"
+      reactions={root.reactions}
+      timeLabel={relativeTime(activityAt, generatedAt)}
+    />
+  );
 }
 
 export function ThreadsShell({ initial }: { initial: ThreadsWorkspaceView }) {
@@ -144,48 +193,19 @@ export function ThreadsShell({ initial }: { initial: ThreadsWorkspaceView }) {
           {view.threads.length === 0 ? (
             <p className="empty-timeline">No threads yet.</p>
           ) : (
-            orderedThreads.map(({ activityAt, channel, root }) => {
+            orderedThreads.map((summary) => {
               const unread = navigationUnreadForThread(
                 navigation.snapshot,
-                root.id,
+                summary.root.id,
               );
               return (
-                <ViewLink
-                  className={`thread-index-row${unread.unreadCount > 0 ? " thread-index-unread" : ""}`}
-                  data-channel-id={channel.id}
-                  data-thread-id={root.id}
-                  href={`/channels/${channel.id}?thread=${root.id}`}
-                  key={root.id}
-                >
-                  <Avatar profile={root.author} />
-                  <div className="thread-index-content">
-                    <div className="thread-index-meta">
-                      <strong>{root.author.name}</strong>
-                      <span>#{channel.name}</span>
-                      <time
-                        dateTime={new Date(activityAt * 1_000).toISOString()}
-                      >
-                        {relativeTime(activityAt, view.generatedAt)}
-                      </time>
-                    </div>
-                    <p>{root.content || "Attachment"}</p>
-                    <span className="thread-index-replies">
-                      {root.replyCount}{" "}
-                      {root.replyCount === 1 ? "reply" : "replies"}
-                    </span>
-                    {unread.unreadCount > 0 ? (
-                      <span
-                        className={
-                          unread.highPriorityCount > 0
-                            ? "thread-unread-badge thread-unread-priority"
-                            : "thread-unread-badge"
-                        }
-                      >
-                        {unread.unreadCount > 99 ? "99+" : unread.unreadCount}
-                      </span>
-                    ) : null}
-                  </div>
-                </ViewLink>
+                <ThreadSurfaceRow
+                  channels={view.channels}
+                  generatedAt={view.generatedAt}
+                  key={summary.root.id}
+                  summary={summary}
+                  unread={unread}
+                />
               );
             })
           )}

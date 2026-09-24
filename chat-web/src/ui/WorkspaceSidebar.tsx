@@ -318,6 +318,7 @@ export function WorkspaceSidebar({
       ) : null}
       {searchOpen ? (
         <SearchDialog
+          channels={channels}
           close={() => setSearchOpen(false)}
           viewerPubkey={identity.pubkey}
         />

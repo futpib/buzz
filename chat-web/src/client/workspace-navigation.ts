@@ -35,6 +35,7 @@ type StoredNavigation = {
   sort: Record<string, NavigationSortMode>;
   notifications: boolean;
   archivedOpen: boolean;
+  pendingPublishes: string[];
 };
 
 export type NavigationSnapshot = StoredNavigation & {
@@ -55,6 +56,7 @@ export type ChannelNavigationMeta = {
 const STORAGE_PREFIX = "buzz.web-navigation.v1";
 const MAX_CANDIDATES = 5_000;
 const PUBLISH_DELAY_MS = 800;
+const MAX_PUBLISH_RETRY_DELAY_MS = 60_000;
 const EMPTY: NavigationSnapshot = {
   version: 1,
   clientId: "pending",
@@ -67,6 +69,7 @@ const EMPTY: NavigationSnapshot = {
   sort: {},
   notifications: false,
   archivedOpen: false,
+  pendingPublishes: [],
   ready: false,
   candidates: [],
   error: null,
@@ -150,6 +153,27 @@ function parseSort(value: unknown): Record<string, NavigationSortMode> {
   );
 }
 
+const NAVIGATION_PREFERENCE_COORDINATES = new Set([
+  "channel-mutes",
+  "channel-sections",
+  "channel-sort",
+  "channel-stars",
+]);
+
+function parsePendingPublishes(value: unknown, clientId: string): string[] {
+  if (!Array.isArray(value)) return [];
+  return [
+    ...new Set(
+      value.filter(
+        (coordinate): coordinate is string =>
+          typeof coordinate === "string" &&
+          (NAVIGATION_PREFERENCE_COORDINATES.has(coordinate) ||
+            coordinate === `read-state:${clientId}`),
+      ),
+    ),
+  ].sort();
+}
+
 function readLocal(pubkey: string): StoredNavigation {
   const fallback: StoredNavigation = {
     ...EMPTY,
@@ -160,12 +184,13 @@ function readLocal(pubkey: string): StoredNavigation {
       window.localStorage.getItem(storageKey(pubkey)) ?? "null",
     ) as unknown;
     if (!record(parsed) || parsed.version !== 1) return fallback;
+    const clientId =
+      typeof parsed.clientId === "string" && parsed.clientId.length <= 64
+        ? parsed.clientId
+        : fallback.clientId;
     return {
       version: 1,
-      clientId:
-        typeof parsed.clientId === "string" && parsed.clientId.length <= 64
-          ? parsed.clientId
-          : fallback.clientId,
+      clientId,
       readContexts: parseReadContexts(parsed.readContexts),
       forcedUnread: parseAssignments(parsed.forcedUnread),
       stars: parseToggleEntries(parsed.stars),
@@ -175,6 +200,10 @@ function readLocal(pubkey: string): StoredNavigation {
       sort: parseSort(parsed.sort),
       notifications: parsed.notifications === true,
       archivedOpen: parsed.archivedOpen === true,
+      pendingPublishes: parsePendingPublishes(
+        parsed.pendingPublishes,
+        clientId,
+      ),
     };
   } catch {
     return fallback;
@@ -286,6 +315,13 @@ export function navigationReadContextsForChannel(
   return readContexts;
 }
 
+export function navigationPublishRetryDelay(attempt: number): number {
+  return Math.min(
+    MAX_PUBLISH_RETRY_DELAY_MS,
+    2_000 * 2 ** Math.min(Math.max(0, attempt - 1), 5),
+  );
+}
+
 class NavigationController {
   private listeners = new Set<() => void>();
   private channels: ChannelView[] = [];
@@ -296,7 +332,7 @@ class NavigationController {
   private publishTimers = new Map<string, number>();
   private publishCreatedAt = new Map<string, number>();
   private publishAttempts = new Map<string, number>();
-  private pendingCoordinates = new Set<string>();
+  private pendingCoordinates: Set<string>;
   private publishedEventIds = new Map<string, string>();
   snapshot: NavigationSnapshot;
 
@@ -305,6 +341,7 @@ class NavigationController {
       ...readLocal(pubkey),
       ...{ ready: false, candidates: [], error: null },
     };
+    this.pendingCoordinates = new Set(this.snapshot.pendingPublishes);
   }
 
   subscribe = (listener: () => void) => {
@@ -342,8 +379,18 @@ class NavigationController {
   start() {
     if (this.started) return;
     this.started = true;
+    window.addEventListener("online", this.retryPending);
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible") this.retryPending();
+    });
     void this.bootstrap();
   }
+
+  private retryPending = () => {
+    for (const coordinate of this.pendingCoordinates) {
+      this.schedulePublish(coordinate, 0, false);
+    }
+  };
 
   private async bootstrap() {
     try {
@@ -362,6 +409,7 @@ class NavigationController {
       );
       this.bootstrapAttempt = 0;
       this.connectLive();
+      this.retryPending();
     } catch (error) {
       this.commit({
         ready: true,
@@ -493,8 +541,9 @@ class NavigationController {
       sections,
       assignments,
       sort,
+      pendingPublishes: [...this.pendingCoordinates].sort(),
       ready: true,
-      error: null,
+      error: this.pendingCoordinates.size === 0 ? null : this.snapshot.error,
     });
     if (seededReadState) {
       this.schedulePublish(`read-state:${this.snapshot.clientId}`);
@@ -505,6 +554,7 @@ class NavigationController {
     this.source?.close();
     const source = new EventSource("/api/navigation/live");
     this.source = source;
+    source.onopen = this.retryPending;
     source.addEventListener("snapshot", (event) => {
       void this.applyWorkspace(
         JSON.parse(
@@ -563,6 +613,9 @@ class NavigationController {
       this.publishAttempts.delete(coordinate);
       this.publishedEventIds.delete(coordinate);
       this.pendingCoordinates.add(coordinate);
+      this.commit({
+        pendingPublishes: [...this.pendingCoordinates].sort(),
+      });
     }
     const current = this.publishTimers.get(coordinate);
     if (current) window.clearTimeout(current);
@@ -655,22 +708,26 @@ class NavigationController {
       });
       if (!response.ok) throw new Error("Navigation preference sync failed");
       this.publishAttempts.delete(coordinate);
-      this.commit({ error: null }, false);
-    } catch (error) {
+      this.pendingCoordinates.delete(coordinate);
+      this.publishedEventIds.delete(coordinate);
+      this.commit({
+        error: this.pendingCoordinates.size === 0 ? null : this.snapshot.error,
+        pendingPublishes: [...this.pendingCoordinates].sort(),
+      });
+    } catch {
       const attempt = (this.publishAttempts.get(coordinate) ?? 0) + 1;
       this.publishAttempts.set(coordinate, attempt);
-      this.commit(
-        {
-          error:
-            error instanceof Error
-              ? error.message
-              : "Navigation preference sync failed",
-        },
+      if (attempt >= 3) {
+        this.commit(
+          { error: "Navigation preferences are waiting to sync" },
+          false,
+        );
+      }
+      this.schedulePublish(
+        coordinate,
+        navigationPublishRetryDelay(attempt),
         false,
       );
-      if (attempt <= 3) {
-        this.schedulePublish(coordinate, 2_000 * 2 ** (attempt - 1), false);
-      }
     }
   }
 

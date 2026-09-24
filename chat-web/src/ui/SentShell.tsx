@@ -4,8 +4,7 @@ import { Menu, Send } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import type { SentItemView, SentWorkspaceView } from "@/server/types";
-import { Avatar } from "@/ui/Avatar";
-import { ViewLink } from "@/ui/ViewLink";
+import { MessageSurfaceCard } from "@/ui/MessageSurfaceCard";
 import { ViewRefreshIndicator } from "@/ui/ViewRefreshIndicator";
 import { WorkspaceSidebar } from "@/ui/WorkspaceSidebar";
 
@@ -30,48 +29,36 @@ function relativeTime(timestamp: number, now: number): string {
   });
 }
 
-function SentRow({
+export function SentRow({
+  channels,
   generatedAt,
   item,
 }: {
+  channels: SentWorkspaceView["channels"];
   generatedAt: number;
   item: SentItemView;
 }) {
   const { message } = item;
   return (
-    <ViewLink
-      className="thread-index-row"
-      data-channel-id={item.channel.id}
-      data-sent-id={item.id}
+    <MessageSurfaceCard
+      articleProps={{
+        "data-channel-id": item.channel.id,
+        "data-sent-id": item.id,
+      }}
+      author={message.author}
+      channels={channels}
+      content={message.content}
+      createdAt={message.createdAt}
+      editedAt={message.editedAt}
       href={`/channels/${item.channel.id}?${new URLSearchParams({
         thread: item.threadId,
         message: item.id,
       })}`}
-      scroll={false}
-    >
-      <Avatar profile={message.author} />
-      <span className="thread-index-content">
-        <span className="thread-index-meta">
-          <strong>{message.author.name}</strong>
-          <span>{message.parentId ? "Reply" : "Message"}</span>
-          <span>#{item.channel.name}</span>
-          {message.editedAt ? <span>Edited</span> : null}
-          <time dateTime={new Date(message.createdAt * 1_000).toISOString()}>
-            {relativeTime(message.createdAt, generatedAt)}
-          </time>
-        </span>
-        <span className="inbox-preview">{message.content || "Attachment"}</span>
-        {message.reactions.length > 0 ? (
-          <span className="sent-reactions">
-            {message.reactions.map((reaction) => (
-              <span key={reaction.emoji}>
-                {reaction.emoji} {reaction.count}
-              </span>
-            ))}
-          </span>
-        ) : null}
-      </span>
-    </ViewLink>
+      isOwn={message.isOwn}
+      labels={[message.parentId ? "Reply" : "Message", `#${item.channel.name}`]}
+      reactions={message.reactions}
+      timeLabel={relativeTime(message.createdAt, generatedAt)}
+    />
   );
 }
 
@@ -169,6 +156,7 @@ export function SentShell({ initial }: { initial: SentWorkspaceView }) {
           ) : (
             view.items.map((item) => (
               <SentRow
+                channels={view.channels}
                 generatedAt={view.generatedAt}
                 item={item}
                 key={item.id}

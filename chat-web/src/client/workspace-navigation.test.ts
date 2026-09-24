@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   navigationMetaForChannel,
+  navigationPublishRetryDelay,
   navigationReadContextsForChannel,
   type NavigationSnapshot,
   navigationUnreadForThread,
@@ -20,6 +21,7 @@ const base: NavigationSnapshot = {
   sort: {},
   notifications: false,
   archivedOpen: false,
+  pendingPublishes: [],
   ready: true,
   candidates: [
     {
@@ -113,4 +115,12 @@ test("marking a channel read advances its roots and every thread", () => {
     navigationMetaForChannel({ ...base, readContexts }, "channel").unreadCount,
     0,
   );
+});
+
+test("navigation publish retries back off to a bounded recovery cadence", () => {
+  assert.equal(navigationPublishRetryDelay(1), 2_000);
+  assert.equal(navigationPublishRetryDelay(2), 4_000);
+  assert.equal(navigationPublishRetryDelay(5), 32_000);
+  assert.equal(navigationPublishRetryDelay(6), 60_000);
+  assert.equal(navigationPublishRetryDelay(100), 60_000);
 });
