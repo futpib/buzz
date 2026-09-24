@@ -57,7 +57,7 @@ export function isMessageForcedUnread(
   messageId: string,
 ): boolean {
   try {
-    return contains(sessionStorage, key(UNREAD_PREFIX, pubkey), messageId);
+    return contains(localStorage, key(UNREAD_PREFIX, pubkey), messageId);
   } catch {
     return false;
   }
@@ -69,7 +69,7 @@ export function setMessageForcedUnread(
   unread: boolean,
 ): boolean {
   try {
-    return set(sessionStorage, key(UNREAD_PREFIX, pubkey), messageId, unread);
+    return set(localStorage, key(UNREAD_PREFIX, pubkey), messageId, unread);
   } catch {
     return unread;
   }

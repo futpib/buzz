@@ -1,6 +1,6 @@
 "use client";
 
-import { finalizeEvent, getPublicKey, nip19 } from "nostr-tools";
+import { finalizeEvent, getPublicKey, nip19, nip44 } from "nostr-tools";
 
 import type { NostrEvent } from "@/server/types";
 import { BROWSER_CREDENTIAL_KEY } from "@/shared/auth";
@@ -210,6 +210,42 @@ export function makeTypingEvent(
     },
     secretKey(credential.nsec),
   ) as NostrEvent;
+}
+
+export function makeEncryptedAppDataEvent(
+  credential: BrowserCredential,
+  input: { coordinate: string; topic: string; value: unknown },
+  createdAt = Math.floor(Date.now() / 1_000),
+): NostrEvent {
+  const privateKey = secretKey(credential.nsec);
+  const pubkey = getPublicKey(privateKey);
+  const conversationKey = nip44.v2.utils.getConversationKey(privateKey, pubkey);
+  return finalizeEvent(
+    {
+      kind: 30_078,
+      created_at: createdAt,
+      tags: actionTags(credential, [
+        ["d", input.coordinate],
+        ["t", input.topic],
+      ]),
+      content: nip44.v2.encrypt(JSON.stringify(input.value), conversationKey),
+    },
+    privateKey,
+  ) as NostrEvent;
+}
+
+export function decryptOwnAppDataEvent(
+  credential: BrowserCredential,
+  event: NostrEvent,
+): unknown {
+  if (event.kind !== 30_078) throw new Error("App data kind is invalid");
+  const privateKey = secretKey(credential.nsec);
+  const pubkey = getPublicKey(privateKey);
+  if (event.pubkey !== pubkey) throw new Error("App data author is invalid");
+  const conversationKey = nip44.v2.utils.getConversationKey(privateKey, pubkey);
+  return JSON.parse(
+    nip44.v2.decrypt(event.content, conversationKey),
+  ) as unknown;
 }
 
 export function makeMediaGetAuthEvent(

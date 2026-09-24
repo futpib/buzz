@@ -41,6 +41,7 @@ export function MessageRow({
   expectedPubkey,
   onMessageChange,
   channels,
+  onUnreadChange,
 }: {
   message: MessageView;
   channelId: string;
@@ -53,6 +54,7 @@ export function MessageRow({
   expectedPubkey: string;
   onMessageChange: (message: MessageView | null) => void;
   channels: ChannelView[];
+  onUnreadChange?: (unread: boolean) => void;
 }) {
   const [menu, setMenu] = useState<MenuState | null>(null);
   const [isUnread, setIsUnread] = useState(false);
@@ -241,6 +243,7 @@ export function MessageRow({
             setIsUnread(
               setMessageForcedUnread(expectedPubkey, message.id, unread),
             );
+            onUnreadChange?.(unread);
           }}
           point={menu}
         />

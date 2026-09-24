@@ -34,6 +34,11 @@ import {
   threadPanelWidthBounds,
   writeThreadPanelWidth,
 } from "@/client/thread-panel-size";
+import {
+  navigationMetaForChannel,
+  navigationUnreadForThread,
+  useWorkspaceNavigation,
+} from "@/client/workspace-navigation";
 import type {
   ChannelHistoryPage,
   ChannelSnapshot,
@@ -82,6 +87,10 @@ export function WorkspaceShell({
     initial.cacheState === "stale",
   );
   const [typingEntries, setTypingEntries] = useState<ClientTypingEntry[]>([]);
+  const [firstUnreadId, setFirstUnreadId] = useState<string | null>(null);
+  const [firstThreadUnreadId, setFirstThreadUnreadId] = useState<string | null>(
+    null,
+  );
   const timelineScroller = useRef<HTMLDivElement>(null);
   const timelineEnd = useRef<HTMLDivElement>(null);
   const timelinePinnedToBottom = useRef(true);
@@ -100,8 +109,14 @@ export function WorkspaceShell({
     startWidth: number;
     startX: number;
   } | null>(null);
+  const capturedUnreadChannel = useRef<string | null>(null);
+  const capturedUnreadThread = useRef<string | null>(null);
   const rootId = initial.thread?.rootId ?? null;
   const openThreadId = thread?.rootId ?? null;
+  const navigation = useWorkspaceNavigation(
+    initial.identity.pubkey,
+    initial.channels,
+  );
 
   useLayoutEffect(() => {
     const width = window.innerWidth;
@@ -134,7 +149,41 @@ export function WorkspaceShell({
     setReplyTarget(null);
     setRevalidating(initial.cacheState === "stale");
     setTypingEntries([]);
+    setFirstUnreadId(null);
+    setFirstThreadUnreadId(null);
+    capturedUnreadChannel.current = null;
+    capturedUnreadThread.current = null;
   }, [initial]);
+
+  useEffect(() => {
+    if (
+      !navigation.snapshot.ready ||
+      capturedUnreadChannel.current === initial.selectedChannel.id
+    ) {
+      return;
+    }
+    const meta = navigationMetaForChannel(
+      navigation.snapshot,
+      initial.selectedChannel.id,
+    );
+    capturedUnreadChannel.current = initial.selectedChannel.id;
+    setFirstUnreadId(meta.firstUnreadId);
+    navigation.controller.markChannelRead(initial.selectedChannel.id);
+  }, [initial.selectedChannel.id, navigation.controller, navigation.snapshot]);
+
+  useEffect(() => {
+    if (
+      !navigation.snapshot.ready ||
+      !openThreadId ||
+      capturedUnreadThread.current === openThreadId
+    ) {
+      return;
+    }
+    const meta = navigationUnreadForThread(navigation.snapshot, openThreadId);
+    capturedUnreadThread.current = openThreadId;
+    setFirstThreadUnreadId(meta.firstUnreadId);
+    navigation.controller.markThreadRead(openThreadId);
+  }, [navigation.controller, navigation.snapshot, openThreadId]);
 
   useEffect(() => {
     const params = new URLSearchParams({ channel: initial.selectedChannel.id });
@@ -345,6 +394,97 @@ export function WorkspaceShell({
     }
   }, [initial.selectedChannel.id, timelineCursor, timelineHasMore]);
 
+  const jumpToFirstUnread = useCallback(async () => {
+    const targetId = firstThreadUnreadId ?? firstUnreadId;
+    if (!targetId) return;
+    const threadTarget = threadContent.current?.querySelector<HTMLElement>(
+      `[data-message-id="${targetId}"]`,
+    );
+    if (threadTarget) {
+      threadTarget.scrollIntoView({ block: "center", behavior: "smooth" });
+      threadPinnedToBottom.current = false;
+      return;
+    }
+    const findAndScroll = () => {
+      const target = timelineScroller.current?.querySelector<HTMLElement>(
+        `[data-message-id="${targetId}"]`,
+      );
+      if (!target) return false;
+      target.scrollIntoView({ block: "center", behavior: "smooth" });
+      timelinePinnedToBottom.current = false;
+      return true;
+    };
+    if (findAndScroll()) return;
+    const candidate = navigation.snapshot.candidates.find(
+      (item) => item.id === targetId,
+    );
+    if (candidate?.rootId) {
+      router.push(
+        `/channels/${initial.selectedChannel.id}?${new URLSearchParams({
+          thread: candidate.rootId,
+          message: candidate.id,
+        })}`,
+        { scroll: false },
+      );
+      return;
+    }
+    let cursor = timelineCursor;
+    let hasMore = timelineHasMore;
+    const loaded: typeof timeline = [];
+    try {
+      while (cursor && hasMore && loaded.length < 2_000) {
+        const response = await fetch(
+          `/api/channels/${initial.selectedChannel.id}/history?${new URLSearchParams(
+            {
+              created_at: String(cursor.createdAt),
+              id: cursor.id,
+            },
+          )}`,
+          { cache: "no-store" },
+        );
+        const page = (await response.json()) as ChannelHistoryPage & {
+          error?: string;
+        };
+        if (!response.ok) {
+          throw new Error(
+            page.error || "First unread message could not be loaded",
+          );
+        }
+        loaded.push(...page.messages);
+        const advanced =
+          page.nextCursor &&
+          (page.nextCursor.createdAt !== cursor.createdAt ||
+            page.nextCursor.id !== cursor.id);
+        cursor = advanced ? page.nextCursor : null;
+        hasMore = page.hasMore && page.messages.length > 0 && Boolean(advanced);
+        if (page.messages.some((message) => message.id === targetId)) break;
+      }
+      setOlderTimeline((current) => [
+        ...new Map(
+          [...loaded, ...current].map((message) => [message.id, message]),
+        ).values(),
+      ]);
+      setTimelineCursor(cursor);
+      setTimelineHasMore(hasMore);
+      historyLoaded.current = true;
+      requestAnimationFrame(() => requestAnimationFrame(findAndScroll));
+    } catch (caught) {
+      setHistoryError(
+        caught instanceof Error
+          ? caught.message
+          : "First unread message could not be loaded",
+      );
+    }
+  }, [
+    firstThreadUnreadId,
+    firstUnreadId,
+    initial.selectedChannel.id,
+    navigation.snapshot.candidates,
+    router,
+    timelineCursor,
+    timelineHasMore,
+  ]);
+
   useEffect(() => {
     const scroller = threadScroller.current;
     const content = threadContent.current;
@@ -379,6 +519,24 @@ export function WorkspaceShell({
       scrollerObserver.disconnect();
     };
   }, [openThreadId, targetMessageId]);
+
+  const targetInTimeline = renderedTimeline.some(
+    (message) => message.id === targetMessageId,
+  );
+
+  useEffect(() => {
+    if (openThreadId || !targetMessageId) return;
+    if (!targetInTimeline) return;
+    const target = timelineScroller.current?.querySelector<HTMLElement>(
+      `[data-message-id="${targetMessageId}"]`,
+    );
+    if (!target) return;
+    const frame = requestAnimationFrame(() => {
+      target.scrollIntoView({ block: "center" });
+      timelinePinnedToBottom.current = false;
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [openThreadId, targetInTimeline, targetMessageId]);
 
   const forum = initial.selectedChannel.type === "forum";
   const threadAuthors = new Map(
@@ -476,6 +634,15 @@ export function WorkspaceShell({
             </div>
           </div>
           <div className="header-actions">
+            {firstUnreadId || firstThreadUnreadId ? (
+              <button
+                className="jump-unread-button"
+                onClick={() => void jumpToFirstUnread()}
+                type="button"
+              >
+                First unread
+              </button>
+            ) : null}
             <ViewRefreshIndicator active={revalidating} />
             <span className={`live-status live-${liveState}`}>
               <span /> {liveLabel}
@@ -535,15 +702,35 @@ export function WorkspaceShell({
             </p>
           ) : (
             renderedTimeline.map((message) => (
-              <MessageRow
-                channelId={initial.selectedChannel.id}
-                channels={initial.channels}
-                expectedPubkey={initial.identity.pubkey}
-                key={message.id}
-                message={message}
-                onContextReply={() => openMessageThread(message.id)}
-                onMessageChange={(next) => updateMessage(message.id, next)}
-              />
+              <div className="timeline-message" key={message.id}>
+                {message.id === firstUnreadId ? (
+                  <div className="new-messages-divider">
+                    <span>New messages</span>
+                    <i />
+                  </div>
+                ) : null}
+                <MessageRow
+                  channelId={initial.selectedChannel.id}
+                  channels={initial.channels}
+                  expectedPubkey={initial.identity.pubkey}
+                  message={message}
+                  onContextReply={() => openMessageThread(message.id)}
+                  onMessageChange={(next) => updateMessage(message.id, next)}
+                  onUnreadChange={(unread) => {
+                    if (unread) {
+                      navigation.controller.markMessageUnread(
+                        initial.selectedChannel.id,
+                        message.id,
+                      );
+                    } else {
+                      navigation.controller.markMessageRead(
+                        message.id,
+                        message.createdAt,
+                      );
+                    }
+                  }}
+                />
+              </div>
             ))
           )}
           <div ref={timelineEnd} />
@@ -683,28 +870,48 @@ export function WorkspaceShell({
                 <i />
               </div>
               {thread.replies.map((message) => (
-                <MessageRow
-                  channelId={initial.selectedChannel.id}
-                  channels={initial.channels}
-                  compact
-                  expectedPubkey={initial.identity.pubkey}
-                  highlighted={message.id === targetMessageId}
-                  key={message.id}
-                  message={message}
-                  onMessageChange={(next) => updateMessage(message.id, next)}
-                  onReply={() =>
-                    setReplyTarget({
-                      id: message.id,
-                      name: message.author.name,
-                    })
-                  }
-                  replyingTo={
-                    message.parentId && message.parentId !== thread.rootId
-                      ? (threadAuthors.get(message.parentId) ??
-                        "a previous reply")
-                      : null
-                  }
-                />
+                <div className="thread-message" key={message.id}>
+                  {message.id === firstThreadUnreadId ? (
+                    <div className="new-messages-divider">
+                      <span>New replies</span>
+                      <i />
+                    </div>
+                  ) : null}
+                  <MessageRow
+                    channelId={initial.selectedChannel.id}
+                    channels={initial.channels}
+                    compact
+                    expectedPubkey={initial.identity.pubkey}
+                    highlighted={message.id === targetMessageId}
+                    message={message}
+                    onMessageChange={(next) => updateMessage(message.id, next)}
+                    onReply={() =>
+                      setReplyTarget({
+                        id: message.id,
+                        name: message.author.name,
+                      })
+                    }
+                    onUnreadChange={(unread) => {
+                      if (unread) {
+                        navigation.controller.markMessageUnread(
+                          initial.selectedChannel.id,
+                          message.id,
+                        );
+                      } else {
+                        navigation.controller.markMessageRead(
+                          message.id,
+                          message.createdAt,
+                        );
+                      }
+                    }}
+                    replyingTo={
+                      message.parentId && message.parentId !== thread.rootId
+                        ? (threadAuthors.get(message.parentId) ??
+                          "a previous reply")
+                        : null
+                    }
+                  />
+                </div>
               ))}
             </div>
           </div>

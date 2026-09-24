@@ -27,6 +27,26 @@ export type ChannelView = {
   archived: boolean;
 };
 
+export type NavigationCandidateView = {
+  id: string;
+  channelId: string;
+  channelName: string;
+  channelType: ChannelView["type"];
+  author: ProfileView;
+  content: string;
+  createdAt: number;
+  rootId: string | null;
+  parentId: string | null;
+  highPriority: boolean;
+  isOwn: boolean;
+};
+
+export type NavigationWorkspaceView = {
+  candidates: NavigationCandidateView[];
+  appDataEvents: NostrEvent[];
+  generatedAt: number;
+};
+
 export type ReactionView = {
   emoji: string;
   count: number;

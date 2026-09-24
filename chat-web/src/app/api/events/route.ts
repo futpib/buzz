@@ -3,6 +3,7 @@ import { markActivityViewsStale } from "@/server/activity";
 import { markWorkspaceViewsStale } from "@/server/data";
 import { markInboxViewsStale } from "@/server/inbox";
 import { publishMessage } from "@/server/messages";
+import { markNavigationViewsStale } from "@/server/navigation";
 import { markSearchViewsStale } from "@/server/search";
 import { markSentViewsStale } from "@/server/sent";
 import type { NostrEvent } from "@/server/types";
@@ -24,6 +25,7 @@ export async function POST(request: Request): Promise<Response> {
     markWorkspaceViewsStale(session, channelId);
     markActivityViewsStale(session);
     markInboxViewsStale(session);
+    markNavigationViewsStale(session);
     markSearchViewsStale(session);
     markSentViewsStale(session);
     return Response.json({ id });

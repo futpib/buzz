@@ -30,7 +30,7 @@ class MemoryStorage implements Storage {
   }
 }
 
-test("forced unread is tab-local while thread follows persist by identity", () => {
+test("forced unread and thread follows persist by identity", () => {
   const session = new MemoryStorage();
   const local = new MemoryStorage();
   Object.defineProperty(globalThis, "sessionStorage", {

@@ -3,6 +3,10 @@
 import { Menu, MessageSquareText } from "lucide-react";
 import { useEffect, useState } from "react";
 
+import {
+  navigationUnreadForThread,
+  useWorkspaceNavigation,
+} from "@/client/workspace-navigation";
 import type { ThreadsWorkspaceView } from "@/server/types";
 import { Avatar } from "@/ui/Avatar";
 import { ViewRefreshIndicator } from "@/ui/ViewRefreshIndicator";
@@ -36,6 +40,24 @@ export function ThreadsShell({ initial }: { initial: ThreadsWorkspaceView }) {
   const [revalidating, setRevalidating] = useState(
     initial.cacheState === "stale",
   );
+  const navigation = useWorkspaceNavigation(
+    view.identity.pubkey,
+    view.channels,
+  );
+  const orderedThreads = [...view.threads].sort((left, right) => {
+    const leftUnread = navigationUnreadForThread(
+      navigation.snapshot,
+      left.root.id,
+    ).unreadCount;
+    const rightUnread = navigationUnreadForThread(
+      navigation.snapshot,
+      right.root.id,
+    ).unreadCount;
+    return (
+      Number(rightUnread > 0) - Number(leftUnread > 0) ||
+      right.activityAt - left.activityAt
+    );
+  });
 
   useEffect(() => {
     setView(initial);
@@ -122,31 +144,50 @@ export function ThreadsShell({ initial }: { initial: ThreadsWorkspaceView }) {
           {view.threads.length === 0 ? (
             <p className="empty-timeline">No threads yet.</p>
           ) : (
-            view.threads.map(({ activityAt, channel, root }) => (
-              <ViewLink
-                className="thread-index-row"
-                data-channel-id={channel.id}
-                data-thread-id={root.id}
-                href={`/channels/${channel.id}?thread=${root.id}`}
-                key={root.id}
-              >
-                <Avatar profile={root.author} />
-                <div className="thread-index-content">
-                  <div className="thread-index-meta">
-                    <strong>{root.author.name}</strong>
-                    <span>#{channel.name}</span>
-                    <time dateTime={new Date(activityAt * 1_000).toISOString()}>
-                      {relativeTime(activityAt, view.generatedAt)}
-                    </time>
+            orderedThreads.map(({ activityAt, channel, root }) => {
+              const unread = navigationUnreadForThread(
+                navigation.snapshot,
+                root.id,
+              );
+              return (
+                <ViewLink
+                  className={`thread-index-row${unread.unreadCount > 0 ? " thread-index-unread" : ""}`}
+                  data-channel-id={channel.id}
+                  data-thread-id={root.id}
+                  href={`/channels/${channel.id}?thread=${root.id}`}
+                  key={root.id}
+                >
+                  <Avatar profile={root.author} />
+                  <div className="thread-index-content">
+                    <div className="thread-index-meta">
+                      <strong>{root.author.name}</strong>
+                      <span>#{channel.name}</span>
+                      <time
+                        dateTime={new Date(activityAt * 1_000).toISOString()}
+                      >
+                        {relativeTime(activityAt, view.generatedAt)}
+                      </time>
+                    </div>
+                    <p>{root.content || "Attachment"}</p>
+                    <span className="thread-index-replies">
+                      {root.replyCount}{" "}
+                      {root.replyCount === 1 ? "reply" : "replies"}
+                    </span>
+                    {unread.unreadCount > 0 ? (
+                      <span
+                        className={
+                          unread.highPriorityCount > 0
+                            ? "thread-unread-badge thread-unread-priority"
+                            : "thread-unread-badge"
+                        }
+                      >
+                        {unread.unreadCount > 99 ? "99+" : unread.unreadCount}
+                      </span>
+                    ) : null}
                   </div>
-                  <p>{root.content || "Attachment"}</p>
-                  <span className="thread-index-replies">
-                    {root.replyCount}{" "}
-                    {root.replyCount === 1 ? "reply" : "replies"}
-                  </span>
-                </div>
-              </ViewLink>
-            ))
+                </ViewLink>
+              );
+            })
           )}
         </nav>
       </section>
