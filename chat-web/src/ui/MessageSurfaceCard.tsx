@@ -65,7 +65,7 @@ export function MessageSurfaceCard({
           </time>
           {editedAt ? <span>edited</span> : null}
         </div>
-        <MessageBody channels={channels} content={content} />
+        <MessageBody channels={channels} content={content} preview />
         {reactions.length > 0 ? (
           <ul className="reaction-list" aria-label="Reactions">
             {reactions.map((reaction) => (

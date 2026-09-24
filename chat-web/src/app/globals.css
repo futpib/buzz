@@ -874,6 +874,26 @@ a {
   color: var(--quote-ink);
 }
 
+.message-body-preview {
+  max-height: 6em;
+  overflow: hidden;
+}
+
+.message-body-preview p,
+.message-body-preview blockquote,
+.message-body-preview li {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+
+.message-body-preview pre {
+  max-height: 6em;
+  overflow: hidden;
+  padding-block: 7px;
+}
+
 .message-media-image {
   display: block;
   max-width: min(100%, 720px);
@@ -1024,6 +1044,19 @@ a {
   background: var(--soft);
   color: var(--muted);
   font-size: 11px;
+}
+
+.message-body-preview .message-media-image {
+  max-width: min(100%, 240px);
+  max-height: 6em;
+  margin-block: 3px;
+}
+
+.message-body-preview .message-image-state {
+  min-height: 0;
+  max-height: 6em;
+  margin-block: 3px;
+  padding-block: 6px;
 }
 
 .reaction-list {

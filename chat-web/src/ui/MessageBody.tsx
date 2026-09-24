@@ -11,6 +11,7 @@ import { AuthenticatedAttachmentLink } from "@/ui/AuthenticatedAttachmentLink";
 import { AuthenticatedImage } from "@/ui/AuthenticatedImage";
 import { BuzzMessageLink } from "@/ui/BuzzMessageLink";
 import remarkMessageLinks from "@/ui/remark-message-links";
+import remarkMessagePreview from "@/ui/remark-message-preview";
 
 function childText(children: ReactNode): string {
   return Children.toArray(children)
@@ -24,9 +25,11 @@ function childText(children: ReactNode): string {
 export const MessageBody = memo(function MessageBody({
   channels = [],
   content,
+  preview = false,
 }: {
   channels?: ChannelView[];
   content: string;
+  preview?: boolean;
 }) {
   const channelNames = new Map(
     channels.map((channel) => [channel.id, channel.name]),
@@ -58,10 +61,16 @@ export const MessageBody = memo(function MessageBody({
   };
 
   return (
-    <div className="message-body">
+    <div
+      className={preview ? "message-body message-body-preview" : "message-body"}
+    >
       <ReactMarkdown
         components={markdownComponents}
-        remarkPlugins={[remarkGfm, remarkMessageLinks]}
+        remarkPlugins={[
+          remarkGfm,
+          remarkMessageLinks,
+          ...(preview ? [remarkMessagePreview] : []),
+        ]}
         urlTransform={(url) =>
           parseMessageLink(url) ? url : defaultUrlTransform(url)
         }

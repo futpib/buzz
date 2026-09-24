@@ -18,6 +18,7 @@ import { InboxRow } from "@/ui/InboxShell";
 import { SearchResult } from "@/ui/SearchDialog";
 import { SentRow } from "@/ui/SentShell";
 import { ThreadSurfaceRow } from "@/ui/ThreadsShell";
+import { MessageBody } from "@/ui/MessageBody";
 
 const channel: ChannelView = {
   id: "channel",
@@ -51,7 +52,7 @@ const message: MessageView = {
 };
 
 function assertRichMessage(markup: string) {
-  assert.match(markup, /class="message-body"/);
+  assert.match(markup, /class="message-body message-body-preview"/);
   assert.match(markup, /<strong>Rich<\/strong>/);
   assert.match(markup, /<code>message<\/code>/);
   assert.match(markup, /href="https:\/\/example\.com"/);
@@ -135,4 +136,43 @@ test("every message index surface uses the canonical rich body", () => {
   for (const surface of surfaces) {
     assertRichMessage(renderToStaticMarkup(surface));
   }
+});
+
+test("message index previews keep rich markup without rendering the full body", () => {
+  const tail = "TAIL_SHOULD_NOT_RENDER";
+  const markup = renderToStaticMarkup(
+    createElement(InboxRow, {
+      channels: [channel],
+      generatedAt: 120_000,
+      item: {
+        id: message.id,
+        conversationId: message.id,
+        channel,
+        threadId: message.id,
+        author,
+        content: `**Rich** preview.\n\nSecond block.\n\nThird block.\n\n${tail}`,
+        createdAt: 100,
+        categories: ["mention"],
+        itemCount: 1,
+      } satisfies InboxItemView,
+    }),
+  );
+
+  assert.match(markup, /<strong>Rich<\/strong>/);
+  assert.doesNotMatch(markup, new RegExp(tail));
+  assert.match(markup, /…/);
+});
+
+test("full timeline messages remain unbounded", () => {
+  const tail = "TAIL_REMAINS_IN_FULL_MESSAGE";
+  const markup = renderToStaticMarkup(
+    createElement(MessageBody, {
+      channels: [channel],
+      content: `First block.\n\nSecond block.\n\nThird block.\n\n${tail}`,
+    }),
+  );
+
+  assert.match(markup, /class="message-body"/);
+  assert.doesNotMatch(markup, /message-body-preview/);
+  assert.match(markup, new RegExp(tail));
 });
