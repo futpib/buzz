@@ -6,7 +6,6 @@ import {
   Menu,
   MessageSquareText,
   PanelRightClose,
-  Search,
   Users,
   X,
 } from "lucide-react";
@@ -43,7 +42,6 @@ import type {
 } from "@/server/types";
 import { Composer } from "@/ui/Composer";
 import { MessageRow } from "@/ui/MessageRow";
-import { SearchDialog } from "@/ui/SearchDialog";
 import type { TypingParticipant } from "@/ui/TypingIndicator";
 import { ViewRefreshIndicator } from "@/ui/ViewRefreshIndicator";
 import { WorkspaceSidebar } from "@/ui/WorkspaceSidebar";
@@ -65,7 +63,6 @@ export function WorkspaceShell({
   const [thread, setThread] = useState(initial.thread);
   const [liveState, setLiveState] = useState<LiveState>("connecting");
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
-  const [searchOpen, setSearchOpen] = useState(false);
   const [replyTarget, setReplyTarget] = useState<ReplyTarget | null>(null);
   const [preferredThreadPanelWidth, setPreferredThreadPanelWidth] = useState<
     number | null
@@ -134,7 +131,6 @@ export function WorkspaceShell({
     timelinePinnedToBottom.current = true;
     setThread(initial.thread);
     setMobileNavOpen(false);
-    setSearchOpen(false);
     setReplyTarget(null);
     setRevalidating(initial.cacheState === "stale");
     setTypingEntries([]);
@@ -492,15 +488,6 @@ export function WorkspaceShell({
             >
               <Users aria-hidden="true" size={18} />
             </button>
-            <button
-              aria-controls="workspace-search"
-              aria-expanded={searchOpen}
-              aria-label="Search"
-              onClick={() => setSearchOpen(true)}
-              type="button"
-            >
-              <Search aria-hidden="true" size={18} />
-            </button>
           </div>
         </header>
 
@@ -740,12 +727,6 @@ export function WorkspaceShell({
           <PanelRightClose aria-hidden="true" size={17} />
         </span>
       )}
-      {searchOpen ? (
-        <SearchDialog
-          close={() => setSearchOpen(false)}
-          viewerPubkey={initial.identity.pubkey}
-        />
-      ) : null}
     </main>
   );
 }

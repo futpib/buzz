@@ -1,11 +1,10 @@
 "use client";
 
-import { Menu, Search, Send } from "lucide-react";
+import { Menu, Send } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import type { SentItemView, SentWorkspaceView } from "@/server/types";
 import { Avatar } from "@/ui/Avatar";
-import { SearchDialog } from "@/ui/SearchDialog";
 import { ViewLink } from "@/ui/ViewLink";
 import { ViewRefreshIndicator } from "@/ui/ViewRefreshIndicator";
 import { WorkspaceSidebar } from "@/ui/WorkspaceSidebar";
@@ -79,7 +78,6 @@ function SentRow({
 export function SentShell({ initial }: { initial: SentWorkspaceView }) {
   const [view, setView] = useState(initial);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
-  const [searchOpen, setSearchOpen] = useState(false);
   const [revalidating, setRevalidating] = useState(
     initial.cacheState === "stale",
   );
@@ -163,15 +161,6 @@ export function SentShell({ initial }: { initial: SentWorkspaceView }) {
           <div className="header-actions">
             <ViewRefreshIndicator active={revalidating} />
             <span className="thread-total">{view.items.length} messages</span>
-            <button
-              aria-controls="workspace-search"
-              aria-expanded={searchOpen}
-              aria-label="Search"
-              onClick={() => setSearchOpen(true)}
-              type="button"
-            >
-              <Search aria-hidden="true" size={18} />
-            </button>
           </div>
         </header>
         <nav className="threads-list" aria-label="Sent messages">
@@ -188,12 +177,6 @@ export function SentShell({ initial }: { initial: SentWorkspaceView }) {
           )}
         </nav>
       </section>
-      {searchOpen ? (
-        <SearchDialog
-          close={() => setSearchOpen(false)}
-          viewerPubkey={view.identity.pubkey}
-        />
-      ) : null}
     </main>
   );
 }

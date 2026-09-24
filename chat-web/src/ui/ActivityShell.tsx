@@ -1,19 +1,15 @@
 "use client";
 
-import { Inbox, Menu } from "lucide-react";
+import { Bell, Bot, Menu } from "lucide-react";
 import { useEffect, useState } from "react";
 
-import type {
-  InboxCategory,
-  InboxItemView,
-  InboxWorkspaceView,
-} from "@/server/types";
+import type { ActivityItemView, ActivityWorkspaceView } from "@/server/types";
 import { Avatar } from "@/ui/Avatar";
 import { ViewLink } from "@/ui/ViewLink";
 import { ViewRefreshIndicator } from "@/ui/ViewRefreshIndicator";
 import { WorkspaceSidebar } from "@/ui/WorkspaceSidebar";
 
-const INBOX_CLIENT_REVALIDATE_AFTER_MS = 10_000;
+const ACTIVITY_CLIENT_REVALIDATE_AFTER_MS = 10_000;
 
 function relativeTime(timestamp: number, now: number): string {
   const seconds = Math.max(0, Math.floor(now / 1_000) - timestamp);
@@ -34,18 +30,27 @@ function relativeTime(timestamp: number, now: number): string {
   });
 }
 
-function categoryLabel(categories: InboxCategory[]): string {
-  if (categories.includes("needs_action")) return "Needs action";
-  if (categories.includes("mention")) return "Mention";
-  return "Thread";
+function kindLabel(item: ActivityItemView): string {
+  switch (item.kind) {
+    case "forum":
+      return "Forum post";
+    case "job_request":
+      return "Job requested";
+    case "job_progress":
+      return "Progress update";
+    case "job_result":
+      return "Job result";
+    case "message":
+      return item.itemCount > 1 ? "Conversation update" : "Message";
+  }
 }
 
-function InboxRow({
-  item,
+function ActivityRow({
   generatedAt,
+  item,
 }: {
-  item: InboxItemView;
   generatedAt: number;
+  item: ActivityItemView;
 }) {
   const content = (
     <>
@@ -53,35 +58,38 @@ function InboxRow({
       <span className="thread-index-content">
         <span className="thread-index-meta">
           <strong>{item.author.name}</strong>
-          <span>{categoryLabel(item.categories)}</span>
+          {item.isOwn ? <span>you</span> : null}
+          <span>{kindLabel(item)}</span>
           {item.channel ? <span>#{item.channel.name}</span> : null}
           <time dateTime={new Date(item.createdAt * 1_000).toISOString()}>
             {relativeTime(item.createdAt, generatedAt)}
           </time>
         </span>
         <span className="inbox-preview">{item.content || "Attachment"}</span>
-        <span className="thread-index-replies">
-          {item.itemCount === 1
-            ? "1 update"
-            : `${item.itemCount} grouped updates`}
-        </span>
+        {item.itemCount > 1 ? (
+          <span className="thread-index-replies">
+            {item.itemCount} updates in this conversation
+          </span>
+        ) : null}
       </span>
     </>
   );
+
   if (!item.channel || !item.threadId) {
     return (
       <article
         className="thread-index-row inbox-row-static"
-        data-inbox-id={item.id}
+        data-activity-id={item.id}
       >
         {content}
       </article>
     );
   }
+
   return (
     <ViewLink
       className="thread-index-row"
-      data-inbox-id={item.id}
+      data-activity-id={item.id}
       href={`/channels/${item.channel.id}?${new URLSearchParams({
         thread: item.threadId,
         message: item.id,
@@ -93,7 +101,7 @@ function InboxRow({
   );
 }
 
-export function InboxShell({ initial }: { initial: InboxWorkspaceView }) {
+export function ActivityShell({ initial }: { initial: ActivityWorkspaceView }) {
   const [view, setView] = useState(initial);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [revalidating, setRevalidating] = useState(
@@ -104,7 +112,7 @@ export function InboxShell({ initial }: { initial: InboxWorkspaceView }) {
     setView(initial);
     const shouldRevalidate =
       initial.cacheState === "stale" ||
-      Date.now() - initial.generatedAt >= INBOX_CLIENT_REVALIDATE_AFTER_MS;
+      Date.now() - initial.generatedAt >= ACTIVITY_CLIENT_REVALIDATE_AFTER_MS;
     setRevalidating(shouldRevalidate);
     if (!shouldRevalidate) {
       setRevalidating(false);
@@ -112,7 +120,7 @@ export function InboxShell({ initial }: { initial: InboxWorkspaceView }) {
     }
     const controller = new AbortController();
     let disposed = false;
-    void fetch("/api/inbox?fresh=1", {
+    void fetch("/api/activity?fresh=1", {
       cache: "no-store",
       signal: controller.signal,
     })
@@ -124,7 +132,7 @@ export function InboxShell({ initial }: { initial: InboxWorkspaceView }) {
           return null;
         }
         if (!response.ok) return null;
-        return (await response.json()) as InboxWorkspaceView;
+        return (await response.json()) as ActivityWorkspaceView;
       })
       .then((fresh) => {
         if (fresh && !controller.signal.aborted) setView(fresh);
@@ -139,6 +147,22 @@ export function InboxShell({ initial }: { initial: InboxWorkspaceView }) {
     };
   }, [initial]);
 
+  useEffect(() => {
+    const source = new EventSource("/api/activity/live");
+    source.addEventListener("snapshot", (event) => {
+      setView(JSON.parse((event as MessageEvent<string>).data));
+      setRevalidating(false);
+    });
+    source.addEventListener("status", (event) => {
+      const status = JSON.parse((event as MessageEvent<string>).data) as {
+        state?: string;
+      };
+      setRevalidating(status.state === "refreshing");
+    });
+    source.onerror = () => setRevalidating(false);
+    return () => source.close();
+  }, []);
+
   return (
     <main
       className={`workspace workspace-threads${mobileNavOpen ? " mobile-nav-open" : ""}`}
@@ -151,7 +175,7 @@ export function InboxShell({ initial }: { initial: InboxWorkspaceView }) {
         type="button"
       />
       <WorkspaceSidebar
-        activePage="inbox"
+        activePage="activity"
         channels={view.channels}
         close={() => setMobileNavOpen(false)}
         identity={view.identity}
@@ -170,28 +194,29 @@ export function InboxShell({ initial }: { initial: InboxWorkspaceView }) {
             <Menu aria-hidden="true" size={20} />
           </button>
           <div className="channel-title">
-            <Inbox aria-hidden="true" size={19} />
+            <Bell aria-hidden="true" size={19} />
             <div>
-              <h1>Inbox</h1>
-              <p>Mentions, replies, and items that need your attention</p>
+              <h1>Activity</h1>
+              <p>Recent messages and agent work across your channels</p>
             </div>
           </div>
           <div className="header-actions">
             <ViewRefreshIndicator active={revalidating} />
-            <span className="thread-total">
-              {view.items.length} conversations
-            </span>
+            <span className="thread-total">{view.items.length} updates</span>
           </div>
         </header>
-        <section className="threads-list" aria-label="Inbox conversations">
+        <section className="threads-list" aria-label="Recent activity">
           {view.items.length === 0 ? (
-            <p className="empty-timeline">Your inbox is clear.</p>
+            <div className="empty-timeline">
+              <Bot aria-hidden="true" size={20} />
+              <span>No recent activity.</span>
+            </div>
           ) : (
             view.items.map((item) => (
-              <InboxRow
+              <ActivityRow
                 generatedAt={view.generatedAt}
                 item={item}
-                key={item.conversationId}
+                key={`${item.channel?.id ?? "global"}:${item.conversationId}`}
               />
             ))
           )}

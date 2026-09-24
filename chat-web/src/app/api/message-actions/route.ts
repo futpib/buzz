@@ -1,4 +1,5 @@
 import { assertSameOrigin, getRequestSession } from "@/server/auth";
+import { markActivityViewsStale } from "@/server/activity";
 import { markWorkspaceViewsStale } from "@/server/data";
 import { markInboxViewsStale } from "@/server/inbox";
 import { publishMessageAction } from "@/server/message-actions";
@@ -27,6 +28,7 @@ export async function POST(request: Request): Promise<Response> {
     const id = await publishMessageAction(session, body.event);
     const signedChannel = body.event.tags.find((tag) => tag[0] === "h")?.[1];
     markWorkspaceViewsStale(session, signedChannel ?? body.channelId);
+    markActivityViewsStale(session);
     markInboxViewsStale(session);
     markSearchViewsStale(session);
     markSentViewsStale(session);

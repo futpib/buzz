@@ -1,11 +1,10 @@
 "use client";
 
-import { Menu, MessageSquareText, Search } from "lucide-react";
+import { Menu, MessageSquareText } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import type { ThreadsWorkspaceView } from "@/server/types";
 import { Avatar } from "@/ui/Avatar";
-import { SearchDialog } from "@/ui/SearchDialog";
 import { ViewRefreshIndicator } from "@/ui/ViewRefreshIndicator";
 import { WorkspaceSidebar } from "@/ui/WorkspaceSidebar";
 import { ViewLink } from "@/ui/ViewLink";
@@ -34,7 +33,6 @@ function relativeTime(timestamp: number, now: number): string {
 export function ThreadsShell({ initial }: { initial: ThreadsWorkspaceView }) {
   const [view, setView] = useState(initial);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
-  const [searchOpen, setSearchOpen] = useState(false);
   const [revalidating, setRevalidating] = useState(
     initial.cacheState === "stale",
   );
@@ -118,15 +116,6 @@ export function ThreadsShell({ initial }: { initial: ThreadsWorkspaceView }) {
           <div className="header-actions">
             <ViewRefreshIndicator active={revalidating} />
             <span className="thread-total">{view.threads.length} total</span>
-            <button
-              aria-controls="workspace-search"
-              aria-expanded={searchOpen}
-              aria-label="Search"
-              onClick={() => setSearchOpen(true)}
-              type="button"
-            >
-              <Search aria-hidden="true" size={18} />
-            </button>
           </div>
         </header>
         <nav className="threads-list" aria-label="All threads">
@@ -161,12 +150,6 @@ export function ThreadsShell({ initial }: { initial: ThreadsWorkspaceView }) {
           )}
         </nav>
       </section>
-      {searchOpen ? (
-        <SearchDialog
-          close={() => setSearchOpen(false)}
-          viewerPubkey={view.identity.pubkey}
-        />
-      ) : null}
     </main>
   );
 }

@@ -8,6 +8,7 @@ import {
   LockKeyhole,
   LogOut,
   MessageSquareText,
+  Search,
   Send,
   X,
 } from "lucide-react";
@@ -16,6 +17,7 @@ import { useMemo, useState } from "react";
 import { forgetCredential } from "@/client/identity";
 import type { ChannelView, ProfileView } from "@/server/types";
 import { Avatar } from "@/ui/Avatar";
+import { SearchDialog } from "@/ui/SearchDialog";
 import { ViewLink } from "@/ui/ViewLink";
 
 export function WorkspaceSidebar({
@@ -25,7 +27,7 @@ export function WorkspaceSidebar({
   identity,
   selectedId,
 }: {
-  activePage: "channel" | "inbox" | "sent" | "threads";
+  activePage: "activity" | "channel" | "inbox" | "sent" | "threads";
   channels: ChannelView[];
   close: () => void;
   identity: ProfileView;
@@ -33,6 +35,7 @@ export function WorkspaceSidebar({
 }) {
   const [loggingOut, setLoggingOut] = useState(false);
   const [logoutError, setLogoutError] = useState<string | null>(null);
+  const [searchOpen, setSearchOpen] = useState(false);
   const channelGroups = useMemo(() => {
     const active = channels.filter((channel) => !channel.archived);
     return {
@@ -83,6 +86,14 @@ export function WorkspaceSidebar({
         </button>
       </div>
       <nav className="primary-nav" aria-label="Workspace">
+        <button
+          aria-controls="workspace-search"
+          aria-expanded={searchOpen}
+          onClick={() => setSearchOpen(true)}
+          type="button"
+        >
+          <Search aria-hidden="true" size={18} /> Search
+        </button>
         <ViewLink
           className={activePage === "inbox" ? "primary-nav-active" : undefined}
           href="/inbox"
@@ -109,9 +120,16 @@ export function WorkspaceSidebar({
         >
           <MessageSquareText aria-hidden="true" size={18} /> Threads
         </ViewLink>
-        <button disabled title="Activity is not available yet" type="button">
+        <ViewLink
+          className={
+            activePage === "activity" ? "primary-nav-active" : undefined
+          }
+          href="/activity"
+          onClick={close}
+          prefetchMode="eager"
+        >
           <Bell aria-hidden="true" size={18} /> Activity
-        </button>
+        </ViewLink>
       </nav>
 
       <ChannelGroup
@@ -158,6 +176,12 @@ export function WorkspaceSidebar({
         <p className="sidebar-error" role="alert">
           {logoutError}
         </p>
+      ) : null}
+      {searchOpen ? (
+        <SearchDialog
+          close={() => setSearchOpen(false)}
+          viewerPubkey={identity.pubkey}
+        />
       ) : null}
     </aside>
   );

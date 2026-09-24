@@ -105,6 +105,34 @@ export type InboxWorkspaceView = {
   cacheState: ViewCacheState;
 };
 
+export type ActivityItemKind =
+  | "message"
+  | "forum"
+  | "job_request"
+  | "job_progress"
+  | "job_result";
+
+export type ActivityItemView = {
+  id: string;
+  conversationId: string;
+  channel: ChannelView | null;
+  threadId: string | null;
+  author: ProfileView;
+  content: string;
+  createdAt: number;
+  kind: ActivityItemKind;
+  itemCount: number;
+  isOwn: boolean;
+};
+
+export type ActivityWorkspaceView = {
+  identity: ProfileView;
+  channels: ChannelView[];
+  items: ActivityItemView[];
+  generatedAt: number;
+  cacheState: ViewCacheState;
+};
+
 export type SentItemView = {
   id: string;
   channel: ChannelView;
