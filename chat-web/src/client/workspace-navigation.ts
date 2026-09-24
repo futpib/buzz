@@ -271,6 +271,21 @@ export function navigationUnreadForThread(
   };
 }
 
+export function navigationReadContextsForChannel(
+  snapshot: NavigationSnapshot,
+  channelId: string,
+): Record<string, number> {
+  const readContexts = { ...snapshot.readContexts };
+  for (const candidate of snapshot.candidates) {
+    if (candidate.channelId !== channelId) continue;
+    const key = candidate.rootId
+      ? `thread:${candidate.rootId}`
+      : candidate.channelId;
+    readContexts[key] = Math.max(readContexts[key] ?? 0, candidate.createdAt);
+  }
+  return readContexts;
+}
+
 class NavigationController {
   private listeners = new Set<() => void>();
   private channels: ChannelView[] = [];
@@ -660,18 +675,10 @@ class NavigationController {
   }
 
   markChannelRead(channelId: string) {
-    const latest = this.snapshot.candidates
-      .filter(
-        (candidate) =>
-          candidate.channelId === channelId && candidate.rootId === null,
-      )
-      .at(-1);
-    const readContexts = { ...this.snapshot.readContexts };
-    if (latest)
-      readContexts[channelId] = Math.max(
-        readContexts[channelId] ?? 0,
-        latest.createdAt,
-      );
+    const readContexts = navigationReadContextsForChannel(
+      this.snapshot,
+      channelId,
+    );
     const forcedUnread = { ...this.snapshot.forcedUnread };
     delete forcedUnread[channelId];
     this.commit({ readContexts, forcedUnread });

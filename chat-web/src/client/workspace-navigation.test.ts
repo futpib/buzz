@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   navigationMetaForChannel,
+  navigationReadContextsForChannel,
   type NavigationSnapshot,
   navigationUnreadForThread,
 } from "./workspace-navigation";
@@ -102,4 +103,14 @@ test("channel markers do not swallow unread thread replies", () => {
   assert.equal(channel.unreadCount, 1);
   assert.equal(channel.firstUnreadId, "c".repeat(64));
   assert.equal(thread.unreadCount, 1);
+});
+
+test("marking a channel read advances its roots and every thread", () => {
+  const readContexts = navigationReadContextsForChannel(base, "channel");
+  assert.equal(readContexts.channel, 11);
+  assert.equal(readContexts[`thread:${"a".repeat(64)}`], 12);
+  assert.equal(
+    navigationMetaForChannel({ ...base, readContexts }, "channel").unreadCount,
+    0,
+  );
 });
