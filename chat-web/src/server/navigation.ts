@@ -106,6 +106,22 @@ export async function refreshNavigationWorkspace(
   ).value;
 }
 
+export async function applyNavigationAppDataEvent(
+  session: AuthSession,
+  event: NostrEvent,
+): Promise<NavigationWorkspaceView> {
+  const current = await loadNavigationWorkspace(session);
+  const appDataEvents = [
+    event,
+    ...current.appDataEvents.filter((candidate) => candidate.id !== event.id),
+  ]
+    .sort((a, b) => b.created_at - a.created_at || b.id.localeCompare(a.id))
+    .slice(0, NAVIGATION_APP_DATA_LIMIT);
+  const next = { ...current, appDataEvents, generatedAt: Date.now() };
+  navigationCache.set(session.cacheScope, next);
+  return next;
+}
+
 export function markNavigationViewsStale(session: AuthSession): void {
   navigationCache.markStale((key) => key === session.cacheScope);
 }

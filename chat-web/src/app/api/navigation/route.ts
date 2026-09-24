@@ -1,7 +1,7 @@
 import { assertSameOrigin, getRequestSession } from "@/server/auth";
 import {
+  applyNavigationAppDataEvent,
   loadNavigationWorkspace,
-  markNavigationViewsStale,
   refreshNavigationWorkspace,
 } from "@/server/navigation";
 import { validateNavigationAppDataEvent } from "@/server/navigation-validation";
@@ -66,7 +66,7 @@ export async function POST(request: Request): Promise<Response> {
     const event = JSON.parse(raw) as NostrEvent;
     validateNavigationAppDataEvent(session.pubkey, event);
     await publishPreferenceWithRetry(session, event);
-    markNavigationViewsStale(session);
+    await applyNavigationAppDataEvent(session, event);
     return Response.json({ id: event.id });
   } catch (error) {
     return Response.json(

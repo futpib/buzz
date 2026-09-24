@@ -1,6 +1,7 @@
 import { getRequestSession } from "@/server/auth";
 import { loadWorkspaceIndex } from "@/server/data";
 import {
+  applyNavigationAppDataEvent,
   markNavigationViewsStale,
   NAVIGATION_APP_DATA_KIND,
   NAVIGATION_MESSAGE_KINDS,
@@ -45,6 +46,20 @@ export async function GET(request: Request): Promise<Response> {
         liveEvent: NostrEvent | null = null,
         retry = 0,
       ) => {
+        if (liveEvent?.kind === NAVIGATION_APP_DATA_KIND) {
+          try {
+            current = await applyNavigationAppDataEvent(session, liveEvent);
+            emit("snapshot", current);
+            emit("status", { state: "live" });
+          } catch (error) {
+            emit("status", {
+              state: "degraded",
+              message:
+                error instanceof Error ? error.message : "refresh failed",
+            });
+          }
+          return;
+        }
         if (refreshInFlight) {
           refreshPending = true;
           if (liveEvent) pendingLiveEvent = liveEvent;
