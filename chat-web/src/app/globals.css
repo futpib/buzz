@@ -1,3 +1,5 @@
+@import "photoswipe/style.css";
+
 :root {
   color-scheme: light dark;
   --bg: #fff;
@@ -806,38 +808,73 @@ a {
   text-align: center;
 }
 
-.image-lightbox-viewport {
+.image-lightbox-loading {
   display: flex;
-  min-width: 0;
-  min-height: 0;
-  overflow: auto;
-  overscroll-behavior: contain;
-  touch-action: none;
+  align-items: center;
+  align-self: center;
+  justify-self: center;
+  gap: 8px;
+  color: #d6d7dc;
+  font-size: 13px;
 }
 
-.image-lightbox-viewport-zoomed {
-  cursor: grab;
+.pswp {
+  --pswp-bg: #08090c;
 }
 
-.image-lightbox-viewport-zoomed:active {
-  cursor: grabbing;
+.pswp__top-bar {
+  gap: 6px;
+  padding: max(14px, env(safe-area-inset-top))
+    max(14px, env(safe-area-inset-right)) 0 max(14px, env(safe-area-inset-left));
 }
 
-.image-lightbox-viewport img {
-  display: block;
-  flex: none;
-  width: auto;
-  max-width: 100%;
-  height: auto;
-  max-height: 100%;
-  margin: auto;
-  object-fit: contain;
-  user-select: none;
+.pswp__button--buzz-zoom-out,
+.pswp__button--buzz-zoom-in,
+.pswp__button--buzz-reset,
+.pswp__button--buzz-close {
+  display: inline-flex;
+  width: 42px;
+  height: 42px;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid rgb(255 255 255 / 16%);
+  border-radius: 10px;
+  background: rgb(255 255 255 / 10%);
+  color: #fff;
 }
 
-.image-lightbox-viewport .image-lightbox-zoomed {
-  max-width: none;
-  max-height: none;
+.pswp__button--buzz-zoom-out:disabled,
+.pswp__button--buzz-zoom-in:disabled,
+.pswp__button--buzz-reset:disabled {
+  opacity: 0.35;
+}
+
+.pswp__button--buzz-zoom-out svg,
+.pswp__button--buzz-zoom-in svg,
+.pswp__button--buzz-reset svg,
+.pswp__button--buzz-close svg {
+  width: 21px;
+  height: 21px;
+  fill: none;
+  stroke: currentcolor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2;
+}
+
+.pswp__buzz-zoom {
+  display: inline-flex;
+  min-width: 48px;
+  height: 42px;
+  align-items: center;
+  justify-content: center;
+  color: #d6d7dc;
+  font-size: 12px;
+  pointer-events: none;
+}
+
+.pswp__img {
+  -webkit-user-drag: none;
 }
 
 .message-image-state {
