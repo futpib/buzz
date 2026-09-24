@@ -12,6 +12,7 @@ import { createPortal } from "react-dom";
 
 import {
   focalScrollDelta,
+  focalTranslationDelta,
   type ZoomPoint,
   zoomFromPinch,
   zoomPointDistance,
@@ -21,6 +22,7 @@ import {
 const MIN_ZOOM = 1;
 const MAX_ZOOM = 4;
 const ZOOM_STEP = 0.5;
+const EDGE_SETTLE_MS = 180;
 
 type PinchState = {
   startDistance: number;
@@ -58,12 +60,42 @@ export function ImageLightbox({
   const pinch = useRef<PinchState | null>(null);
   const pendingFocalPoint = useRef<PendingFocalPoint | null>(null);
   const focalFrame = useRef<number | null>(null);
+  const settleFrame = useRef<number | null>(null);
+  const settleDelayTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const settleAnimationTimer = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
+  const imageOffset = useRef<ZoomPoint>({ x: 0, y: 0 });
+
+  const cancelOffsetAnimation = useCallback(() => {
+    if (settleFrame.current !== null) {
+      cancelAnimationFrame(settleFrame.current);
+      settleFrame.current = null;
+    }
+    if (settleAnimationTimer.current !== null) {
+      clearTimeout(settleAnimationTimer.current);
+      settleAnimationTimer.current = null;
+    }
+    const image = imageRef.current;
+    if (image) image.style.transition = "none";
+  }, []);
+
+  const cancelOffsetSettle = useCallback(() => {
+    cancelOffsetAnimation();
+    if (settleDelayTimer.current !== null) {
+      clearTimeout(settleDelayTimer.current);
+      settleDelayTimer.current = null;
+    }
+  }, [cancelOffsetAnimation]);
 
   const adjustFocalPoint = useCallback(() => {
     const pending = pendingFocalPoint.current;
     const viewport = viewportRef.current;
     const image = imageRef.current;
     if (!pending || !viewport || !image) return;
+    cancelOffsetAnimation();
+    image.style.transform = "";
+    imageOffset.current = { x: 0, y: 0 };
     const delta = focalScrollDelta(
       image.getBoundingClientRect(),
       pending.anchor,
@@ -71,9 +103,72 @@ export function ImageLightbox({
     );
     viewport.scrollLeft += delta.x;
     viewport.scrollTop += delta.y;
+    const translation = focalTranslationDelta(
+      image.getBoundingClientRect(),
+      pending.anchor,
+      pending.target,
+    );
+    if (Math.abs(translation.x) > 0.01 || Math.abs(translation.y) > 0.01) {
+      image.style.transform = `translate3d(${translation.x}px, ${translation.y}px, 0)`;
+      imageOffset.current = translation;
+    }
     pendingFocalPoint.current = null;
     focalFrame.current = null;
-  }, []);
+  }, [cancelOffsetAnimation]);
+
+  const settleImageOffset = useCallback(
+    (delay = 0) => {
+      cancelOffsetAnimation();
+      if (settleDelayTimer.current !== null) {
+        clearTimeout(settleDelayTimer.current);
+        settleDelayTimer.current = null;
+      }
+      const settle = () => {
+        settleDelayTimer.current = null;
+        settleFrame.current = requestAnimationFrame(() => {
+          settleFrame.current = null;
+          const viewport = viewportRef.current;
+          const image = imageRef.current;
+          const offset = imageOffset.current;
+          if (
+            !viewport ||
+            !image ||
+            (Math.abs(offset.x) <= 0.01 && Math.abs(offset.y) <= 0.01)
+          ) {
+            return;
+          }
+
+          const visualRect = image.getBoundingClientRect();
+          image.style.transition = "none";
+          image.style.transform = "";
+          viewport.scrollLeft -= offset.x;
+          viewport.scrollTop -= offset.y;
+          imageOffset.current = { x: 0, y: 0 };
+
+          const settledRect = image.getBoundingClientRect();
+          const rebound = {
+            x: visualRect.left - settledRect.left,
+            y: visualRect.top - settledRect.top,
+          };
+          if (Math.abs(rebound.x) <= 0.01 && Math.abs(rebound.y) <= 0.01) {
+            return;
+          }
+
+          image.style.transform = `translate3d(${rebound.x}px, ${rebound.y}px, 0)`;
+          image.getBoundingClientRect();
+          image.style.transition = `transform ${EDGE_SETTLE_MS}ms cubic-bezier(0.22, 1, 0.36, 1)`;
+          image.style.transform = "";
+          settleAnimationTimer.current = setTimeout(() => {
+            image.style.transition = "none";
+            settleAnimationTimer.current = null;
+          }, EDGE_SETTLE_MS);
+        });
+      };
+      if (delay > 0) settleDelayTimer.current = setTimeout(settle, delay);
+      else settle();
+    },
+    [cancelOffsetAnimation],
+  );
 
   const setZoomAtPoint = useCallback(
     (nextZoom: number, target: ZoomPoint) => {
@@ -136,9 +231,16 @@ export function ImageLightbox({
   };
 
   useLayoutEffect(() => {
+    const hadPendingFocalPoint = pendingFocalPoint.current !== null;
     renderedZoomRef.current = zoom;
     adjustFocalPoint();
-    if (zoom === MIN_ZOOM && !pendingFocalPoint.current) {
+    if (
+      zoom === MIN_ZOOM &&
+      !hadPendingFocalPoint &&
+      pointers.current.size === 0
+    ) {
+      imageRef.current?.style.removeProperty("transform");
+      imageOffset.current = { x: 0, y: 0 };
       viewportRef.current?.scrollTo({ left: 0, top: 0 });
     }
   }, [adjustFocalPoint, zoom]);
@@ -160,8 +262,9 @@ export function ImageLightbox({
       document.body.style.overflow = previousOverflow;
       window.removeEventListener("keydown", onKeyDown);
       if (focalFrame.current !== null) cancelAnimationFrame(focalFrame.current);
+      cancelOffsetSettle();
     };
-  }, [close, zoomAroundViewportCenter]);
+  }, [cancelOffsetSettle, close, zoomAroundViewportCenter]);
 
   return createPortal(
     <div
@@ -213,10 +316,12 @@ export function ImageLightbox({
           pointers.current.delete(event.pointerId);
           pinch.current = null;
           panPoint.current = null;
+          if (pointers.current.size === 0) settleImageOffset();
         }}
         onPointerDown={(event) => {
           if (event.pointerType === "mouse" && event.button !== 0) return;
           event.preventDefault();
+          cancelOffsetSettle();
           event.currentTarget.setPointerCapture(event.pointerId);
           const point = { x: event.clientX, y: event.clientY };
           pointers.current.set(event.pointerId, point);
@@ -276,6 +381,7 @@ export function ImageLightbox({
           const remaining = [...pointers.current.values()];
           panPoint.current = remaining.length === 1 ? remaining[0] : null;
           if (remaining.length >= 2) beginPinch();
+          else if (remaining.length === 0) settleImageOffset();
         }}
         onWheel={(event) => {
           if (!event.ctrlKey) return;
@@ -284,6 +390,7 @@ export function ImageLightbox({
             x: event.clientX,
             y: event.clientY,
           });
+          settleImageOffset(140);
         }}
         ref={viewportRef}
       >

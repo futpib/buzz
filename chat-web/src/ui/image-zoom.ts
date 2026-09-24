@@ -42,3 +42,16 @@ export function focalScrollDelta(
     y: imageRect.top + imageRect.height * anchor.y - target.y,
   };
 }
+
+/**
+ * Computes the visual translation needed when a scroll container cannot apply
+ * all of the focal correction because it has reached an edge.
+ */
+export function focalTranslationDelta(
+  imageRect: Pick<DOMRect, "left" | "top" | "width" | "height">,
+  anchor: ZoomPoint,
+  target: ZoomPoint,
+): ZoomPoint {
+  const delta = focalScrollDelta(imageRect, anchor, target);
+  return { x: -delta.x, y: -delta.y };
+}

@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   focalScrollDelta,
+  focalTranslationDelta,
   zoomFromPinch,
   zoomPointDistance,
   zoomPointMidpoint,
@@ -31,5 +32,16 @@ test("focal scroll correction holds the requested image point in place", () => {
       { x: 200, y: 100 },
     ),
     { x: 80, y: -30 },
+  );
+});
+
+test("focal translation supplies the correction left over at a scroll edge", () => {
+  assert.deepEqual(
+    focalTranslationDelta(
+      { left: 25, top: 68, width: 377, height: 846 },
+      { x: 0.5, y: 0.5 },
+      { x: 275, y: 449 },
+    ),
+    { x: 61.5, y: -42 },
   );
 });

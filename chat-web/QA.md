@@ -112,9 +112,11 @@ the browser. A pass is not complete until it covers the checks below.
   attachments; DOM presence or image dimensions alone are insufficient.
 - Open a real protected attachment with trusted input, exercise toolbar zoom
   and drag/pan, then use a trusted two-contact pinch at phone size. Require the
-  image point beneath the gesture midpoint to remain stable, zoom to stay
-  within 100-400%, one-contact pan to remain usable afterward, and a return to
-  100% to reset scroll position. Close it with Escape without page overflow.
+  image point beneath the moving gesture midpoint to remain stable even while
+  the image is too close to 100% zoom for scroll to absorb the translation,
+  zoom to stay within 100-400%, one-contact pan to remain usable afterward, and
+  a return to 100% to reset scroll position. Close it with Escape without page
+  overflow.
 
 Temporary messages created by QA must be deleted, and their disappearance must
 be observed in both the live timeline and search before the pass is reported.
