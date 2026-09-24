@@ -12,7 +12,11 @@ export const NAVIGATION_MESSAGE_KINDS = [
 ];
 export const NAVIGATION_APP_DATA_KIND = 30_078;
 export const NAVIGATION_HORIZON_SECONDS = 7 * 24 * 60 * 60;
-const NAVIGATION_EVENT_LIMIT = 5_000;
+// This projection runs on every workspace surface. Keep the cold relay query
+// bounded to a recent window that can complete inside the relay request
+// timeout; live delivery and encrypted read markers carry it forward from
+// there.
+const NAVIGATION_EVENT_LIMIT = 500;
 const NAVIGATION_APP_DATA_LIMIT = 500;
 const NAVIGATION_STALE_AFTER_MS = 5_000;
 
