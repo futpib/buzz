@@ -3,11 +3,8 @@ export const THREAD_PANEL_WIDTH_STORAGE_KEY = "buzz.thread-panel-width.v1";
 const NARROW_DESKTOP_BREAKPOINT = 1_050;
 const WIDE_SIDEBAR_WIDTH = 244;
 const NARROW_SIDEBAR_WIDTH = 220;
-const WIDE_CHANNEL_MIN_WIDTH = 430;
-const NARROW_CHANNEL_MIN_WIDTH = 300;
 const WIDE_THREAD_MIN_WIDTH = 340;
 const NARROW_THREAD_MIN_WIDTH = 300;
-const THREAD_MAX_WIDTH = 720;
 
 export type ThreadPanelWidthBounds = {
   min: number;
@@ -21,12 +18,11 @@ export function threadPanelWidthBounds(
   const min = narrow ? NARROW_THREAD_MIN_WIDTH : WIDE_THREAD_MIN_WIDTH;
   const available =
     Math.floor(viewportWidth) -
-    (narrow ? NARROW_SIDEBAR_WIDTH : WIDE_SIDEBAR_WIDTH) -
-    (narrow ? NARROW_CHANNEL_MIN_WIDTH : WIDE_CHANNEL_MIN_WIDTH);
+    (narrow ? NARROW_SIDEBAR_WIDTH : WIDE_SIDEBAR_WIDTH);
 
   return {
     min,
-    max: Math.max(min, Math.min(THREAD_MAX_WIDTH, available)),
+    max: Math.max(min, available),
   };
 }
 

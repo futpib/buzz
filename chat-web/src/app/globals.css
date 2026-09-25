@@ -77,10 +77,7 @@ a {
 }
 
 .workspace.workspace-thread-open {
-  grid-template-columns: 244px minmax(430px, 1fr) var(
-      --thread-panel-width,
-      410px
-    );
+  grid-template-columns: 244px minmax(0, 1fr) var(--thread-panel-width, 410px);
 }
 
 .sidebar {

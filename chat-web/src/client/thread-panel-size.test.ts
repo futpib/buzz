@@ -10,21 +10,23 @@ import {
   writeThreadPanelWidth,
 } from "./thread-panel-size";
 
-test("thread panel bounds preserve usable channel space across desktop widths", () => {
-  assert.deepEqual(threadPanelWidthBounds(1_440), { min: 340, max: 720 });
-  assert.deepEqual(threadPanelWidthBounds(1_200), { min: 340, max: 526 });
-  assert.deepEqual(threadPanelWidthBounds(1_050), { min: 300, max: 530 });
-  assert.deepEqual(threadPanelWidthBounds(821), { min: 300, max: 301 });
+test("thread panel has no fixed maximum within the desktop workspace", () => {
+  assert.deepEqual(threadPanelWidthBounds(3_840), { min: 340, max: 3_596 });
+  assert.deepEqual(threadPanelWidthBounds(1_440), { min: 340, max: 1_196 });
+  assert.deepEqual(threadPanelWidthBounds(1_200), { min: 340, max: 956 });
+  assert.deepEqual(threadPanelWidthBounds(1_050), { min: 300, max: 830 });
+  assert.deepEqual(threadPanelWidthBounds(821), { min: 300, max: 601 });
 
   assert.equal(defaultThreadPanelWidth(1_440), 410);
   assert.equal(defaultThreadPanelWidth(1_000), 350);
-  assert.equal(defaultThreadPanelWidth(821), 301);
+  assert.equal(defaultThreadPanelWidth(821), 350);
 });
 
 test("thread panel width clamps invalid and out-of-range values", () => {
   assert.equal(clampThreadPanelWidth(200, 1_440), 340);
   assert.equal(clampThreadPanelWidth(512.4, 1_440), 512);
-  assert.equal(clampThreadPanelWidth(900, 1_440), 720);
+  assert.equal(clampThreadPanelWidth(900, 1_440), 900);
+  assert.equal(clampThreadPanelWidth(2_000, 1_440), 1_196);
   assert.equal(clampThreadPanelWidth(Number.NaN, 1_440), 340);
 });
 
