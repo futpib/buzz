@@ -9,6 +9,10 @@ import {
   makeMediaGetAuthEvent,
 } from "@/client/identity";
 import { ImageLightbox } from "@/ui/ImageLightbox";
+import {
+  collectImageGallery,
+  type ImageGallerySelection,
+} from "@/ui/image-gallery";
 
 const RELAY_MEDIA_PATH =
   /^\/media\/[0-9a-f]{64}(?:\.[a-z0-9]{1,8}|\.thumb\.jpg)?$/;
@@ -71,7 +75,12 @@ export function AuthenticatedImage({
   const targetHost = target?.host ?? null;
   const [objectUrl, setObjectUrl] = useState<string | null>(null);
   const [failed, setFailed] = useState(false);
-  const [viewerOpen, setViewerOpen] = useState(false);
+  const [gallery, setGallery] = useState<ImageGallerySelection | null>(null);
+
+  const openViewer = (trigger: HTMLButtonElement) => {
+    const selection = collectImageGallery(trigger);
+    if (selection.items.length > 0) setGallery(selection);
+  };
 
   useEffect(() => {
     if (!targetHref || !targetHost) return;
@@ -116,17 +125,16 @@ export function AuthenticatedImage({
         <button
           aria-label={`Open image viewer${alt ? `: ${alt}` : ""}`}
           className="message-media-trigger"
-          onClick={() => setViewerOpen(true)}
+          onClick={(event) => openViewer(event.currentTarget)}
           type="button"
         >
           {image}
         </button>
-        {viewerOpen ? (
+        {gallery ? (
           <ImageLightbox
-            alt={alt}
-            close={() => setViewerOpen(false)}
-            src={src}
-            title={title}
+            close={() => setGallery(null)}
+            index={gallery.index}
+            items={gallery.items}
           />
         ) : null}
       </>
@@ -167,17 +175,16 @@ export function AuthenticatedImage({
       <button
         aria-label={`Open image viewer${alt ? `: ${alt}` : ""}`}
         className="message-media-trigger"
-        onClick={() => setViewerOpen(true)}
+        onClick={(event) => openViewer(event.currentTarget)}
         type="button"
       >
         {image}
       </button>
-      {viewerOpen ? (
+      {gallery ? (
         <ImageLightbox
-          alt={alt}
-          close={() => setViewerOpen(false)}
-          src={objectUrl}
-          title={title}
+          close={() => setGallery(null)}
+          index={gallery.index}
+          items={gallery.items}
         />
       ) : null}
     </>

@@ -660,6 +660,7 @@ export function WorkspaceShell({
 
         <div
           className="timeline"
+          data-image-gallery
           onScroll={(event) => {
             const scroller = event.currentTarget;
             timelinePinnedToBottom.current =
@@ -838,7 +839,11 @@ export function WorkspaceShell({
             }}
             ref={threadScroller}
           >
-            <div className="thread-messages-content" ref={threadContent}>
+            <div
+              className="thread-messages-content"
+              data-image-gallery
+              ref={threadContent}
+            >
               {thread.root ? (
                 <MessageRow
                   channelId={initial.selectedChannel.id}

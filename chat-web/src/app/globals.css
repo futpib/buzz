@@ -1025,6 +1025,25 @@ a {
   pointer-events: none;
 }
 
+.pswp__button--arrow {
+  width: 52px;
+  height: 64px;
+  border: 1px solid rgb(255 255 255 / 16%);
+  border-radius: 12px;
+  background: rgb(8 9 12 / 52%);
+}
+
+.pswp--touch .pswp__button--arrow {
+  visibility: visible;
+}
+
+.pswp__counter {
+  padding-inline: 9px;
+  border-radius: 8px;
+  background: rgb(8 9 12 / 58%);
+  text-shadow: none;
+}
+
 .pswp__img {
   -webkit-user-drag: none;
 }

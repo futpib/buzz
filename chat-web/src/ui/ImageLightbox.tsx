@@ -5,6 +5,8 @@ import PhotoSwipe from "photoswipe";
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
+import type { ImageGalleryItem } from "@/ui/image-gallery";
+
 const MIN_ZOOM_PERCENT = 100;
 const MAX_ZOOM_MULTIPLIER = 4;
 const ZOOM_STEP_MULTIPLIER = 0.5;
@@ -24,6 +26,36 @@ type ImageSize = {
   width: number;
   height: number;
 };
+
+type ResolvedImage = ImageGalleryItem & ImageSize & { sourceIndex: number };
+
+function resolveImage(item: ImageGalleryItem, sourceIndex: number) {
+  if (item.width && item.height) {
+    return Promise.resolve<ResolvedImage>({
+      ...item,
+      height: item.height,
+      sourceIndex,
+      width: item.width,
+    });
+  }
+  return new Promise<ResolvedImage>((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => {
+      if (image.naturalWidth > 0 && image.naturalHeight > 0) {
+        resolve({
+          ...item,
+          height: image.naturalHeight,
+          sourceIndex,
+          width: image.naturalWidth,
+        });
+      } else {
+        reject(new Error("Image has no dimensions"));
+      }
+    };
+    image.onerror = () => reject(new Error("Image failed to load"));
+    image.src = item.src;
+  });
+}
 
 function zoomRatio(viewer: PhotoSwipe): number {
   const slide = viewer.currSlide;
@@ -57,75 +89,74 @@ function resetZoom(viewer: PhotoSwipe) {
 }
 
 export function ImageLightbox({
-  alt,
   close,
-  src,
-  title,
+  index,
+  items,
 }: {
-  alt: string;
   close: () => void;
-  src: string;
-  title?: string;
+  index: number;
+  items: ImageGalleryItem[];
 }) {
-  const [imageSize, setImageSize] = useState<ImageSize | null>(null);
+  const [images, setImages] = useState<ResolvedImage[] | null>(null);
   const [launched, setLaunched] = useState(false);
   const closeRef = useRef(close);
   closeRef.current = close;
 
   useEffect(() => {
-    if (imageSize) return;
     let active = true;
-    const image = new Image();
-    image.onload = () => {
-      if (active && image.naturalWidth > 0 && image.naturalHeight > 0) {
-        setImageSize({
-          height: image.naturalHeight,
-          width: image.naturalWidth,
-        });
+    void Promise.all(
+      items.map((item, sourceIndex) =>
+        resolveImage(item, sourceIndex).catch(() => null),
+      ),
+    ).then((resolved) => {
+      if (!active) return;
+      const available = resolved.filter(
+        (item): item is ResolvedImage => item !== null,
+      );
+      if (!available.some((item) => item.sourceIndex === index)) {
+        closeRef.current();
+        return;
       }
-    };
-    image.onerror = () => {
-      if (active) closeRef.current();
-    };
-    image.src = src;
+      setImages(available);
+    });
     return () => {
       active = false;
-      image.onload = null;
-      image.onerror = null;
     };
-  }, [imageSize, src]);
+  }, [index, items]);
 
   useEffect(() => {
-    if (!imageSize) return;
+    if (!images) return;
     let active = true;
     let zoomOutput: HTMLElement | null = null;
     let zoomOutButton: HTMLButtonElement | null = null;
     let zoomInButton: HTMLButtonElement | null = null;
     let resetButton: HTMLButtonElement | null = null;
 
+    const initialIndex = images.findIndex(
+      (image) => image.sourceIndex === index,
+    );
     const viewer = new PhotoSwipe({
-      allowPanToNext: false,
-      arrowKeys: false,
-      arrowNext: false,
-      arrowPrev: false,
+      allowPanToNext: true,
+      arrowKeys: true,
+      arrowNext: true,
+      arrowPrev: true,
       bgClickAction: "close",
       bgOpacity: 0.96,
       clickToCloseNonZoomable: false,
       close: false,
       closeOnVerticalDrag: false,
-      counter: false,
-      dataSource: [
-        {
-          alt,
-          height: imageSize.height,
-          src,
-          width: imageSize.width,
-        },
-      ],
+      counter: true,
+      dataSource: images.map((image) => ({
+        alt: image.alt,
+        height: image.height,
+        src: image.src,
+        title: image.title,
+        width: image.width,
+      })),
       doubleTapAction: "zoom",
       escKey: true,
       imageClickAction: false,
-      index: 0,
+      index: initialIndex,
       initialZoomLevel: "fit",
       loop: false,
       maxZoomLevel: (levels) => levels.fit * MAX_ZOOM_MULTIPLIER,
@@ -154,6 +185,15 @@ export function ImageLightbox({
       if (zoomOutButton) zoomOutButton.disabled = atMinimum;
       if (zoomInButton) zoomInButton.disabled = atMaximum;
       if (resetButton) resetButton.disabled = atMinimum;
+    };
+
+    const updateViewerLabel = () => {
+      const current = images[viewer.currIndex];
+      const alt = current?.alt ?? "";
+      viewer.element?.setAttribute(
+        "aria-label",
+        alt ? `Image viewer: ${alt}` : "Image viewer",
+      );
     };
 
     viewer.on("uiRegister", () => {
@@ -219,16 +259,18 @@ export function ImageLightbox({
       });
     });
     viewer.on("afterInit", () => {
-      viewer.element?.setAttribute(
-        "aria-label",
-        alt ? `Image viewer: ${alt}` : "Image viewer",
-      );
+      updateViewerLabel();
       updateControls();
     });
     viewer.on("contentAppendImage", ({ content }) => {
+      const title = images[content.index]?.title;
       if (title && content.element instanceof HTMLImageElement) {
         content.element.title = title;
       }
+    });
+    viewer.on("change", () => {
+      updateViewerLabel();
+      updateControls();
     });
     viewer.on("keydown", (event) => {
       const keyboardEvent = event.originalEvent;
@@ -264,12 +306,12 @@ export function ImageLightbox({
       active = false;
       if (!viewer.isDestroying) viewer.destroy();
     };
-  }, [alt, imageSize, src, title]);
+  }, [images, index]);
 
   if (launched) return null;
   return createPortal(
     <div
-      aria-label={alt ? `Image viewer: ${alt}` : "Image viewer"}
+      aria-label="Image viewer"
       aria-modal="true"
       className="image-lightbox"
       role="dialog"
