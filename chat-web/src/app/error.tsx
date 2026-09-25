@@ -1,6 +1,14 @@
 "use client";
 
+import { useEffect } from "react";
+
+import { browserTitle, PAGE_TITLES } from "@/shared/page-title";
+
 export default function ErrorPage({ reset }: { reset: () => void }) {
+  useEffect(() => {
+    document.title = browserTitle(PAGE_TITLES.error);
+  }, []);
+
   return (
     <main className="centered-state">
       <div className="state-mark">!</div>

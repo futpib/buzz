@@ -1,7 +1,13 @@
+import type { Metadata } from "next";
 import { notFound } from "next/navigation";
 
 import { requireSession } from "@/server/auth";
-import { loadWorkspace, UnknownChannelError } from "@/server/data";
+import {
+  loadWorkspace,
+  loadWorkspaceIndex,
+  UnknownChannelError,
+} from "@/server/data";
+import { channelPageTitle, PAGE_TITLES } from "@/shared/page-title";
 import { WorkspaceShell } from "@/ui/WorkspaceShell";
 
 export const dynamic = "force-dynamic";
@@ -13,6 +19,24 @@ type PageProps = {
     message?: string | string[];
   }>;
 };
+
+export async function generateMetadata({
+  params,
+  searchParams,
+}: PageProps): Promise<Metadata> {
+  const [{ channelId }, query, session] = await Promise.all([
+    params,
+    searchParams,
+    requireSession(),
+  ]);
+  const { channels } = await loadWorkspaceIndex(session);
+  const channel = channels.find((candidate) => candidate.id === channelId);
+  return {
+    title: channel
+      ? channelPageTitle(channel, typeof query.thread === "string")
+      : PAGE_TITLES.notFound,
+  };
+}
 
 export default async function ChannelPage({ params, searchParams }: PageProps) {
   const { channelId } = await params;

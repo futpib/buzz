@@ -1,10 +1,13 @@
+import type { Metadata } from "next";
 import { redirect } from "next/navigation";
 
 import { getCurrentSession } from "@/server/auth";
 import { getPairingRelayUrl } from "@/server/env";
+import { PAGE_TITLES } from "@/shared/page-title";
 import { LoginForm } from "@/ui/LoginForm";
 
 export const dynamic = "force-dynamic";
+export const metadata: Metadata = { title: PAGE_TITLES.login };
 
 type LoginPageProps = {
   searchParams: Promise<{ next?: string | string[] }>;

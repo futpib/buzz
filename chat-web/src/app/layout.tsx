@@ -1,9 +1,14 @@
 import type { Metadata, Viewport } from "next";
 
+import { BUZZ_TITLE, BUZZ_TITLE_TEMPLATE } from "@/shared/page-title";
+
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Buzz",
+  title: {
+    default: BUZZ_TITLE,
+    template: BUZZ_TITLE_TEMPLATE,
+  },
   description: "Server-rendered Buzz messaging",
 };
 
