@@ -29,6 +29,7 @@ const message = (pubkey: string, createdAt: number): MessageView => ({
 });
 
 const snapshot = (timeline: MessageView[]): ChannelSnapshot => ({
+  pins: [],
   selectedChannel: {
     id: "00000000-0000-4000-8000-000000000001",
     name: "general",

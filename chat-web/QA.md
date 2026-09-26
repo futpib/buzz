@@ -120,3 +120,15 @@ the browser. A pass is not complete until it covers the checks below.
 
 Temporary messages created by QA must be deleted, and their disappearance must
 be observed in both the live timeline and search before the pass is reported.
+
+## Catch-up and pins
+
+- Open an old linked reply in a quiet channel; require an authoritative live
+  snapshot after catch-up even if no events replay in the recent subscription
+  window. Deliver a stale snapshot without the target followed by a fresh one:
+  the target must appear and center. Scroll away and deliver another snapshot;
+  it must not recenter the reader.
+- Pin a real older message through its action menu, reload, open the channel's
+  pinned-message dialog, and follow its exact branch/target link. Repeat at
+  390x844, checking dialog bounds and 44px Open controls. Remove the test pin,
+  reload, and verify removal persists. Other members' pins must remain intact.

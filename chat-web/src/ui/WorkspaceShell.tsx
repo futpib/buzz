@@ -46,6 +46,7 @@ import type {
   WorkspaceView,
 } from "@/server/types";
 import { Composer } from "@/ui/Composer";
+import { ChannelPinsContext, PinnedMessages } from "@/ui/PinnedMessages";
 import { MessageRow } from "@/ui/MessageRow";
 import type { TypingParticipant } from "@/ui/TypingIndicator";
 import { ViewRefreshIndicator } from "@/ui/ViewRefreshIndicator";
@@ -64,6 +65,7 @@ export function WorkspaceShell({
   targetMessageId?: string | null;
 }) {
   const router = useRouter();
+  const [pins, setPins] = useState(initial.pins);
   const [timeline, setTimeline] = useState(initial.timeline);
   const [thread, setThread] = useState(initial.thread);
   const [liveState, setLiveState] = useState<LiveState>("connecting");
@@ -135,6 +137,7 @@ export function WorkspaceShell({
   }, []);
 
   useEffect(() => {
+    setPins(initial.pins);
     setTimeline(initial.timeline);
     setOlderTimeline([]);
     setTimelineHasMore(initial.timelineHasMore);
@@ -207,6 +210,7 @@ export function WorkspaceShell({
       const snapshot = JSON.parse(
         (event as MessageEvent<string>).data,
       ) as ChannelSnapshot;
+      setPins(snapshot.pins);
       setTimeline(snapshot.timeline);
       if (!historyLoaded.current) {
         setTimelineHasMore(snapshot.timelineHasMore);
@@ -229,7 +233,18 @@ export function WorkspaceShell({
       const status = JSON.parse((event as MessageEvent<string>).data) as {
         state?: string;
       };
-      if (status.state === "degraded") setRevalidating(false);
+      if (status.state === "degraded") {
+        setRevalidating(false);
+        setLiveState("reconnecting");
+      } else if (
+        status.state === "refreshing" ||
+        status.state === "connecting"
+      ) {
+        setRevalidating(true);
+      } else if (status.state === "live") {
+        setRevalidating(false);
+        setLiveState("live");
+      }
     });
     return () => source.close();
   }, [initial.identity.pubkey, initial.selectedChannel.id, rootId]);
@@ -485,15 +500,22 @@ export function WorkspaceShell({
     timelineHasMore,
   ]);
 
+  const targetInThread = Boolean(
+    targetMessageId &&
+      (thread?.root?.id === targetMessageId ||
+        thread?.replies.some((message) => message.id === targetMessageId)),
+  );
+
   useEffect(() => {
     const scroller = threadScroller.current;
     const content = threadContent.current;
     if (!openThreadId || !scroller || !content) return;
-    const target = targetMessageId
-      ? content.querySelector<HTMLElement>(
-          `[data-message-id="${targetMessageId}"]`,
-        )
-      : null;
+    const target =
+      targetInThread && targetMessageId
+        ? content.querySelector<HTMLElement>(
+            `[data-message-id="${targetMessageId}"]`,
+          )
+        : null;
     if (target) {
       const frame = requestAnimationFrame(() => {
         target.scrollIntoView({ block: "center" });
@@ -518,7 +540,7 @@ export function WorkspaceShell({
       contentObserver.disconnect();
       scrollerObserver.disconnect();
     };
-  }, [openThreadId, targetMessageId]);
+  }, [openThreadId, targetMessageId, targetInThread]);
 
   const targetInTimeline = renderedTimeline.some(
     (message) => message.id === targetMessageId,
@@ -589,313 +611,139 @@ export function WorkspaceShell({
   );
 
   return (
-    <main
-      className={`${thread ? "workspace workspace-thread-open" : "workspace"}${mobileNavOpen ? " mobile-nav-open" : ""}${threadPanelResizing ? " workspace-thread-resizing" : ""}`}
-      data-cache-state={initial.cacheState}
-      style={workspaceStyle}
-    >
-      <button
-        aria-label="Dismiss channel navigation"
-        className="mobile-nav-backdrop"
-        onClick={() => setMobileNavOpen(false)}
-        type="button"
-      />
-      <WorkspaceSidebar
-        activePage="channel"
-        channels={initial.channels}
-        close={() => setMobileNavOpen(false)}
-        identity={initial.identity}
-        selectedId={initial.selectedChannel.id}
-      />
+    <ChannelPinsContext.Provider value={pins}>
+      <main
+        className={`${thread ? "workspace workspace-thread-open" : "workspace"}${mobileNavOpen ? " mobile-nav-open" : ""}${threadPanelResizing ? " workspace-thread-resizing" : ""}`}
+        data-cache-state={initial.cacheState}
+        style={workspaceStyle}
+      >
+        <button
+          aria-label="Dismiss channel navigation"
+          className="mobile-nav-backdrop"
+          onClick={() => setMobileNavOpen(false)}
+          type="button"
+        />
+        <WorkspaceSidebar
+          activePage="channel"
+          channels={initial.channels}
+          close={() => setMobileNavOpen(false)}
+          identity={initial.identity}
+          selectedId={initial.selectedChannel.id}
+        />
 
-      <section className="channel-panel">
-        <header className="channel-header">
-          <button
-            aria-controls="channel-navigation"
-            aria-expanded={mobileNavOpen}
-            aria-label="Open channel navigation"
-            className="mobile-menu-button"
-            onClick={() => setMobileNavOpen(true)}
-            type="button"
-          >
-            <Menu aria-hidden="true" size={20} />
-          </button>
-          <div className="channel-title">
-            {initial.selectedChannel.visibility === "private" ? (
-              <LockKeyhole aria-hidden="true" size={17} />
-            ) : (
-              <Hash aria-hidden="true" size={19} />
-            )}
-            <div>
-              <h1>{initial.selectedChannel.name}</h1>
-              {initial.selectedChannel.description ? (
-                <p>{initial.selectedChannel.description}</p>
-              ) : null}
-            </div>
-          </div>
-          <div className="header-actions">
-            {firstUnreadId || firstThreadUnreadId ? (
-              <button
-                className="jump-unread-button"
-                onClick={() => void jumpToFirstUnread()}
-                type="button"
-              >
-                First unread
-              </button>
-            ) : null}
-            <ViewRefreshIndicator active={revalidating} />
-            <span className={`live-status live-${liveState}`}>
-              <span /> {liveLabel}
-            </span>
+        <section className="channel-panel">
+          <header className="channel-header">
             <button
-              aria-label="Channel members"
-              disabled
-              title="Channel members are not available yet"
+              aria-controls="channel-navigation"
+              aria-expanded={mobileNavOpen}
+              aria-label="Open channel navigation"
+              className="mobile-menu-button"
+              onClick={() => setMobileNavOpen(true)}
               type="button"
             >
-              <Users aria-hidden="true" size={18} />
+              <Menu aria-hidden="true" size={20} />
             </button>
-          </div>
-        </header>
-
-        <div
-          className="timeline"
-          data-image-gallery
-          onScroll={(event) => {
-            const scroller = event.currentTarget;
-            timelinePinnedToBottom.current =
-              scroller.scrollHeight -
-                scroller.clientHeight -
-                scroller.scrollTop <=
-              40;
-            if (scroller.scrollTop <= 80) void loadOlder();
-          }}
-          ref={timelineScroller}
-        >
-          <div className="channel-intro">
-            <div className="intro-icon">
-              {forum ? <MessageSquareText size={25} /> : <Hash size={27} />}
-            </div>
-            <h2>{initial.selectedChannel.name}</h2>
-            <p>
-              {initial.selectedChannel.description ||
-                `This is the start of #${initial.selectedChannel.name}.`}
-            </p>
-          </div>
-          {timelineHasMore || historyLoading || historyError ? (
-            <div className="timeline-history-control" aria-live="polite">
-              {historyLoading ? <span>Loading older messages…</span> : null}
-              {!historyLoading && historyError ? (
-                <button onClick={() => void loadOlder()} type="button">
-                  Try loading older messages again
-                </button>
-              ) : null}
-              {!historyLoading && !historyError && timelineHasMore ? (
-                <button onClick={() => void loadOlder()} type="button">
-                  Load older messages
-                </button>
-              ) : null}
-            </div>
-          ) : null}
-          {renderedTimeline.length === 0 ? (
-            <p className="empty-timeline">
-              No messages yet. Start the conversation.
-            </p>
-          ) : (
-            renderedTimeline.map((message) => (
-              <div className="timeline-message" key={message.id}>
-                {message.id === firstUnreadId ? (
-                  <div className="new-messages-divider">
-                    <span>New messages</span>
-                    <i />
-                  </div>
+            <div className="channel-title">
+              {initial.selectedChannel.visibility === "private" ? (
+                <LockKeyhole aria-hidden="true" size={17} />
+              ) : (
+                <Hash aria-hidden="true" size={19} />
+              )}
+              <div>
+                <h1>{initial.selectedChannel.name}</h1>
+                {initial.selectedChannel.description ? (
+                  <p>{initial.selectedChannel.description}</p>
                 ) : null}
-                <MessageRow
-                  channelId={initial.selectedChannel.id}
-                  channels={initial.channels}
-                  expectedPubkey={initial.identity.pubkey}
-                  message={message}
-                  onContextReply={() => openMessageThread(message.id)}
-                  onMessageChange={(next) => updateMessage(message.id, next)}
-                  onUnreadChange={(unread) => {
-                    if (unread) {
-                      navigation.controller.markMessageUnread(
-                        initial.selectedChannel.id,
-                        message.id,
-                      );
-                    } else {
-                      navigation.controller.markMessageRead(
-                        message.id,
-                        message.createdAt,
-                      );
-                    }
-                  }}
-                />
               </div>
-            ))
-          )}
-          <div ref={timelineEnd} />
-        </div>
-        <Composer
-          channelId={initial.selectedChannel.id}
-          channelName={initial.selectedChannel.name}
-          expectedPubkey={initial.identity.pubkey}
-          forum={forum}
-          typingParticipants={typingParticipants.channel}
-        />
-      </section>
-
-      {thread ? (
-        <aside className="thread-panel">
-          <hr
-            aria-label="Resize thread panel"
-            aria-orientation="vertical"
-            aria-valuemax={threadPanelBounds?.max}
-            aria-valuemin={threadPanelBounds?.min}
-            aria-valuenow={threadPanelWidth ?? undefined}
-            aria-valuetext={
-              threadPanelWidth === null
-                ? undefined
-                : `${threadPanelWidth} pixels wide`
-            }
-            className="thread-panel-resize-handle"
-            onKeyDown={(event) => {
-              if (threadPanelWidth === null || threadPanelBounds === null) {
-                return;
-              }
-              let next: number;
-              switch (event.key) {
-                case "ArrowLeft":
-                  next = threadPanelWidth + (event.shiftKey ? 50 : 16);
-                  break;
-                case "ArrowRight":
-                  next = threadPanelWidth - (event.shiftKey ? 50 : 16);
-                  break;
-                case "Home":
-                  next = threadPanelBounds.min;
-                  break;
-                case "End":
-                  next = threadPanelBounds.max;
-                  break;
-                default:
-                  return;
-              }
-              event.preventDefault();
-              writeThreadPanelWidth(
-                window.localStorage,
-                updateThreadPanelWidth(next),
-              );
-            }}
-            onLostPointerCapture={finishThreadPanelResize}
-            onPointerCancel={finishThreadPanelResize}
-            onPointerDown={(event) => {
-              if (event.button !== 0 || threadPanelWidth === null) return;
-              event.preventDefault();
-              threadPanelWidthRef.current = threadPanelWidth;
-              threadResize.current = {
-                pointerId: event.pointerId,
-                startWidth: threadPanelWidth,
-                startX: event.clientX,
-              };
-              event.currentTarget.setPointerCapture(event.pointerId);
-              setThreadPanelResizing(true);
-            }}
-            onPointerMove={(event) => {
-              const resize = threadResize.current;
-              if (!resize || resize.pointerId !== event.pointerId) return;
-              event.preventDefault();
-              updateThreadPanelWidth(
-                resize.startWidth + resize.startX - event.clientX,
-              );
-            }}
-            onPointerUp={finishThreadPanelResize}
-            tabIndex={0}
-            title="Drag to resize the thread panel"
-          />
-          <header className="thread-header">
-            <div>
-              <h2>Thread</h2>
-              <span>#{initial.selectedChannel.name}</span>
             </div>
-            <ViewLink
-              aria-label="Close thread"
-              className="icon-link"
-              href={`/channels/${initial.selectedChannel.id}`}
-              prefetchMode="eager"
-              scroll={false}
-            >
-              <X aria-hidden="true" size={19} />
-            </ViewLink>
+            <div className="header-actions">
+              <PinnedMessages
+                channel={initial.selectedChannel}
+                channels={initial.channels}
+              />
+              {firstUnreadId || firstThreadUnreadId ? (
+                <button
+                  className="jump-unread-button"
+                  onClick={() => void jumpToFirstUnread()}
+                  type="button"
+                >
+                  First unread
+                </button>
+              ) : null}
+              <ViewRefreshIndicator active={revalidating} />
+              <span className={`live-status live-${liveState}`}>
+                <span /> {liveLabel}
+              </span>
+              <button
+                aria-label="Channel members"
+                disabled
+                title="Channel members are not available yet"
+                type="button"
+              >
+                <Users aria-hidden="true" size={18} />
+              </button>
+            </div>
           </header>
+
           <div
-            className="thread-messages"
+            className="timeline"
+            data-image-gallery
             onScroll={(event) => {
               const scroller = event.currentTarget;
-              threadPinnedToBottom.current =
+              timelinePinnedToBottom.current =
                 scroller.scrollHeight -
                   scroller.clientHeight -
                   scroller.scrollTop <=
-                24;
+                40;
+              if (scroller.scrollTop <= 80) void loadOlder();
             }}
-            ref={threadScroller}
+            ref={timelineScroller}
           >
-            <div
-              className="thread-messages-content"
-              data-image-gallery
-              ref={threadContent}
-            >
-              {thread.root ? (
-                <MessageRow
-                  channelId={initial.selectedChannel.id}
-                  channels={initial.channels}
-                  expectedPubkey={initial.identity.pubkey}
-                  hideThreadLink
-                  highlighted={thread.root.id === targetMessageId}
-                  message={thread.root}
-                  onMessageChange={(next) =>
-                    updateMessage(thread.root?.id ?? thread.rootId, next)
-                  }
-                  onReply={() =>
-                    setReplyTarget({
-                      id: thread.root?.id ?? thread.rootId,
-                      name: thread.root?.author.name ?? "thread",
-                    })
-                  }
-                />
-              ) : (
-                <p className="thread-unavailable">
-                  This message is no longer available.
-                </p>
-              )}
-              <div className="reply-divider">
-                <span>
-                  {thread.replies.length}{" "}
-                  {thread.replies.length === 1 ? "reply" : "replies"}
-                </span>
-                <i />
+            <div className="channel-intro">
+              <div className="intro-icon">
+                {forum ? <MessageSquareText size={25} /> : <Hash size={27} />}
               </div>
-              {thread.replies.map((message) => (
-                <div className="thread-message" key={message.id}>
-                  {message.id === firstThreadUnreadId ? (
+              <h2>{initial.selectedChannel.name}</h2>
+              <p>
+                {initial.selectedChannel.description ||
+                  `This is the start of #${initial.selectedChannel.name}.`}
+              </p>
+            </div>
+            {timelineHasMore || historyLoading || historyError ? (
+              <div className="timeline-history-control" aria-live="polite">
+                {historyLoading ? <span>Loading older messages…</span> : null}
+                {!historyLoading && historyError ? (
+                  <button onClick={() => void loadOlder()} type="button">
+                    Try loading older messages again
+                  </button>
+                ) : null}
+                {!historyLoading && !historyError && timelineHasMore ? (
+                  <button onClick={() => void loadOlder()} type="button">
+                    Load older messages
+                  </button>
+                ) : null}
+              </div>
+            ) : null}
+            {renderedTimeline.length === 0 ? (
+              <p className="empty-timeline">
+                No messages yet. Start the conversation.
+              </p>
+            ) : (
+              renderedTimeline.map((message) => (
+                <div className="timeline-message" key={message.id}>
+                  {message.id === firstUnreadId ? (
                     <div className="new-messages-divider">
-                      <span>New replies</span>
+                      <span>New messages</span>
                       <i />
                     </div>
                   ) : null}
                   <MessageRow
                     channelId={initial.selectedChannel.id}
                     channels={initial.channels}
-                    compact
                     expectedPubkey={initial.identity.pubkey}
-                    highlighted={message.id === targetMessageId}
                     message={message}
+                    onContextReply={() => openMessageThread(message.id)}
                     onMessageChange={(next) => updateMessage(message.id, next)}
-                    onReply={() =>
-                      setReplyTarget({
-                        id: message.id,
-                        name: message.author.name,
-                      })
-                    }
                     onUnreadChange={(unread) => {
                       if (unread) {
                         navigation.controller.markMessageUnread(
@@ -909,36 +757,218 @@ export function WorkspaceShell({
                         );
                       }
                     }}
-                    replyingTo={
-                      message.parentId && message.parentId !== thread.rootId
-                        ? (threadAuthors.get(message.parentId) ??
-                          "a previous reply")
-                        : null
-                    }
                   />
                 </div>
-              ))}
-            </div>
+              ))
+            )}
+            <div ref={timelineEnd} />
           </div>
           <Composer
             channelId={initial.selectedChannel.id}
             channelName={initial.selectedChannel.name}
             expectedPubkey={initial.identity.pubkey}
             forum={forum}
-            parentId={replyTarget?.id ?? thread.rootId}
-            replyingTo={replyTarget?.name ?? null}
-            cancelReply={() => setReplyTarget(null)}
-            onSent={() => setReplyTarget(null)}
-            rootId={thread.outerRootId}
-            typingParticipants={typingParticipants.thread}
-            typingThreadHeadId={thread.rootId}
+            typingParticipants={typingParticipants.channel}
           />
-        </aside>
-      ) : (
-        <span className="thread-panel-hint" aria-hidden="true">
-          <PanelRightClose aria-hidden="true" size={17} />
-        </span>
-      )}
-    </main>
+        </section>
+
+        {thread ? (
+          <aside className="thread-panel">
+            <hr
+              aria-label="Resize thread panel"
+              aria-orientation="vertical"
+              aria-valuemax={threadPanelBounds?.max}
+              aria-valuemin={threadPanelBounds?.min}
+              aria-valuenow={threadPanelWidth ?? undefined}
+              aria-valuetext={
+                threadPanelWidth === null
+                  ? undefined
+                  : `${threadPanelWidth} pixels wide`
+              }
+              className="thread-panel-resize-handle"
+              onKeyDown={(event) => {
+                if (threadPanelWidth === null || threadPanelBounds === null) {
+                  return;
+                }
+                let next: number;
+                switch (event.key) {
+                  case "ArrowLeft":
+                    next = threadPanelWidth + (event.shiftKey ? 50 : 16);
+                    break;
+                  case "ArrowRight":
+                    next = threadPanelWidth - (event.shiftKey ? 50 : 16);
+                    break;
+                  case "Home":
+                    next = threadPanelBounds.min;
+                    break;
+                  case "End":
+                    next = threadPanelBounds.max;
+                    break;
+                  default:
+                    return;
+                }
+                event.preventDefault();
+                writeThreadPanelWidth(
+                  window.localStorage,
+                  updateThreadPanelWidth(next),
+                );
+              }}
+              onLostPointerCapture={finishThreadPanelResize}
+              onPointerCancel={finishThreadPanelResize}
+              onPointerDown={(event) => {
+                if (event.button !== 0 || threadPanelWidth === null) return;
+                event.preventDefault();
+                threadPanelWidthRef.current = threadPanelWidth;
+                threadResize.current = {
+                  pointerId: event.pointerId,
+                  startWidth: threadPanelWidth,
+                  startX: event.clientX,
+                };
+                event.currentTarget.setPointerCapture(event.pointerId);
+                setThreadPanelResizing(true);
+              }}
+              onPointerMove={(event) => {
+                const resize = threadResize.current;
+                if (!resize || resize.pointerId !== event.pointerId) return;
+                event.preventDefault();
+                updateThreadPanelWidth(
+                  resize.startWidth + resize.startX - event.clientX,
+                );
+              }}
+              onPointerUp={finishThreadPanelResize}
+              tabIndex={0}
+              title="Drag to resize the thread panel"
+            />
+            <header className="thread-header">
+              <div>
+                <h2>Thread</h2>
+                <span>#{initial.selectedChannel.name}</span>
+              </div>
+              <ViewLink
+                aria-label="Close thread"
+                className="icon-link"
+                href={`/channels/${initial.selectedChannel.id}`}
+                prefetchMode="eager"
+                scroll={false}
+              >
+                <X aria-hidden="true" size={19} />
+              </ViewLink>
+            </header>
+            <div
+              className="thread-messages"
+              onScroll={(event) => {
+                const scroller = event.currentTarget;
+                threadPinnedToBottom.current =
+                  scroller.scrollHeight -
+                    scroller.clientHeight -
+                    scroller.scrollTop <=
+                  24;
+              }}
+              ref={threadScroller}
+            >
+              <div
+                className="thread-messages-content"
+                data-image-gallery
+                ref={threadContent}
+              >
+                {thread.root ? (
+                  <MessageRow
+                    channelId={initial.selectedChannel.id}
+                    channels={initial.channels}
+                    expectedPubkey={initial.identity.pubkey}
+                    hideThreadLink
+                    highlighted={thread.root.id === targetMessageId}
+                    message={thread.root}
+                    onMessageChange={(next) =>
+                      updateMessage(thread.root?.id ?? thread.rootId, next)
+                    }
+                    onReply={() =>
+                      setReplyTarget({
+                        id: thread.root?.id ?? thread.rootId,
+                        name: thread.root?.author.name ?? "thread",
+                      })
+                    }
+                  />
+                ) : (
+                  <p className="thread-unavailable">
+                    This message is no longer available.
+                  </p>
+                )}
+                <div className="reply-divider">
+                  <span>
+                    {thread.replies.length}{" "}
+                    {thread.replies.length === 1 ? "reply" : "replies"}
+                  </span>
+                  <i />
+                </div>
+                {thread.replies.map((message) => (
+                  <div className="thread-message" key={message.id}>
+                    {message.id === firstThreadUnreadId ? (
+                      <div className="new-messages-divider">
+                        <span>New replies</span>
+                        <i />
+                      </div>
+                    ) : null}
+                    <MessageRow
+                      channelId={initial.selectedChannel.id}
+                      channels={initial.channels}
+                      compact
+                      expectedPubkey={initial.identity.pubkey}
+                      highlighted={message.id === targetMessageId}
+                      message={message}
+                      onMessageChange={(next) =>
+                        updateMessage(message.id, next)
+                      }
+                      onReply={() =>
+                        setReplyTarget({
+                          id: message.id,
+                          name: message.author.name,
+                        })
+                      }
+                      onUnreadChange={(unread) => {
+                        if (unread) {
+                          navigation.controller.markMessageUnread(
+                            initial.selectedChannel.id,
+                            message.id,
+                          );
+                        } else {
+                          navigation.controller.markMessageRead(
+                            message.id,
+                            message.createdAt,
+                          );
+                        }
+                      }}
+                      replyingTo={
+                        message.parentId && message.parentId !== thread.rootId
+                          ? (threadAuthors.get(message.parentId) ??
+                            "a previous reply")
+                          : null
+                      }
+                    />
+                  </div>
+                ))}
+              </div>
+            </div>
+            <Composer
+              channelId={initial.selectedChannel.id}
+              channelName={initial.selectedChannel.name}
+              expectedPubkey={initial.identity.pubkey}
+              forum={forum}
+              parentId={replyTarget?.id ?? thread.rootId}
+              replyingTo={replyTarget?.name ?? null}
+              cancelReply={() => setReplyTarget(null)}
+              onSent={() => setReplyTarget(null)}
+              rootId={thread.outerRootId}
+              typingParticipants={typingParticipants.thread}
+              typingThreadHeadId={thread.rootId}
+            />
+          </aside>
+        ) : (
+          <span className="thread-panel-hint" aria-hidden="true">
+            <PanelRightClose aria-hidden="true" size={17} />
+          </span>
+        )}
+      </main>
+    </ChannelPinsContext.Provider>
   );
 }

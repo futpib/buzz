@@ -53,3 +53,11 @@ replaces a snapshot and never reduces relay events.
 
 The layout uses a drawer on phone-width screens, full-screen threads on mobile,
 safe-area insets, and the operating system's light/dark color scheme.
+
+Channel headers expose a pinned-message list, including messages outside the
+current timeline window. Message actions publish browser-signed kind-40004 pins;
+“Remove my pin” deletes the viewer's pin events (kind 5), leaving other members'
+pins intact. Pins are shared channel state, not personal bookmarks. The server
+loads targets and their edit/deletion closure and resolves nested-thread links.
+Live catch-up always emits a fresh snapshot, even on a quiet channel; a linked
+thread row centers when it first arrives, without recentering subsequent updates.

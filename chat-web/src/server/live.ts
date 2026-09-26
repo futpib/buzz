@@ -1,5 +1,3 @@
-import "server-only";
-
 import type { AuthSession } from "@/server/auth";
 import type { TypingIndicatorView } from "@/server/types";
 import { projectTypingIndicator } from "@/server/typing";
@@ -11,11 +9,10 @@ import {
 export function listenForChannelChanges(
   session: AuthSession,
   channelId: string,
-  onDirty: () => void,
+  onDirty: (catchUp?: boolean) => void,
   onTyping: (typing: TypingIndicatorView) => void,
   signal: AbortSignal,
 ): Promise<void> {
-  let caughtUpChange = false;
   return session.relay.subscribe(
     {
       kinds: [
@@ -27,6 +24,7 @@ export function listenForChannelChanges(
         39005,
         40002,
         40003,
+        40004,
         40008,
         45001,
         45003,
@@ -38,7 +36,8 @@ export function listenForChannelChanges(
     },
     {
       onEose() {
-        if (caughtUpChange) onDirty();
+        // EOSE is also a reconciliation boundary when no recent event replayed.
+        onDirty(true);
       },
       onEvent(event, isLive) {
         if (event.kind === TYPING_INDICATOR_KIND) {
@@ -46,8 +45,6 @@ export function listenForChannelChanges(
           if (typing) onTyping(typing);
         } else if (isLive) {
           onDirty();
-        } else {
-          caughtUpChange = true;
         }
       },
     },

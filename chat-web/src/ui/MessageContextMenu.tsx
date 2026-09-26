@@ -10,11 +10,12 @@ import {
   MailCheck,
   MailOpen,
   Pencil,
+  Pin,
   Plus,
   Trash2,
   X,
 } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useContext, useEffect, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import { createPortal } from "react-dom";
 
@@ -23,8 +24,10 @@ import {
   makeDeletionEvent,
   makeMessageEditEvent,
   makeReactionEvent,
+  makePinEvent,
 } from "@/client/identity";
 import type { MessageView, NostrEvent, ReactionView } from "@/server/types";
+import { ChannelPinsContext } from "@/ui/PinnedMessages";
 import { EmojiReactionPicker } from "@/ui/EmojiReactionPicker";
 
 const QUICK_REACTIONS = ["👍", "❤️", "😂", "🎉", "🔥"] as const;
@@ -150,6 +153,9 @@ export function MessageContextMenu({
   onReply?: () => void;
   point: MenuPoint;
 }) {
+  const pins = useContext(ChannelPinsContext);
+  const ownPinIds =
+    pins.find((pin) => pin.message.id === message.id)?.ownPinIds ?? [];
   const [mode, setMode] = useState<MenuMode>("actions");
   const [expandedEmoji, setExpandedEmoji] = useState(false);
   const [editContent, setEditContent] = useState(message.content);
@@ -341,6 +347,35 @@ export function MessageContextMenu({
               </div>
             ) : null}
             <div className="message-menu-actions" role="menu">
+              <button
+                disabled={Boolean(pending)}
+                onClick={() =>
+                  void run("pin", async () => {
+                    const signer = await credential();
+                    if (ownPinIds.length) {
+                      for (const targetId of ownPinIds)
+                        await publishAction(
+                          makeDeletionEvent(signer, { channelId, targetId }),
+                          channelId,
+                        );
+                    } else {
+                      await publishAction(
+                        makePinEvent(signer, {
+                          channelId,
+                          targetId: message.id,
+                        }),
+                        channelId,
+                      );
+                    }
+                    close();
+                  })
+                }
+                role="menuitem"
+                type="button"
+              >
+                <Pin aria-hidden="true" size={19} />
+                {ownPinIds.length ? "Remove my pin" : "Pin to channel"}
+              </button>
               {onReply ? (
                 <button
                   disabled={Boolean(pending)}

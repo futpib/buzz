@@ -27,6 +27,7 @@ import type {
   ThreadsWorkspaceView,
   WorkspaceView,
 } from "@/server/types";
+import { includePinnedReplies, loadChannelPins } from "@/server/pins";
 import { ViewCache } from "@/server/view-cache";
 
 const CHANNEL_WINDOW_LIMIT = 20;
@@ -263,12 +264,25 @@ async function loadThreadsWorkspaceFresh(
       ),
     ]),
   );
+  const pinGroups = await Promise.all(
+    channels.map((channel) =>
+      loadChannelPins(
+        (filters) => session.relay.query(filters),
+        channel.id,
+        session.pubkey,
+      ),
+    ),
+  );
+  const pinsByChannel = new Map(
+    channels.map((channel, index) => [channel.id, pinGroups[index]]),
+  );
   for (const channel of channels) {
     const page = timelinePages.get(channel.id);
     workspaceCache.set(workspaceCacheKey(session, channel.id, null), {
       identity,
       channels,
       selectedChannel: channel,
+      pins: pinsByChannel.get(channel.id) ?? [],
       timeline: page?.messages ?? [],
       timelineHasMore: page?.hasMore ?? false,
       timelineCursor: page?.nextCursor ?? null,
@@ -289,6 +303,7 @@ async function loadThreadsWorkspaceFresh(
         identity,
         channels,
         selectedChannel: summary.channel,
+        pins: pinsByChannel.get(summary.channel.id) ?? [],
         timeline: page?.messages ?? [],
         timelineHasMore: page?.hasMore ?? false,
         timelineCursor: page?.nextCursor ?? null,
@@ -342,7 +357,7 @@ async function loadWorkspaceFresh(
   channelId: string,
   rootId: string | null,
 ): Promise<WorkspacePayload> {
-  const [{ channels }, messageWindow, threadEvents] = await Promise.all([
+  const [{ channels }, messageWindow, threadEvents, pins] = await Promise.all([
     loadWorkspaceIndex(session),
     loadChannelMessageWindow(
       (filters) => session.relay.query(filters),
@@ -354,6 +369,11 @@ async function loadWorkspaceFresh(
     rootId
       ? session.relay.query(threadFilters(channelId, rootId))
       : Promise.resolve([]),
+    loadChannelPins(
+      (filters) => session.relay.query(filters),
+      channelId,
+      session.pubkey,
+    ),
   ]);
   const threadMessageEvents = threadEvents.filter((event) =>
     CHANNEL_MESSAGE_KINDS.includes(event.kind),
@@ -409,10 +429,13 @@ async function loadWorkspaceFresh(
     identity,
     channels,
     selectedChannel,
+    pins,
     timeline,
     timelineHasMore: messageWindow.hasMore,
     timelineCursor: messageWindow.nextCursor,
-    thread: projectedThread,
+    thread: projectedThread
+      ? includePinnedReplies(projectedThread, pins)
+      : null,
     generatedAt: Date.now(),
   };
 }
@@ -511,6 +534,7 @@ export async function loadChannelSnapshot(
   ).value;
   const snapshot = {
     selectedChannel: workspace.selectedChannel,
+    pins: workspace.pins,
     timeline: workspace.timeline,
     timelineHasMore: workspace.timelineHasMore,
     timelineCursor: workspace.timelineCursor,
@@ -521,6 +545,7 @@ export async function loadChannelSnapshot(
     .update(
       JSON.stringify({
         selectedChannel: snapshot.selectedChannel,
+        pins: snapshot.pins,
         timeline: snapshot.timeline,
         timelineHasMore: snapshot.timelineHasMore,
         timelineCursor: snapshot.timelineCursor,

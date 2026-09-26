@@ -168,7 +168,15 @@ export type SentWorkspaceView = {
   cacheState: ViewCacheState;
 };
 
+export type PinnedMessageView = {
+  message: MessageView;
+  threadId: string;
+  ownPinIds: string[];
+  pinnedAt: number;
+};
+
 export type WorkspaceView = {
+  pins: PinnedMessageView[];
   identity: ProfileView;
   channels: ChannelView[];
   selectedChannel: ChannelView;
@@ -182,6 +190,7 @@ export type WorkspaceView = {
 
 export type ChannelSnapshot = Pick<
   WorkspaceView,
+  | "pins"
   | "selectedChannel"
   | "timeline"
   | "timelineHasMore"

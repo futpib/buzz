@@ -5,7 +5,7 @@ import type { NostrEvent } from "@/server/types";
 const UUID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const EVENT_ID = /^[0-9a-f]{64}$/i;
-const ACTION_KINDS = new Set([5, 7, 40_003]);
+const ACTION_KINDS = new Set([5, 7, 40_003, 40_004]);
 
 function matchingTags(event: NostrEvent, name: string): string[][] {
   return event.tags.filter((tag) => tag[0] === name);
@@ -49,6 +49,15 @@ export function validateMessageActionEvent(
     }
     if (channels.length !== 0) {
       throw new Error("Reaction must use the canonical target-only shape");
+    }
+    return;
+  }
+
+  if (event.kind === 40_004) {
+    if (event.content !== "" || channels.length !== 1) {
+      throw new Error(
+        "Pin must have empty content and exactly one valid channel",
+      );
     }
     return;
   }

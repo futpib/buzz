@@ -3330,3 +3330,42 @@ a {
   cursor: col-resize;
   user-select: none;
 }
+
+.channel-pins-dialog {
+  color: var(--ink);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  width: min(640px, calc(100vw - 24px));
+  max-height: calc(100dvh - 32px);
+  padding: 16px;
+  overflow: auto;
+}
+.channel-pins-dialog::backdrop {
+  background: #0009;
+}
+.channel-pins-dialog > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.channel-pins-dialog h2 {
+  font-size: 1.15rem;
+}
+.channel-pins-dialog button {
+  min-width: 44px;
+  min-height: 44px;
+}
+.channel-pins-dialog > p {
+  padding: 12px;
+}
+
+.header-actions button.channel-pins-button {
+  display: inline-flex;
+  min-width: 44px;
+  min-height: 44px;
+  width: auto;
+  gap: 3px;
+  padding: 0 6px;
+}

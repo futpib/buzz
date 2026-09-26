@@ -162,6 +162,26 @@ export function makeMessageEditEvent(
   ) as NostrEvent;
 }
 
+/** Kind 40004 — pin a message in its channel; delete this event to remove your pin. */
+export function makePinEvent(
+  credential: BrowserCredential,
+  input: { channelId: string; targetId: string },
+  createdAt = Math.floor(Date.now() / 1_000),
+): NostrEvent {
+  return finalizeEvent(
+    {
+      kind: 40_004,
+      created_at: createdAt,
+      content: "",
+      tags: actionTags(credential, [
+        ["h", input.channelId],
+        ["e", input.targetId],
+      ]),
+    },
+    secretKey(credential.nsec),
+  ) as NostrEvent;
+}
+
 /** Kind 5 — remove a message, or remove one of the viewer's reactions. */
 export function makeDeletionEvent(
   credential: BrowserCredential,

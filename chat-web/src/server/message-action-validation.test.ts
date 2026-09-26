@@ -6,6 +6,7 @@ import {
   makeDeletionEvent,
   makeMessageEditEvent,
   makeReactionEvent,
+  makePinEvent,
 } from "@/client/identity";
 import { validateMessageActionEvent } from "./message-action-validation";
 
@@ -19,6 +20,7 @@ const now = 1_700_000_000;
 test("accepts only fresh, session-bound reaction, edit, and deletion events", () => {
   const events = [
     makeReactionEvent(credential, targetId, "👍", now),
+    makePinEvent(credential, { channelId, targetId }, now),
     makeMessageEditEvent(
       credential,
       { channelId, targetId, content: "updated" },
@@ -65,4 +67,26 @@ test("rejects a valid signature whose action envelope is non-canonical", () => {
       ),
     /canonical target-only shape/,
   );
+});
+
+test("rejects pins without channel scope or with unexpected content", () => {
+  for (const input of [
+    { tags: [["e", targetId]], content: "" },
+    {
+      tags: [
+        ["e", targetId],
+        ["h", channelId],
+      ],
+      content: "oops",
+    },
+  ]) {
+    const event = finalizeEvent(
+      { kind: 40004, created_at: now, ...input },
+      secret,
+    );
+    assert.throws(
+      () => validateMessageActionEvent(event.pubkey, event, now),
+      /Pin must/,
+    );
+  }
 });
