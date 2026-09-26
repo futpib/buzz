@@ -1,275 +1,241 @@
-//! Newest-first thread windows for latency-sensitive clients.
-//!
-//! The legacy thread reader walks from the oldest reply forward. That is a
-//! useful replay primitive, but it forces a UI to download an entire long
-//! thread before it can show the active tail. This module exposes bounded,
-//! newest-first pages over the same disposable `thread_metadata` projection.
+//! NIP-CW thread-mode newest-first reply windows. This path deliberately does not change
+//! legacy forward threads or the permissive generic event reconstruction path.
 
-use buzz_core::{CommunityId, StoredEvent};
+use buzz_core::{
+    thread_window::{Cursor, Request, MAX_LIMIT, ROW_KINDS},
+    CommunityId, StoredEvent,
+};
 use chrono::{DateTime, Utc};
-use sqlx::{PgPool, Row};
+use futures_util::TryStreamExt;
+use sqlx::{PgConnection, PgPool, QueryBuilder, Row};
 use uuid::Uuid;
 
+use crate::{
+    event::row_to_stored_event, Db, DbError, ReadSession, ReadSessionInner, Result, RouteDecision,
+    RoutePredicate,
+};
 use buzz_datastore_tracing::datastore_span;
 
-use crate::{
-    error::Result, event::row_to_stored_event, observability, route_proof::ChannelScoped,
-    thread::ThreadSummary, Db, ReadSession, ReadSessionInner, RouteDecision, RoutePredicate,
-};
-
-/// One retained reply in a newest-first thread window.
-#[derive(Debug, Clone)]
-pub struct ThreadWindowRow {
-    /// Fully reconstructed signed event for this reply.
-    pub stored_event: StoredEvent,
-    /// Current direct/descendant counts for a reply that heads a nested thread.
-    pub thread_summary: Option<ThreadSummary>,
-}
-
-/// A bounded page of thread replies plus an authoritative continuation fact.
-#[derive(Debug, Clone)]
+/// One bounded raw scan; damaged reply rows can shorten `rows`, never the
+/// authoritative scan bounds.
+#[derive(Debug)]
 pub struct ThreadWindow {
-    /// Retained replies in `(created_at DESC, id ASC)` order.
-    pub rows: Vec<ThreadWindowRow>,
-    /// Whether an older page exists after the last retained row.
+    /// Reconstructed replies, newest first (id ascending for ties).
+    pub rows: Vec<StoredEvent>,
+    /// Another eligible raw reply exists after this page.
     pub has_more: bool,
-    /// Cursor `(created_at, id)` for the next older page. Present iff
-    /// [`Self::has_more`] is true.
-    pub next_cursor: Option<(DateTime<Utc>, Vec<u8>)>,
+    /// Last retained raw candidate, or None iff exhausted.
+    pub next_cursor: Option<Cursor>,
+    /// A supported conversation root exists in this channel, possibly as a
+    /// tombstone. Only then may the bridge serve rows, auxiliary events or bounds.
+    pub root_in_channel: bool,
 }
 
-/// Scope, page shape, and cursor for one thread-window read.
-pub struct ThreadWindowQuery<'a> {
-    /// Server-resolved tenant scope.
-    pub community_id: CommunityId,
-    /// Channel the root and every returned reply must belong to.
-    pub channel_id: Uuid,
-    /// Raw 32-byte Nostr event ID of the thread root.
-    pub root_event_id: &'a [u8],
-    /// Raw 32-byte Nostr event ID whose direct replies form this view.
-    pub parent_event_id: &'a [u8],
-    /// Maximum nested reply depth, or all depths when absent.
-    pub depth_limit: Option<u32>,
-    /// Maximum reply rows returned, excluding the internal sentinel.
-    pub limit: u32,
-    /// Last retained `(created_at, id)` from the preceding page.
-    pub cursor: Option<(DateTime<Utc>, Vec<u8>)>,
-    /// Optional allowlist of Nostr kinds applied before the page limit.
-    pub kind_filter: Option<&'a [u32]>,
+fn invalid(message: impl Into<String>) -> DbError {
+    DbError::InvalidData(message.into())
 }
 
-/// Fetch one newest-first thread window from the writer pool.
-pub async fn get_thread_window(
-    pool: &PgPool,
-    query: &ThreadWindowQuery<'_>,
-) -> Result<ThreadWindow> {
-    let mut conn =
-        observability::acquire_writer(pool, observability::WriterOperation::SubscriptionHistory)
-            .await?;
-    get_thread_window_on(&mut conn, query).await
+fn cursor_key(cursor: &Cursor) -> Result<(DateTime<Utc>, Vec<u8>)> {
+    let ts = cursor.timestamp().map_err(invalid)?;
+    let id = hex::decode(&cursor.id).map_err(|_| invalid("invalid thread cursor id"))?;
+    if id.len() != 32 {
+        return Err(invalid("invalid thread cursor length"));
+    }
+    Ok((ts, id))
 }
 
-/// [`get_thread_window`] on the exact session selected by replica routing.
-pub(crate) async fn get_thread_window_on(
-    conn: &mut sqlx::PgConnection,
-    query: &ThreadWindowQuery<'_>,
-) -> Result<ThreadWindow> {
-    let limit = query.limit.max(1);
-    let mut param_idx = 5u32;
-    let mut sql = String::from(
-        r#"
-        SELECT
-            e.id,
-            e.pubkey,
-            e.created_at,
-            e.kind,
-            e.tags,
-            e.content,
-            e.sig,
-            e.received_at,
-            e.channel_id,
-            tm.reply_count,
-            tm.descendant_count,
-            tm.last_reply_at
-        FROM thread_metadata tm
-        JOIN events e
-          ON e.community_id = tm.community_id
-         AND e.created_at = tm.event_created_at
-         AND e.id = tm.event_id
-        WHERE tm.community_id = $1
-          AND tm.root_event_id = $2
-          AND tm.channel_id = $3
-          AND tm.parent_event_id = $4
-          AND e.deleted_at IS NULL
-        "#,
-    );
+fn scan_cursor(row: &sqlx::postgres::PgRow) -> Result<Cursor> {
+    let created_at: DateTime<Utc> = row.try_get("created_at")?;
+    let id: Vec<u8> = row.try_get("id")?;
+    if id.len() != 32 || created_at.timestamp() < 0 {
+        return Err(invalid("unrepresentable thread scan position"));
+    }
+    Ok(Cursor {
+        created_at: created_at.timestamp(),
+        id: hex::encode(id),
+    })
+}
 
-    if query.depth_limit.is_some() {
-        sql.push_str(&format!(" AND tm.depth <= ${param_idx}"));
-        param_idx += 1;
-    }
-    if query.cursor.is_some() {
-        let ts_idx = param_idx;
-        let id_idx = param_idx + 1;
-        sql.push_str(&format!(
-            " AND (tm.event_created_at < ${ts_idx} OR (tm.event_created_at = ${ts_idx} AND tm.event_id > ${id_idx}))"
-        ));
-        param_idx += 2;
-    }
-    if let Some(kinds) = query.kind_filter {
-        if !kinds.is_empty() {
-            let kinds = kinds
-                .iter()
-                .map(u32::to_string)
-                .collect::<Vec<_>>()
-                .join(",");
-            sql.push_str(&format!(" AND e.kind IN ({kinds})"));
-        }
-    }
-    sql.push_str(&format!(
-        " ORDER BY tm.event_created_at DESC, tm.event_id ASC LIMIT ${param_idx}"
-    ));
-
-    let mut sql_query = sqlx::query(sqlx::AssertSqlSafe(sql))
-        .bind(query.community_id.as_uuid())
-        .bind(query.root_event_id)
-        .bind(query.channel_id)
-        .bind(query.parent_event_id);
-    if let Some(depth_limit) = query.depth_limit {
-        sql_query = sql_query.bind(depth_limit as i32);
-    }
-    if let Some((created_at, event_id)) = &query.cursor {
-        sql_query = sql_query.bind(*created_at).bind(event_id.clone());
-    }
-    sql_query = sql_query.bind(i64::from(limit) + 1);
-
-    let mut db_rows = sql_query.fetch_all(&mut *conn).await?;
-    let has_more = db_rows.len() > limit as usize;
-    db_rows.truncate(limit as usize);
-    let next_cursor = if has_more {
-        match db_rows.last() {
-            Some(row) => Some((
-                row.try_get::<DateTime<Utc>, _>("created_at")?,
-                row.try_get::<Vec<u8>, _>("id")?,
-            )),
-            None => None,
-        }
-    } else {
-        None
-    };
-
-    let mut rows = Vec::with_capacity(db_rows.len());
-    for row in db_rows {
-        let reply_count: i32 = row.try_get("reply_count")?;
-        let descendant_count: i32 = row.try_get("descendant_count")?;
-        let last_reply_at: Option<DateTime<Utc>> = row.try_get("last_reply_at")?;
-        if let Some(stored_event) = row_to_stored_event(row)? {
-            let thread_summary = (reply_count > 0).then_some(ThreadSummary {
-                reply_count,
-                descendant_count,
-                last_reply_at,
-                // Filled for all retained nested heads in one batch below.
-                participants: Vec::new(),
-            });
-            rows.push(ThreadWindowRow {
-                stored_event,
-                thread_summary,
-            });
-        }
-    }
-
-    let nested_heads = rows
-        .iter()
-        .filter(|row| row.thread_summary.is_some())
-        .map(|row| row.stored_event.event.id.as_bytes().to_vec())
-        .collect::<Vec<_>>();
-    if !nested_heads.is_empty() {
-        let participant_rows = sqlx::query(
-            r#"
-            SELECT parent_event_id, pubkey FROM (
-                SELECT
-                    tm.parent_event_id,
-                    e.pubkey,
-                    ROW_NUMBER() OVER (
-                        PARTITION BY tm.parent_event_id
-                        ORDER BY MAX(e.created_at) DESC
-                    ) AS rn
-                FROM thread_metadata tm
-                JOIN events e
-                  ON e.community_id = tm.community_id
-                 AND e.created_at = tm.event_created_at
-                 AND e.id = tm.event_id
-                WHERE tm.community_id = $1
-                  AND tm.root_event_id = $2
-                  AND tm.channel_id = $3
-                  AND tm.parent_event_id = ANY($4)
-                  AND e.deleted_at IS NULL
-                GROUP BY tm.parent_event_id, e.pubkey
-            ) participants
-            WHERE rn <= 10
-            ORDER BY parent_event_id, rn
-            "#,
-        )
-        .bind(query.community_id.as_uuid())
-        .bind(query.root_event_id)
-        .bind(query.channel_id)
-        .bind(&nested_heads)
-        .fetch_all(&mut *conn)
+/// Every new-mode SQL statement has a server-side deadline as well as the
+/// bridge's whole-operation deadline. SET LOCAL cannot leak to pooled callers.
+async fn set_deadline(conn: &mut PgConnection) -> Result<()> {
+    sqlx::query("SET LOCAL statement_timeout = '4000ms'")
+        .execute(&mut *conn)
         .await?;
-        let mut by_parent = std::collections::HashMap::<Vec<u8>, Vec<Vec<u8>>>::new();
-        for row in participant_rows {
-            by_parent
-                .entry(row.try_get("parent_event_id")?)
-                .or_default()
-                .push(row.try_get("pubkey")?);
+    sqlx::query("SET LOCAL lock_timeout = '1000ms'")
+        .execute(&mut *conn)
+        .await?;
+    Ok(())
+}
+
+async fn select_window(
+    conn: &mut PgConnection,
+    community: CommunityId,
+    request: &Request,
+    budget: &mut ScanBudget,
+) -> Result<ThreadWindow> {
+    if !(1..=MAX_LIMIT).contains(&request.limit)
+        || !(1..=100).contains(&request.depth)
+        || request.kinds.is_empty()
+        || request.kinds.iter().any(|k| !ROW_KINDS.contains(k))
+    {
+        return Err(invalid("invalid thread window arguments"));
+    }
+    let root = hex::decode(&request.root).map_err(|_| invalid("invalid thread root"))?;
+    if root.len() != 32 {
+        return Err(invalid("invalid thread root length"));
+    }
+    // Retain tombstones: deleting a root must not make its readable replies
+    // disappear. Never follow a root belonging to another channel/community.
+    let root_in_channel: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM events WHERE community_id = $1 AND channel_id = $2 AND id = $3 AND kind = ANY($4))")
+        .bind(community.as_uuid()).bind(request.channel).bind(&root)
+        .bind(ROW_KINDS.map(|k| k as i32).to_vec())
+        .fetch_one(&mut *conn).await?;
+    if !root_in_channel {
+        return Ok(ThreadWindow {
+            rows: vec![],
+            has_more: false,
+            next_cursor: None,
+            root_in_channel,
+        });
+    }
+    // Order metadata before event lookups. With stale statistics a root-wide
+    // sort can otherwise execute one lateral lookup for every reply first.
+    // OFFSET 0 keeps this boundary without limiting candidates prematurely.
+    let mut q = QueryBuilder::new(
+        "SELECT e.id, e.pubkey, e.created_at, e.kind, e.tags, e.content, e.sig, e.received_at, e.channel_id, \
+         octet_length(e.content) + octet_length(e.tags::text) AS payload_bytes \
+         FROM (SELECT tm.community_id, tm.event_id, tm.event_created_at \
+         FROM thread_metadata tm WHERE tm.community_id = ",
+    );
+    q.push_bind(community.as_uuid())
+        .push(" AND tm.root_event_id = ")
+        .push_bind(root)
+        .push(" AND tm.channel_id = ")
+        .push_bind(request.channel)
+        .push(" AND tm.depth BETWEEN 1 AND ")
+        .push_bind(request.depth as i32);
+    if let Some(cursor) = &request.cursor {
+        let (ts, id) = cursor_key(cursor)?;
+        // The redundant upper timestamp bound gives PostgreSQL an index range
+        // start instead of filtering all newer keys at a deep cursor.
+        q.push(" AND tm.event_created_at <= ")
+            .push_bind(ts)
+            .push(" AND (tm.event_created_at < ")
+            .push_bind(ts)
+            .push(" OR (tm.event_created_at = ")
+            .push_bind(ts)
+            .push(" AND tm.event_id > ")
+            .push_bind(id)
+            .push("))");
+    }
+    // Fetch by the event PK before testing visibility, so missing statistics
+    // cannot turn a selective live/kind index into a root-wide scan per reply.
+    // PK uniqueness makes the inner LIMIT 1 exact. All eligibility predicates
+    // still precede the *outer* limit+1 that establishes page bounds.
+    q.push(" ORDER BY tm.event_created_at DESC, tm.event_id ASC OFFSET 0) tm \
+        JOIN LATERAL (SELECT e.id, e.pubkey, e.created_at, e.kind, e.tags, e.content, e.sig, e.received_at, e.channel_id, e.deleted_at \
+        FROM events e WHERE e.community_id = tm.community_id \
+        AND e.created_at = tm.event_created_at AND e.id = tm.event_id LIMIT 1) e ON true \
+        WHERE e.channel_id = ")
+        .push_bind(request.channel)
+        .push(" AND e.deleted_at IS NULL AND e.kind = ANY(")
+        .push_bind(request.kinds.iter().map(|k| *k as i32).collect::<Vec<_>>())
+        .push(") ORDER BY tm.event_created_at DESC, tm.event_id ASC LIMIT ")
+        .push_bind(i64::from(request.limit) + 1);
+    // Selectivity varies drastically with root/depth/cursor. A cached generic
+    // plan can sort the entire root (and exceeded the SQL deadline in paging
+    // tests). An unnamed statement keeps parameter-aware planning for this
+    // bounded query without changing pooled session or legacy settings.
+    // Charge every consumed payload before reconstruction, including damaged
+    // rows and the limit+1 probe. The caller owns this ledger across all
+    // windows, auxiliary scans and replica-to-writer retries.
+    let mut raw = q.build().persistent(false).fetch(&mut *conn);
+    let mut rows = Vec::new();
+    let mut retained = 0;
+    let mut last_cursor = None;
+    let mut has_more = false;
+    while let Some(row) = raw.try_next().await? {
+        budget.rows(1)?;
+        let payload_bytes: i32 = row.try_get("payload_bytes")?;
+        budget.bytes(payload_bytes as usize)?;
+        if retained == request.limit {
+            has_more = true;
+            break;
         }
-        for row in &mut rows {
-            if let Some(summary) = &mut row.thread_summary {
-                if let Some(participants) =
-                    by_parent.remove(row.stored_event.event.id.as_bytes().as_slice())
-                {
-                    summary.participants = participants;
-                }
-            }
+        last_cursor = Some(scan_cursor(&row)?);
+        retained += 1;
+        if let Some(event) = row_to_stored_event(row)? {
+            rows.push(event);
         }
     }
-
+    let next_cursor = if has_more { last_cursor } else { None };
     Ok(ThreadWindow {
         rows,
         has_more,
         next_cursor,
+        root_in_channel,
     })
 }
 
+async fn writer_window(
+    pool: &PgPool,
+    community: CommunityId,
+    request: &Request,
+    budget: &mut ScanBudget,
+) -> Result<ThreadWindow> {
+    let conn = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::SubscriptionHistory,
+    )
+    .await?;
+    let mut tx = sqlx::Transaction::begin(conn, None).await?;
+    set_deadline(&mut tx).await?;
+    let window = select_window(&mut tx, community, request, budget).await?;
+    tx.rollback().await?;
+    Ok(window)
+}
+
 impl Db {
-    /// Fetch a newest-first thread window and retain its proved read session
-    /// for request-scoped aux queries.
+    /// Newest-first thread page and its proved replica transaction. Backward
+    /// cursors supply an upper bound, including terminal pages; no forward
+    /// thread "last delivered row is newest" inference is used. Head routing
+    /// inherits the existing default-off budget. Writer follow-ups are pooled,
+    /// not a snapshot spanning the response or subsequent history pages. The
+    /// caller must share `budget` with every window and auxiliary scan in the request.
     #[datastore_span(name = "get_thread_window", system = "postgresql")]
     pub async fn get_thread_window_with_session(
         &self,
-        query: ThreadWindowQuery<'_>,
+        community: CommunityId,
+        request: &Request,
+        budget: &mut ScanBudget,
     ) -> Result<(ThreadWindow, ReadSession)> {
-        let path = if query.cursor.is_some() {
+        let cursor = request.cursor.as_ref().map(cursor_key).transpose()?;
+        let path = if cursor.is_some() {
             "thread_window_cursor"
         } else {
             "thread_window_head"
         };
-        let predicate = match &query.cursor {
-            Some((upper, _)) => RoutePredicate::Covered {
-                upper: *upper,
-                proof: ChannelScoped::from_channel_id(query.channel_id),
-            },
-            None => RoutePredicate::Bounded,
-        };
-        if let RouteDecision::Replica(mut tx, _entry, reason) = self
+        if let RouteDecision::Replica(mut tx, _, reason) = self
             .route_read(
                 path,
-                predicate,
-                observability::ReaderOperation::SubscriptionHistory,
+                RoutePredicate::from_channel_cursor(request.channel, &cursor),
+                crate::observability::ReaderOperation::SubscriptionHistory,
             )
             .await
         {
-            match get_thread_window_on(&mut tx, &query).await {
+            let result = async {
+                set_deadline(&mut tx).await?;
+                select_window(&mut tx, community, request, budget).await
+            }
+            .await;
+            match result {
+                Ok(window) if !window.root_in_channel => {
+                    // The cursor covers reply insertions, not a root authored
+                    // later than its replies. Recheck missing anchors on writer.
+                    Self::record_route(path, "writer", "missing_root");
+                }
                 Ok(window) => {
                     Self::record_route(path, "replica", reason);
                     return Ok((
@@ -282,18 +248,16 @@ impl Db {
                         },
                     ));
                 }
+                Err(error @ (DbError::InvalidData(_) | DbError::ThreadWindowBudgetExceeded(_))) => {
+                    return Err(error);
+                }
                 Err(error) => {
-                    tracing::warn!(
-                        %error,
-                        path,
-                        "replica thread window failed; re-running on writer"
-                    );
+                    tracing::warn!(%error, path, "replica thread window failed; re-running on writer");
                     Self::record_route(path, "writer", "replica_error");
                 }
             }
         }
-
-        let window = get_thread_window(&self.pool, &query).await?;
+        let window = writer_window(&self.pool, community, request, budget).await?;
         Ok((
             window,
             ReadSession {
@@ -302,3 +266,200 @@ impl Db {
         ))
     }
 }
+
+/// Strict auxiliary scan. Targets are chunked by the bridge, limiting SQL
+/// expression size. Access is applied before the probe, including channel-less
+/// deletions. Deleted aux payloads are NOT returned, but their IDs are retained
+/// to discover deletions-of-aux on the second hop.
+pub struct AuxQuery<'a> {
+    /// Host-bound community.
+    pub community: CommunityId,
+    /// At most 200 retained target IDs (never the reply sentinel).
+    pub targets: &'a [String],
+    /// Auxiliary kinds for this hop.
+    pub kinds: &'a [u32],
+    /// Fresh writer-authorized channels for this page.
+    pub accessible: &'a [Uuid],
+    /// Last raw auxiliary scan position, not last delivered event.
+    pub cursor: Option<Cursor>,
+}
+
+/// Fixed raw auxiliary page budget (the probe is one extra row).
+pub const AUX_LIMIT: usize = 1000;
+
+/// Aggregate reply and auxiliary scan allowance for one query, not one window.
+/// Bytes include content and tags; the bridge separately bounds serialized output.
+/// Passed through replica retries so degradation cannot reset the allowance.
+#[derive(Default)]
+pub struct ScanBudget {
+    queries: usize,
+    rows: usize,
+    bytes: usize,
+}
+
+impl ScanBudget {
+    fn query(&mut self) -> Result<()> {
+        self.queries += 1;
+        if self.queries > 64 {
+            return Err(DbError::ThreadWindowBudgetExceeded("query"));
+        }
+        Ok(())
+    }
+
+    fn bytes(&mut self, count: usize) -> Result<()> {
+        self.bytes = self.bytes.saturating_add(count);
+        if self.bytes > 8 * 1024 * 1024 {
+            return Err(DbError::ThreadWindowBudgetExceeded("payload byte"));
+        }
+        Ok(())
+    }
+
+    fn rows(&mut self, count: usize) -> Result<()> {
+        self.rows = self.rows.saturating_add(count);
+        if self.rows > 8192 {
+            return Err(DbError::ThreadWindowBudgetExceeded("raw row"));
+        }
+        Ok(())
+    }
+}
+
+/// A strict auxiliary page with raw traversal metadata.
+pub struct AuxPage {
+    /// Live events. Unreconstructable live auxiliary events cause an error.
+    pub events: Vec<StoredEvent>,
+    /// Raw IDs including tombstones, for deletion-of-aux discovery.
+    pub target_ids: Vec<String>,
+    /// Last retained scan position when another raw candidate exists.
+    pub next_cursor: Option<Cursor>,
+}
+
+async fn select_aux(
+    conn: &mut PgConnection,
+    query: &AuxQuery<'_>,
+    budget: &mut ScanBudget,
+) -> Result<AuxPage> {
+    if query.targets.is_empty() || query.targets.len() > 200 {
+        return Err(invalid("invalid thread auxiliary target batch"));
+    }
+    budget.query()?;
+    let mut q = QueryBuilder::new(
+        "SELECT id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id, deleted_at, \
+         octet_length(content) + octet_length(tags::text) AS payload_bytes \
+         FROM events WHERE community_id = ");
+    q.push_bind(query.community.as_uuid())
+        .push(" AND ((channel_id IS NULL AND kind IN (5, 9005)) OR channel_id = ANY(")
+        .push_bind(query.accessible)
+        .push("))")
+        .push(" AND kind = ANY(")
+        .push_bind(query.kinds.iter().map(|k| *k as i32).collect::<Vec<_>>())
+        .push(") AND (");
+    for (index, target) in query.targets.iter().enumerate() {
+        if index != 0 {
+            q.push(" OR ");
+        }
+        q.push("tags @> ")
+            .push_bind(serde_json::json!([["e", target]]));
+    }
+    // JSONB containment is an indexable prefilter, not a positional tag match.
+    q.push(
+        ") AND EXISTS (SELECT 1 FROM jsonb_array_elements(tags) tag \
+        WHERE tag->>0 = 'e' AND tag->>1 = ANY(",
+    )
+    .push_bind(query.targets)
+    .push("))");
+    if let Some(cursor) = &query.cursor {
+        let (ts, id) = cursor_key(cursor)?;
+        q.push(" AND (created_at < ")
+            .push_bind(ts)
+            .push(" OR (created_at = ")
+            .push_bind(ts)
+            .push(" AND id > ")
+            .push_bind(id)
+            .push("))");
+    }
+    q.push(" ORDER BY created_at DESC, id ASC LIMIT ")
+        .push_bind(AUX_LIMIT as i64 + 1);
+    // Never collect a full raw page: 1,001 ingest-valid edits can contain
+    // 250 MiB. Charge each row (including tombstones and the probe) before
+    // reconstruction, and preserve this request-wide ledger across retries.
+    let mut raw = q.build().fetch(&mut *conn);
+    let mut events = Vec::new();
+    let mut target_ids = Vec::new();
+    let mut last_cursor = None;
+    let mut next_cursor = None;
+    while let Some(row) = raw.try_next().await? {
+        budget.rows(1)?;
+        let payload_bytes: i32 = row.try_get("payload_bytes")?;
+        budget.bytes(payload_bytes as usize)?;
+        if target_ids.len() == AUX_LIMIT {
+            next_cursor = last_cursor;
+            break;
+        }
+        // Validate IDs even for deleted payloads: no ambiguous continuation.
+        let cursor = scan_cursor(&row)?;
+        target_ids.push(cursor.id.clone());
+        last_cursor = Some(cursor);
+        if row
+            .try_get::<Option<DateTime<Utc>>, _>("deleted_at")?
+            .is_none()
+        {
+            events
+                .push(row_to_stored_event(row)?.ok_or_else(|| {
+                    invalid("cannot reconstruct required thread auxiliary event")
+                })?);
+        }
+    }
+    Ok(AuxPage {
+        events,
+        target_ids,
+        next_cursor,
+    })
+}
+
+async fn writer_aux(
+    pool: &PgPool,
+    query: &AuxQuery<'_>,
+    budget: &mut ScanBudget,
+) -> Result<AuxPage> {
+    let conn = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::SubscriptionHistory,
+    )
+    .await?;
+    let mut tx = sqlx::Transaction::begin(conn, None).await?;
+    set_deadline(&mut tx).await?;
+    let page = select_aux(&mut tx, query, budget).await?;
+    tx.rollback().await?;
+    Ok(page)
+}
+
+impl ReadSession {
+    /// Strict NIP-CW thread-mode auxiliary scan on the same proved snapshot, with the
+    /// existing permanent writer degradation on mid-request replica failure.
+    #[datastore_span(name = "thread_window_aux", system = "postgresql")]
+    pub async fn thread_window_aux(
+        &mut self,
+        query: &AuxQuery<'_>,
+        budget: &mut ScanBudget,
+    ) -> Result<AuxPage> {
+        let writer = match &mut self.inner {
+            ReadSessionInner::Replica { tx, writer } => match select_aux(tx, query, budget).await {
+                Ok(page) => return Ok(page),
+                Err(error @ (DbError::InvalidData(_) | DbError::ThreadWindowBudgetExceeded(_))) => {
+                    return Err(error);
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "thread auxiliary read failed; degrading to writer");
+                    metrics::counter!("buzz_db_read_session_degraded").increment(1);
+                    writer.clone()
+                }
+            },
+            ReadSessionInner::Writer(pool) => return writer_aux(pool, query, budget).await,
+        };
+        self.inner = ReadSessionInner::Writer(writer.clone());
+        writer_aux(&writer, query, budget).await
+    }
+}
+
+#[cfg(test)]
+mod postgres_tests;

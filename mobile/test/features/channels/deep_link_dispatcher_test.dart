@@ -11,6 +11,7 @@ import 'package:buzz/shared/deeplink/pending_deep_link_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:nostr/nostr.dart' as nostr;
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/community/community_storage_test.dart';
@@ -344,7 +345,7 @@ void main() {
           name: 'Relay',
           relayUrl: relayUrl,
           pubkey: 'pubkey',
-          nsec: 'nsec',
+          nsec: nostr.Keys.generate().nsec,
           addedAt: DateTime.utc(2026),
           starterSetupIncomplete: true,
         ),
@@ -418,7 +419,7 @@ void main() {
         name: 'Relay',
         relayUrl: relayUrl,
         pubkey: 'pubkey',
-        nsec: 'nsec',
+        nsec: nostr.Keys.generate().nsec,
         addedAt: DateTime.utc(2026),
         starterSetupIncomplete: true,
       ),

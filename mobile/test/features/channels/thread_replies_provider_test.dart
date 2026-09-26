@@ -9,6 +9,8 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 class _FakeRelaySession extends RelaySessionNotifier {
   int queryCount = 0;
+  bool honorDepthLimit = false;
+  final filtersSeen = <NostrFilter>[];
   List<NostrEvent> replies = const [];
   final List<List<NostrEvent>> queryResponses = [];
   final List<NostrFilter> requestedFilters = [];
@@ -28,12 +30,17 @@ class _FakeRelaySession extends RelaySessionNotifier {
   }) async {
     queryCount++;
     requestedFilters.addAll(filters);
+    filtersSeen.addAll(filters);
     final gate = nextQueryGate;
     if (gate != null) {
       nextQueryGate = null;
       return gate.future;
     }
     if (queryResponses.isNotEmpty) return queryResponses.removeAt(0);
+    if (honorDepthLimit) {
+      final depth = filters.single.extensions['depth_limit'] as int;
+      return replies.where((event) => event.createdAt <= depth).toList();
+    }
     return replies;
   }
 }
@@ -77,17 +84,94 @@ NostrEvent _bounds({
 void main() {
   const args = ThreadRepliesArgs(channelId: 'chan', rootId: 'root');
 
+  test('complete scan includes a legal 80-deep reply chain', () async {
+    final session = _FakeRelaySession()
+      ..honorDepthLimit = true
+      ..replies = [
+        for (var depth = 1; depth <= 80; depth++)
+          NostrEvent(
+            id: 'reply-$depth',
+            pubkey: 'bob',
+            createdAt: depth,
+            kind: EventKind.streamMessage,
+            tags: [
+              ['h', 'chan'],
+              ['e', 'root', '', 'root'],
+              ['e', depth == 1 ? 'root' : 'reply-${depth - 1}', '', 'reply'],
+            ],
+            content: '',
+            sig: '',
+          ),
+      ];
+    final container = ProviderContainer(
+      retry: (_, _) => null,
+      overrides: [relaySessionProvider.overrideWith(() => session)],
+    );
+    addTearDown(container.dispose);
+    final relay = container.read(relaySessionProvider.notifier);
+    expect(await fetchCompleteThreadReplies(relay, args), hasLength(80));
+  });
+
+  test(
+    'origin cursor includes epoch-zero events in an exhaustive scan',
+    () async {
+      final session = _FakeRelaySession()..replies = [_reply('epoch', 0)];
+      final container = ProviderContainer(
+        retry: (_, _) => null,
+        overrides: [relaySessionProvider.overrideWith(() => session)],
+      );
+      addTearDown(container.dispose);
+      final relay = container.read(relaySessionProvider.notifier);
+      expect(
+        (await fetchCompleteThreadReplies(relay, args)).single.createdAt,
+        0,
+      );
+      expect(session.filtersSeen.single.extensions['thread_cursor'], -1);
+      expect(
+        session.filtersSeen.single.extensions['thread_cursor_id'],
+        '0' * 64,
+      );
+    },
+  );
+
+  test(
+    'disposes empty local overlays after their last listener leaves',
+    () async {
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
+      final provider = threadLocalRepliesProvider(args);
+      final subscription = container.listen(provider, (_, _) {});
+      subscription.close();
+      await container.pump();
+      expect(container.exists(provider), isFalse);
+    },
+  );
+
+  test('retains local replies without listeners until confirmation', () async {
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+    final provider = threadLocalRepliesProvider(args);
+    final notifier = container.read(provider.notifier);
+    notifier.add(_reply('pending', 1000));
+    await container.pump();
+    expect(container.read(provider).single.id, 'pending');
+    notifier.confirm({'pending'});
+    await container.pump();
+    expect(container.exists(provider), isFalse);
+  });
+
   (ProviderContainer, _FakeRelaySession, ProviderSubscription<Object?>)
   makeHarness(List<NostrEvent> initialReplies) {
     final fakeSession = _FakeRelaySession()..replies = initialReplies;
     final container = ProviderContainer(
+      retry: (_, _) => null,
       overrides: [relaySessionProvider.overrideWith(() => fakeSession)],
     );
     // An auto-disposed provider needs a listener to stay alive, mirroring an
     // open thread page. Creating it starts the first load, so the fake's
     // replies must be in place first.
     final subscription = container.listen(
-      threadRepliesProvider(args),
+      threadPageRepliesProvider(args),
       (_, _) {},
     );
     return (container, fakeSession, subscription);
@@ -115,6 +199,7 @@ void main() {
       [_reply('older', 1000), _bounds(suffix: '2000:$cursorId')],
     ]);
     final container = ProviderContainer(
+      retry: (_, _) => null,
       overrides: [relaySessionProvider.overrideWith(() => fakeSession)],
     );
     addTearDown(container.dispose);
@@ -126,7 +211,7 @@ void main() {
 
     expect(
       (await container.read(
-        threadRepliesProvider(args).future,
+        threadPageRepliesProvider(args).future,
       )).map((event) => event.id),
       ['newest'],
     );
@@ -157,7 +242,7 @@ void main() {
     expect(fakeSession.requestedFilters.last.extensions['before_id'], cursorId);
     expect(
       threadHasOlderReplies(
-        container.read(threadRepliesProvider(args)).value,
+        container.read(threadPageRepliesProvider(args)).value,
         container.read(threadReplyPaginationProvider(args)),
       ),
       isFalse,
@@ -176,6 +261,7 @@ void main() {
     final fakeSession = _FakeRelaySession()
       ..queryResponses.addAll([newest, older]);
     final container = ProviderContainer(
+      retry: (_, _) => null,
       overrides: [relaySessionProvider.overrideWith(() => fakeSession)],
     );
     addTearDown(container.dispose);
@@ -185,7 +271,7 @@ void main() {
     );
     addTearDown(subscription.close);
 
-    final first = await container.read(threadRepliesProvider(args).future);
+    final first = await container.read(threadPageRepliesProvider(args).future);
 
     expect(first, hasLength(100));
     expect(fakeSession.queryCount, 1);
@@ -234,12 +320,13 @@ void main() {
         [_reply('nested-result', 1000)],
       ]);
     final container = ProviderContainer(
+      retry: (_, _) => null,
       overrides: [relaySessionProvider.overrideWith(() => fakeSession)],
     );
     addTearDown(container.dispose);
 
     final replies = await container.read(
-      threadRepliesProvider(nestedArgs).future,
+      threadPageRepliesProvider(nestedArgs).future,
     );
 
     expect(replies.map((event) => event.id), ['nested-result']);
@@ -258,11 +345,12 @@ void main() {
     final fakeSession = _FakeRelaySession()
       ..replies = [_bounds(threadHeadId: 'nested-head')];
     final container = ProviderContainer(
+      retry: (_, _) => null,
       overrides: [relaySessionProvider.overrideWith(() => fakeSession)],
     );
     addTearDown(container.dispose);
 
-    await container.read(threadRepliesProvider(nestedArgs).future);
+    await container.read(threadPageRepliesProvider(nestedArgs).future);
 
     expect(
       fakeSession.requestedFilters.single.extensions['thread_parent'],
@@ -281,13 +369,13 @@ void main() {
       );
       addTearDown(container.dispose);
       final subscription = container.listen(
-        threadRepliesProvider(args),
+        threadPageRepliesProvider(args),
         (_, _) {},
       );
       addTearDown(subscription.close);
 
       await expectLater(
-        container.read(threadRepliesProvider(args).future),
+        container.read(threadPageRepliesProvider(args).future),
         throwsFormatException,
       );
       expect(fakeSession.queryCount, 1);
@@ -298,7 +386,7 @@ void main() {
     final (container, fakeSession, _) = makeHarness([_reply('r1', 1000)]);
     addTearDown(container.dispose);
 
-    await container.read(threadRepliesProvider(args).future);
+    await container.read(threadPageRepliesProvider(args).future);
     final queriesAfterFirstLoad = fakeSession.queryCount;
 
     fakeSession.setStatus(SessionStatus.disconnected);
@@ -311,7 +399,7 @@ void main() {
     final (container, fakeSession, _) = makeHarness([_reply('r1', 1000)]);
     addTearDown(container.dispose);
 
-    final first = await container.read(threadRepliesProvider(args).future);
+    final first = await container.read(threadPageRepliesProvider(args).future);
     expect(first.map((event) => event.id), ['r1']);
     final queriesAfterFirstLoad = fakeSession.queryCount;
 
@@ -322,7 +410,7 @@ void main() {
     fakeSession.setStatus(SessionStatus.connected);
     await container.pump();
 
-    final second = await container.read(threadRepliesProvider(args).future);
+    final second = await container.read(threadPageRepliesProvider(args).future);
     expect(second.map((event) => event.id), ['r1', 'r2']);
     expect(fakeSession.queryCount, queriesAfterFirstLoad + 1);
   });
@@ -333,7 +421,7 @@ void main() {
       final (container, fakeSession, _) = makeHarness([_reply('r1', 1000)]);
       addTearDown(container.dispose);
 
-      await container.read(threadRepliesProvider(args).future);
+      await container.read(threadPageRepliesProvider(args).future);
       final queriesAfterFirstLoad = fakeSession.queryCount;
 
       // Same connected status, new state object (e.g. reconnectAttempt bump).
@@ -348,7 +436,7 @@ void main() {
     final (container, fakeSession, _) = makeHarness([_reply('r1', 1000)]);
     addTearDown(container.dispose);
 
-    await container.read(threadRepliesProvider(args).future);
+    await container.read(threadPageRepliesProvider(args).future);
 
     // Hold the reconnect refresh open and verify the old data still reads.
     final gate = Completer<List<NostrEvent>>();
@@ -358,12 +446,14 @@ void main() {
     fakeSession.setStatus(SessionStatus.connected);
     await container.pump();
 
-    final pending = container.read(threadRepliesProvider(args));
+    final pending = container.read(threadPageRepliesProvider(args));
     expect(pending.isLoading, isTrue);
     expect(pending.value?.map((event) => event.id), ['r1']);
 
     gate.complete([_reply('r1', 1000), _reply('r2', 2000)]);
-    final refreshed = await container.read(threadRepliesProvider(args).future);
+    final refreshed = await container.read(
+      threadPageRepliesProvider(args).future,
+    );
     expect(refreshed.map((event) => event.id), ['r1', 'r2']);
   });
 
@@ -374,6 +464,7 @@ void main() {
       final query = Completer<List<NostrEvent>>();
       final fakeSession = _FakeRelaySession()..nextQueryGate = query;
       final container = ProviderContainer(
+        retry: (_, _) => null,
         overrides: [relaySessionProvider.overrideWith(() => fakeSession)],
       );
       addTearDown(container.dispose);
@@ -408,6 +499,7 @@ void main() {
     () async {
       final fakeSession = _FakeRelaySession()..replies = [_reply('r1', 1000)];
       final container = ProviderContainer(
+        retry: (_, _) => null,
         overrides: [relaySessionProvider.overrideWith(() => fakeSession)],
       );
       addTearDown(container.dispose);
@@ -417,7 +509,7 @@ void main() {
       );
       addTearDown(mountedThread.close);
 
-      await container.read(threadRepliesProvider(args).future);
+      await container.read(threadPageRepliesProvider(args).future);
       expect(mountedThread.read().value?.map((event) => event.id), ['r1']);
 
       fakeSession.setStatus(SessionStatus.disconnected);
@@ -425,12 +517,64 @@ void main() {
       fakeSession.replies = [_reply('r1', 1000), _reply('r2', 2000)];
       fakeSession.setStatus(SessionStatus.connected);
       await container.pump();
-      await container.read(threadRepliesProvider(args).future);
+      await container.read(threadPageRepliesProvider(args).future);
 
       expect(mountedThread.read().value?.map((event) => event.id), [
         'r1',
         'r2',
       ]);
+    },
+  );
+
+  test(
+    'local replies preserve cached authoritative replies after refresh failure',
+    () async {
+      final cached = _reply('cached', 1000);
+      final local = _reply('local', 1001);
+      final session = _FakeRelaySession()..replies = [cached];
+      final container = ProviderContainer(
+        retry: (_, _) => null,
+        overrides: [relaySessionProvider.overrideWith(() => session)],
+      );
+      addTearDown(container.dispose);
+      final combined = container.listen(
+        threadRepliesWithLocalProvider(args),
+        (_, _) {},
+      );
+      await container.read(threadPageRepliesProvider(args).future);
+      container.read(threadLocalRepliesProvider(args).notifier).add(local);
+      await container.pump();
+      final refresh = Completer<List<NostrEvent>>();
+      session.nextQueryGate = refresh;
+      container.invalidate(threadWindowProvider(args));
+      await container.pump();
+      expect(combined.read().value?.map((event) => event.id), [
+        'cached',
+        'local',
+      ]);
+      final refreshedReplies = container.read(
+        threadPageRepliesProvider(args).future,
+      );
+      final refreshFailure = expectLater(refreshedReplies, throwsException);
+      refresh.completeError(Exception('Refresh failed'));
+      await refreshFailure;
+      await container.pump();
+      expect(container.read(threadPageRepliesProvider(args)).hasError, isTrue);
+      expect(combined.read().value?.map((event) => event.id), [
+        'cached',
+        'local',
+      ]);
+      expect(container.read(threadLocalRepliesProvider(args)), [local]);
+      session.replies = [cached, local];
+      container.invalidate(threadWindowProvider(args));
+      await container.read(threadPageRepliesProvider(args).future);
+      await container.pump();
+      expect(combined.read().value?.map((event) => event.id), [
+        'cached',
+        'local',
+      ]);
+      await Future<void>.delayed(Duration.zero);
+      expect(container.read(threadLocalRepliesProvider(args)), isEmpty);
     },
   );
 
@@ -440,7 +584,7 @@ void main() {
     ]);
     addTearDown(container.dispose);
 
-    await container.read(threadRepliesProvider(args).future);
+    await container.read(threadPageRepliesProvider(args).future);
     final queriesAfterFirstLoad = fakeSession.queryCount;
 
     // Close the page: the auto-disposed query is torn down…
@@ -449,8 +593,10 @@ void main() {
 
     // …so reopening loads fresh instead of serving a stale cache.
     fakeSession.replies = [_reply('r1', 1000), _reply('r2', 2000)];
-    container.listen(threadRepliesProvider(args), (_, _) {});
-    final reopened = await container.read(threadRepliesProvider(args).future);
+    container.listen(threadPageRepliesProvider(args), (_, _) {});
+    final reopened = await container.read(
+      threadPageRepliesProvider(args).future,
+    );
     expect(reopened.map((event) => event.id), ['r1', 'r2']);
     expect(fakeSession.queryCount, queriesAfterFirstLoad + 1);
   });

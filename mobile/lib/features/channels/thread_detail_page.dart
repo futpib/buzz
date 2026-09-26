@@ -119,7 +119,7 @@ class ThreadDetailPage extends HookConsumerWidget {
       rootId: queryRootId,
       threadHeadId: threadHead.id,
     );
-    final relayReplyState = ref.watch(threadRepliesProvider(repliesArgs));
+    final relayReplyState = ref.watch(threadPageRepliesProvider(repliesArgs));
     final threadPagination = ref.watch(
       threadReplyPaginationProvider(repliesArgs),
     );
@@ -940,6 +940,7 @@ class ThreadDetailPage extends HookConsumerWidget {
                         )
                         .loadOlder(),
                   ),
+                  relayReplyState: relayReplyState,
                   localSendAnimations: localSendAnimations,
                   trackActiveScrollPosition: trackActiveScrollPosition,
                   headIsDeleted: liveDeletionHidesHead,

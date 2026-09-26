@@ -1,270 +1,259 @@
-//! View-shaped newest-first thread pages for bridge clients.
+//! NIP-CW thread-mode bridge adapter. Legacy thread and channel-window code stays separate.
 
-use axum::{http::StatusCode, response::Json};
-use serde_json::Value;
+use std::{collections::HashSet, time::Duration};
 
-use buzz_core::{
-    kind::{KIND_THREAD_SUMMARY, KIND_WINDOW_BOUNDS},
-    TenantContext,
+use axum::{http::StatusCode, Json};
+use buzz_core::{thread_window::Request, TenantContext};
+use buzz_db::thread_window::{AuxQuery, ScanBudget};
+use serde_json::{json, Value};
+
+use super::{event_in_accessible_channel, WINDOW_AUX_DELETE_KINDS, WINDOW_AUX_KINDS};
+use crate::{
+    api::{api_error, internal_error},
+    state::AppState,
 };
 
-use crate::state::AppState;
-
-use super::{
-    api_error, build_aux_query, event_in_accessible_channel, extension_flag, extract_before_id,
-    extract_channel_from_filter, extract_depth_limit, internal_error, query_all_pages, AuxReader,
-    BeforeId, AUX_PAGE_LIMIT, BRIDGE_THREAD_MAX_LIMIT, WINDOW_AUX_DELETE_KINDS, WINDOW_AUX_KINDS,
-};
-
-const DEFAULT_LIMIT: u32 = 100;
-
-fn extract_event_id(raw: &Value, key: &str) -> Result<Option<Vec<u8>>, (StatusCode, Json<Value>)> {
-    let Some(value) = raw.get(key) else {
-        return Ok(None);
-    };
-    let decoded = value
-        .as_str()
-        .filter(|encoded| encoded.len() == 64)
-        .and_then(|encoded| hex::decode(encoded).ok())
-        .filter(|bytes| bytes.len() == 32)
-        .ok_or_else(|| {
-            api_error(
-                StatusCode::BAD_REQUEST,
-                &format!("thread_window: {key} must be a 64-hex event id"),
-            )
-        })?;
-    Ok(Some(decoded))
+type Error = (StatusCode, Json<Value>);
+/// Shared deadline across all thread-window filters in a /query request.
+pub(super) const DEADLINE: Duration = Duration::from_secs(8);
+const MAX_BYTES: usize = 8 * 1024 * 1024;
+/// One ledger shared by all opted-in filters, including replica fallback.
+#[derive(Default)]
+pub(super) struct Budget {
+    bytes: usize,
+    scan: ScanBudget,
 }
 
-/// Serve one `thread_window: true` filter as rows, optional aux closure, and
-/// exactly one relay-signed bounds overlay.
-pub(super) async fn handle(
+/// Validate before search/presence/other extension dispatch can swallow the
+/// opt-in. Absent/false preserves legacy handling; any other value is invalid.
+pub(super) fn parse(filters: &[Value]) -> Result<Vec<Option<Request>>, Error> {
+    let mut count = 0;
+    filters
+        .iter()
+        .map(|raw| match raw.get("thread_window") {
+            None | Some(Value::Bool(false)) => Ok(None),
+            // The direct-parent view extension has its own parser and bounds.
+            Some(Value::Bool(true)) if raw.get("thread_parent").is_some() => Ok(None),
+            Some(_) => {
+                count += 1;
+                if count > 4 {
+                    return Err(api_error(
+                        StatusCode::BAD_REQUEST,
+                        "at most four thread windows per query",
+                    ));
+                }
+                Request::parse(raw)
+                    .map(Some)
+                    .map_err(|e| api_error(StatusCode::BAD_REQUEST, &e))
+            }
+        })
+        .collect()
+}
+
+fn unavailable(message: &str) -> Error {
+    api_error(StatusCode::SERVICE_UNAVAILABLE, message)
+}
+
+fn database_error(context: &str, error: buzz_db::DbError) -> Error {
+    if let buzz_db::DbError::ThreadWindowBudgetExceeded(_) = &error {
+        return unavailable(&format!("{error}; reduce window work before retrying"));
+    }
+    // Pool acquisition and PostgreSQL's statement/lock budgets may expire
+    // before the outer HTTP deadline. They are retryable, not internal faults.
+    let timed_out = match &error {
+        buzz_db::DbError::Sqlx(sqlx::Error::PoolTimedOut) => true,
+        buzz_db::DbError::Sqlx(sqlx::Error::Database(error)) => {
+            matches!(error.code().as_deref(), Some("57014" | "55P03"))
+        }
+        _ => false,
+    };
+    if timed_out {
+        tracing::warn!(%error, context, "thread window database timeout");
+        unavailable("thread database timeout; retry window")
+    } else {
+        internal_error(&format!("thread {context}: {error}"))
+    }
+}
+
+fn append(events: &mut Vec<Value>, budget: &mut Budget, event: &nostr::Event) -> Result<(), Error> {
+    let value = serde_json::to_value(event)
+        .map_err(|e| internal_error(&format!("thread serialize: {e}")))?;
+    budget.bytes = budget.bytes.saturating_add(value.to_string().len() + 1);
+    if budget.bytes > MAX_BYTES {
+        return Err(unavailable("thread window exceeds response byte budget"));
+    }
+    events.push(value);
+    Ok(())
+}
+
+/// Authorize the entire batch against one writer access set, then refresh it
+/// once before releasing any output. A later window must never suppress only
+/// its own rows while releasing an earlier window built before revocation.
+pub(super) async fn query_batch<'a>(
     state: &AppState,
     tenant: &TenantContext,
-    raw: &Value,
-    filter: &nostr::Filter,
-    accessible_channels: &[uuid::Uuid],
-    authed_pubkey_hex: &str,
-    events: &mut Vec<Value>,
-) -> Result<(), (StatusCode, Json<Value>)> {
-    let Some(channel_id) = extract_channel_from_filter(filter) else {
-        return Err(api_error(
-            StatusCode::BAD_REQUEST,
-            "thread_window requires exactly one #h channel",
-        ));
-    };
-    if !accessible_channels.contains(&channel_id) {
-        return Ok(());
+    reader: &nostr::PublicKey,
+    requests: impl IntoIterator<Item = &'a Request>,
+) -> Result<Vec<Value>, Error> {
+    let accessible = state
+        .db
+        .get_accessible_channel_ids(tenant.community(), &reader.to_bytes())
+        .await
+        .map_err(|e| database_error("access", e))?;
+    let mut budget = Budget::default();
+    let mut events = Vec::new();
+    for request in requests {
+        if accessible.contains(&request.channel) {
+            events.extend(query(state, tenant, reader, request, &accessible, &mut budget).await?);
+        }
     }
+    let current = state
+        .db
+        .get_accessible_channel_ids(tenant.community(), &reader.to_bytes())
+        .await
+        .map_err(|e| database_error("final access", e))?;
+    // Grants can expose auxiliary events omitted from the original closure;
+    // revocations can invalidate earlier windows or their cross-channel aux.
+    if accessible.iter().collect::<HashSet<_>>() != current.iter().collect::<HashSet<_>>() {
+        return Err(unavailable("thread authorization changed; retry query"));
+    }
+    Ok(events)
+}
 
-    let e_tag = nostr::SingleLetterTag::lowercase(nostr::Alphabet::E);
-    let root_hex = filter
-        .generic_tags
-        .get(&e_tag)
-        .filter(|values| values.len() == 1)
-        .and_then(|values| values.iter().next())
-        .ok_or_else(|| {
-            api_error(
-                StatusCode::BAD_REQUEST,
-                "thread_window requires exactly one #e root",
-            )
-        })?;
-    let root_id = hex::decode(root_hex)
-        .ok()
-        .filter(|bytes| bytes.len() == 32)
-        .ok_or_else(|| {
-            api_error(
-                StatusCode::BAD_REQUEST,
-                "thread_window root must be a 64-hex event id",
-            )
-        })?;
-    let parent_id = extract_event_id(raw, "thread_parent")?.unwrap_or_else(|| root_id.clone());
-    let parent_hex = hex::encode(&parent_id);
-
-    let before_id = match extract_before_id(raw) {
-        BeforeId::Malformed => {
-            return Err(api_error(
-                StatusCode::BAD_REQUEST,
-                "thread_window: before_id must be a 64-hex event id",
-            ));
-        }
-        BeforeId::Valid(id) => Some(id),
-        BeforeId::Absent => None,
-    };
-    let cursor = match (filter.until, before_id) {
-        (Some(created_at), Some(event_id)) => {
-            let created_at = chrono::DateTime::from_timestamp(created_at.as_secs() as i64, 0)
-                .ok_or_else(|| {
-                    api_error(
-                        StatusCode::BAD_REQUEST,
-                        "thread_window: until is out of range",
-                    )
-                })?;
-            Some((created_at, event_id))
-        }
-        (None, None) => None,
-        _ => {
-            return Err(api_error(
-                StatusCode::BAD_REQUEST,
-                "thread_window cursor requires both until and before_id, or neither",
-            ));
-        }
-    };
-
-    let limit = filter
-        .limit
-        .map(|value| (value as u32).min(BRIDGE_THREAD_MAX_LIMIT))
-        .unwrap_or(DEFAULT_LIMIT)
-        .max(1);
-    let depth_limit = extract_depth_limit(raw).unwrap_or(64);
-    let kind_filter = filter.kinds.as_ref().map(|kinds| {
-        kinds
-            .iter()
-            .map(|kind| kind.as_u16() as u32)
-            .collect::<Vec<_>>()
-    });
+async fn query(
+    state: &AppState,
+    tenant: &TenantContext,
+    reader: &nostr::PublicKey,
+    request: &Request,
+    accessible: &[uuid::Uuid],
+    budget: &mut Budget,
+) -> Result<Vec<Value>, Error> {
     let (window, mut session) = state
         .db
-        .get_thread_window_with_session(buzz_db::thread_window::ThreadWindowQuery {
-            community_id: tenant.community(),
-            channel_id,
-            root_event_id: &root_id,
-            parent_event_id: &parent_id,
-            depth_limit: Some(depth_limit),
-            limit,
-            cursor: cursor.clone(),
-            kind_filter: kind_filter.as_deref(),
-        })
+        .get_thread_window_with_session(tenant.community(), request, &mut budget.scan)
         .await
-        .map_err(|error| internal_error(&format!("thread window error: {error}")))?;
-
-    let mut target_ids = Vec::with_capacity(window.rows.len() + 1);
-    target_ids.push(parent_hex.clone());
-    let mut root_query = buzz_db::EventQuery::for_community(tenant.community());
-    root_query.channel_id = Some(channel_id);
-    root_query.ids = Some(vec![parent_id.clone()]);
-    root_query.limit = Some(1);
-    let roots = session
-        .query_events(&root_query)
-        .await
-        .map_err(|error| internal_error(&format!("thread window root error: {error}")))?;
-    if let Some(root) = roots.into_iter().next() {
-        if buzz_core::filter::reader_authorized_for_event(&root.event, authed_pubkey_hex) {
-            events.push(serde_json::to_value(&root.event).map_err(|error| {
-                internal_error(&format!("thread window root serialize: {error}"))
-            })?);
-        }
+        .map_err(|e| database_error("window", e))?;
+    // An unsupported, missing or out-of-scope root is not a served window.
+    // In particular, never sign false exhaustion for an unsupported root kind.
+    if !window.root_in_channel {
+        return Ok(vec![]);
     }
-    for row in &window.rows {
-        if !event_in_accessible_channel(&row.stored_event, accessible_channels)
-            || !buzz_core::filter::reader_authorized_for_event(
-                &row.stored_event.event,
-                authed_pubkey_hex,
-            )
-        {
-            continue;
-        }
-        target_ids.push(row.stored_event.event.id.to_hex());
-        events.push(
-            serde_json::to_value(&row.stored_event.event).map_err(|error| {
-                internal_error(&format!("thread window row serialize: {error}"))
-            })?,
-        );
-    }
-
-    if extension_flag(raw, "include_aux") && !target_ids.is_empty() {
-        let mut seen = std::collections::HashSet::new();
-        let mut hop_ids = target_ids;
-        for kinds in [&WINDOW_AUX_KINDS[..], &WINDOW_AUX_DELETE_KINDS[..]] {
-            let query = build_aux_query(tenant.community(), std::mem::take(&mut hop_ids), kinds);
-            let aux = query_all_pages(query, AUX_PAGE_LIMIT, &mut AuxReader::Session(&mut session))
-                .await
-                .map_err(|error| internal_error(&format!("thread window aux error: {error}")))?;
-            for stored in aux {
-                if !seen.insert(stored.event.id)
-                    || !event_in_accessible_channel(&stored, accessible_channels)
-                    || !buzz_core::filter::reader_authorized_for_event(
-                        &stored.event,
-                        authed_pubkey_hex,
-                    )
-                {
-                    continue;
-                }
-                hop_ids.push(stored.event.id.to_hex());
-                events.push(serde_json::to_value(&stored.event).map_err(|error| {
-                    internal_error(&format!("thread window aux serialize: {error}"))
-                })?);
-            }
-            if hop_ids.is_empty() {
-                break;
-            }
-        }
-    }
-
-    for row in &window.rows {
-        let Some(summary) = &row.thread_summary else {
-            continue;
-        };
-        let event_id = row.stored_event.event.id.to_hex();
-        let content = serde_json::json!({
-            "reply_count": summary.reply_count,
-            "descendant_count": summary.descendant_count,
-            "last_reply_at": summary.last_reply_at.map(|value| value.timestamp()),
-            "participants": summary.participants.iter().map(hex::encode).collect::<Vec<_>>(),
-        });
-        let tags = [
-            nostr::Tag::parse(["d", &event_id]),
-            nostr::Tag::parse(["e", &event_id]),
-            nostr::Tag::parse(["h", &channel_id.to_string()]),
-        ]
-        .into_iter()
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| internal_error(&format!("thread summary tag: {error}")))?;
-        let overlay = nostr::EventBuilder::new(
-            nostr::Kind::Custom(KIND_THREAD_SUMMARY as u16),
-            content.to_string(),
-        )
-        .tags(tags)
-        .sign_with_keys(&state.relay_keypair)
-        .map_err(|error| internal_error(&format!("thread summary sign: {error}")))?;
-        events.push(
-            serde_json::to_value(&overlay)
-                .map_err(|error| internal_error(&format!("thread summary serialize: {error}")))?,
-        );
-    }
-
-    let cursor_suffix = match &cursor {
-        Some((created_at, event_id)) => {
-            format!("{}:{}", created_at.timestamp(), hex::encode(event_id))
-        }
-        None => "head".to_owned(),
+    let reader_bytes = reader.to_bytes();
+    let visible = |se: &buzz_core::StoredEvent| {
+        event_in_accessible_channel(se, accessible)
+            && crate::handlers::req::event_visible_to_reader(&se.event, &reader_bytes)
     };
-    let d_value = format!("thread:{channel_id}:{root_hex}:{parent_hex}:{cursor_suffix}");
-    let content = serde_json::json!({
-        "has_more": window.has_more,
-        "next_cursor": window.next_cursor.as_ref().map(|(created_at, event_id)| serde_json::json!({
-            "created_at": created_at.timestamp(),
-            "id": hex::encode(event_id),
-        })),
-    });
+    let mut events = Vec::new();
+    let page_start_bytes = budget.bytes;
+    budget.bytes += 2;
+    let mut targets = vec![request.root.clone()];
+    for row in &window.rows {
+        if !visible(row) {
+            // This would contradict the SQL's channel and row-kind predicates.
+            // Do not issue authoritative bounds for a mismatched selection.
+            return Err(unavailable(
+                "thread row authorization changed during selection",
+            ));
+        }
+        targets.push(row.event.id.to_hex());
+        append(&mut events, budget, &row.event)?;
+    }
+    if request.include_aux {
+        let row_count = events.len();
+        let original_targets = targets;
+        // A writer retry at an older aux cursor alone would miss newer writer
+        // edits. Restart both closure hops once after permanent degradation;
+        // preserve the request ledger/deadline, never reset work allowances.
+        'closure: loop {
+            let mut targets = original_targets.clone();
+            let mut seen = HashSet::new();
+            for kinds in [&WINDOW_AUX_KINDS[..], &WINDOW_AUX_DELETE_KINDS[..]] {
+                let mut next_targets = HashSet::new();
+                // Bound SQL expression size, including deletion-of-aux fanout.
+                for batch in targets.chunks(200) {
+                    let mut query = AuxQuery {
+                        community: tenant.community(),
+                        targets: batch,
+                        kinds,
+                        accessible,
+                        cursor: None,
+                    };
+                    loop {
+                        let was_replica = session.is_replica();
+                        let page = session
+                            .thread_window_aux(&query, &mut budget.scan)
+                            .await
+                            .map_err(|e| database_error("auxiliary closure", e))?;
+                        if was_replica && !session.is_replica() {
+                            events.truncate(row_count);
+                            continue 'closure;
+                        }
+                        next_targets.extend(page.target_ids);
+                        for event in page.events {
+                            if visible(&event) && seen.insert(event.event.id) {
+                                append(&mut events, budget, &event.event)?;
+                            }
+                        }
+                        let Some(cursor) = page.next_cursor else {
+                            break;
+                        };
+                        if query.cursor.as_ref().is_some_and(|old| {
+                            cursor.created_at > old.created_at
+                                || (cursor.created_at == old.created_at && cursor.id <= old.id)
+                        }) {
+                            return Err(unavailable("thread auxiliary scan did not advance"));
+                        }
+                        query.cursor = Some(cursor);
+                    }
+                }
+                targets = next_targets.into_iter().collect();
+                targets.sort_unstable();
+                if targets.is_empty() {
+                    break;
+                }
+            }
+            break;
+        }
+    }
     let tags = [
-        nostr::Tag::parse(["d", &d_value]),
-        nostr::Tag::parse(["e", root_hex]),
-        nostr::Tag::parse(["h", &channel_id.to_string()]),
+        [
+            "d".to_string(),
+            request.binding(tenant.host(), &reader.to_hex()),
+        ],
+        ["h".to_string(), request.channel.to_string()],
+        ["e".to_string(), request.root.clone()],
     ]
     .into_iter()
+    .map(nostr::Tag::parse)
     .collect::<Result<Vec<_>, _>>()
-    .map_err(|error| internal_error(&format!("thread window bounds tag: {error}")))?;
-    let overlay = nostr::EventBuilder::new(
-        nostr::Kind::Custom(KIND_WINDOW_BOUNDS as u16),
-        content.to_string(),
+    .map_err(|e| internal_error(&format!("thread bounds tags: {e}")))?;
+    let bounds = nostr::EventBuilder::new(
+        nostr::Kind::Custom(buzz_core::kind::KIND_THREAD_WINDOW_BOUNDS as u16),
+        json!({"version":1,"direction":"older","has_more":window.has_more,
+            "next_cursor":window.next_cursor})
+        .to_string(),
     )
     .tags(tags)
     .sign_with_keys(&state.relay_keypair)
-    .map_err(|error| internal_error(&format!("thread window bounds sign: {error}")))?;
-    events
-        .push(serde_json::to_value(&overlay).map_err(|error| {
-            internal_error(&format!("thread window bounds serialize: {error}"))
-        })?);
-    Ok(())
+    .map_err(|e| internal_error(&format!("thread bounds sign: {e}")))?;
+    append(&mut events, budget, &bounds)?;
+    metrics::histogram!("buzz_thread_window_response_bytes")
+        .record((budget.bytes - page_start_bytes) as f64);
+    Ok(events)
+}
+
+#[cfg(test)]
+mod postgres_tests;
+
+#[cfg(test)]
+mod compatibility_tests {
+    use super::*;
+
+    #[test]
+    fn direct_parent_views_do_not_enter_the_canonical_thread_window_parser() {
+        let view = json!({"thread_window":true,"thread_parent":"root"});
+        assert!(parse(&[view]).unwrap()[0].is_none());
+        assert!(parse(&[json!({"thread_window":true})]).is_err());
+        assert!(parse(&[json!({"thread_window":"yes","thread_parent":"root"})]).is_err());
+    }
 }

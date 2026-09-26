@@ -3,11 +3,13 @@ import 'dart:collection';
 
 import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:hooks_riverpod/misc.dart' show KeepAliveLink;
 
 import '../../shared/client_state/client_state_projection.dart';
 import '../../shared/relay/relay.dart';
 import 'channel_event_order.dart';
 import 'channel_window.dart';
+import 'channel_messages_provider.dart';
 import 'pending_local_messages_provider.dart';
 import 'thread_window.dart';
 
@@ -64,16 +66,29 @@ final threadWindowProvider = FutureProvider.autoDispose
         }
       });
       final session = ref.read(relaySessionProvider.notifier);
-      final localReplies = ref.read(
-        threadLocalRepliesProvider(_localReplyArgs(args)).notifier,
-      );
-      final pendingMessages = ref.read(
-        pendingLocalMessagesProvider(args.channelId).notifier,
-      );
       void confirmAuthoritative(Iterable<NostrEvent> events) {
+        if (!ref.mounted) return;
         final ids = events.map((event) => event.id).toSet();
-        localReplies.confirm(ids);
-        pendingMessages.confirm(ids);
+        final channelProvider = channelMessagesProvider(args.channelId);
+        if (ref.mounted && ref.exists(channelProvider)) {
+          ref
+              .read(channelProvider.notifier)
+              .cacheConfirmedThreadReplies(
+                events.where(
+                  (event) =>
+                      EventKind.channelTimelineContentKinds.contains(
+                        event.kind,
+                      ) &&
+                      event.threadReference.parentId != null,
+                ),
+              );
+        }
+        ref
+            .read(threadLocalRepliesProvider(_localReplyArgs(args)).notifier)
+            .confirm(ids);
+        ref
+            .read(pendingLocalMessagesProvider(args.channelId).notifier)
+            .confirm(ids);
       }
 
       final firstResponse = await session.queryRelay([
@@ -127,10 +142,100 @@ class ThreadReplyPageEvents extends ListBase<NostrEvent> {
       throw UnsupportedError('Thread page is immutable.');
 }
 
-final threadRepliesProvider = FutureProvider.autoDispose
+final threadPageRepliesProvider = FutureProvider.autoDispose
     .family<List<NostrEvent>, ThreadRepliesArgs>((ref, args) async {
       final window = await ref.watch(threadWindowProvider(args).future);
       return ThreadReplyPageEvents(window);
+    });
+
+/// Complete scans reconcile deletion ownership. A bounded display page must
+/// never be used as evidence that an unseen reply was deleted.
+final threadRepliesProvider = FutureProvider.autoDispose
+    .family<List<NostrEvent>, ThreadRepliesArgs>((ref, args) async {
+      // A reply missed while the socket is stale cannot invalidate this
+      // one-shot query. Refresh mounted threads when the session recovers;
+      // auto-dispose also makes reopening a thread start from relay truth.
+      ref.listen(relaySessionProvider, (previous, next) {
+        if (previous?.status != SessionStatus.connected &&
+            next.status == SessionStatus.connected) {
+          ref.invalidateSelf();
+        }
+      });
+      final session = ref.read(relaySessionProvider.notifier);
+      final channelProvider = channelMessagesProvider(args.channelId);
+      final channelMessages = ref.exists(channelProvider)
+          ? ref.read(channelProvider.notifier)
+          : null;
+      final cachedReplyIds = channelMessages?.cachedThreadReplyIds(args.rootId);
+      final unconfirmedIds = channelMessages?.unconfirmedThreadReplyIds(
+        args.rootId,
+      );
+      final queryVersion = channelMessages?.beginThreadQuery(args.rootId);
+      if (queryVersion != null) {
+        ref.onDispose(
+          () => channelMessages?.failThreadQuery(args.rootId, queryVersion),
+        );
+      }
+      try {
+        final replies = await fetchCompleteThreadReplies(session, args);
+        // Explicit markers also settle unacknowledged local sends, whose
+        // absence cannot prove deletion even in an insertion-complete scan.
+        final missingIds =
+            unconfirmedIds?.difference(
+              replies.map((event) => event.id).toSet(),
+            ) ??
+            <String>{};
+        final deletions = <NostrEvent>[];
+        // One bounded request per scan keeps opening a thread responsive even
+        // when many sends are awaiting ACKs. Excess IDs remain provisional.
+        final targets =
+            channelMessages?.nextThreadDeletionProofTargets(missingIds) ??
+            const <String>[];
+        // Per-target limits keep repeated markers from crowding another ID out.
+        if (targets.isNotEmpty) {
+          deletions.addAll(
+            await session.queryRelay([
+              for (final target in targets)
+                NostrFilter(
+                  kinds: const [EventKind.deletion, EventKind.nip29DeleteEvent],
+                  tags: {
+                    '#h': [args.channelId],
+                    '#e': [target],
+                  },
+                  limit: 1,
+                ),
+            ]),
+          );
+        }
+        if (ref.mounted && ref.exists(channelProvider)) {
+          final channel = ref.read(channelProvider.notifier);
+          final deletedTargets = {
+            for (final event in deletions)
+              for (final tag in event.tags)
+                if (tag.length > 1 && tag[0] == 'e') tag[1],
+          };
+          final applied = channel.cacheCompleteThreadQuery(
+            args.rootId,
+            cachedReplyIds ?? {},
+            replies,
+            provisionalReplyIds: missingIds.difference(deletedTargets),
+            queryVersion: queryVersion,
+          );
+          if (deletions.isNotEmpty) {
+            channel.cacheThreadDeletions(
+              deletions,
+              scopedTargetIds: targets.toSet(),
+              reconciledTargetIds: applied ? missingIds : const {},
+            );
+          }
+        }
+        return replies;
+      } catch (_) {
+        if (queryVersion != null) {
+          channelMessages?.failThreadQuery(args.rootId, queryVersion);
+        }
+        rethrow;
+      }
     });
 
 class ThreadReplyPaginationState {
@@ -167,7 +272,9 @@ class ThreadReplyPaginationNotifier
     var headKey = state.headKey;
     var retainedPages = state.olderPages;
     try {
-      final newestEvents = await ref.read(threadRepliesProvider(args).future);
+      final newestEvents = await ref.read(
+        threadPageRepliesProvider(args).future,
+      );
       if (newestEvents is! ThreadReplyPageEvents) return;
       final newest = newestEvents.window;
       headKey = _threadHeadKey(newestEvents);
@@ -346,13 +453,81 @@ ThreadWindowPage _parseLegacyThreadPage(
   );
 }
 
+class _ThreadCursor {
+  final int createdAt;
+  final String eventId;
+
+  const _ThreadCursor({required this.createdAt, required this.eventId});
+}
+
+/// Exhaustively scans a thread using insertion-complete cursor pages.
+/// [isCurrent] lets a background refresh stop between pages after disposal.
+Future<List<NostrEvent>> fetchCompleteThreadReplies(
+  RelaySessionNotifier session,
+  ThreadRepliesArgs args, {
+  bool Function()? isCurrent,
+}) async {
+  final replies = <NostrEvent>[];
+  // -1 precedes unsigned Nostr timestamps. A non-null cursor selects the
+  // insertion-complete route and writer-verified EOF instead of a stale head.
+  _ThreadCursor? cursor = const _ThreadCursor(
+    createdAt: -1,
+    eventId: '0000000000000000000000000000000000000000000000000000000000000000',
+  );
+  for (var page = 0; page < 500; page++) {
+    if (isCurrent != null && !isCurrent()) {
+      throw StateError('Thread scan superseded');
+    }
+    final events = await session.queryRelay([
+      _threadRepliesFilter(args, cursor),
+    ]);
+    replies.addAll(events);
+    if (events.length < 200) return replies;
+    final last = events.last;
+    cursor = _ThreadCursor(createdAt: last.createdAt, eventId: last.id);
+  }
+  throw Exception('Thread ${args.rootId} exceeded the page safety limit.');
+}
+
+NostrFilter _threadRepliesFilter(
+  ThreadRepliesArgs args,
+  _ThreadCursor? cursor,
+) {
+  return NostrFilter(
+    kinds: EventKind.channelTimelineContentKinds,
+    tags: {
+      '#e': [args.rootId],
+      '#h': [args.channelId],
+    },
+    limit: 200,
+    extensions: {
+      // The relay binds this as signed i32. Include every representable depth.
+      'depth_limit': 0x7fffffff,
+      if (cursor != null) 'thread_cursor': cursor.createdAt,
+      if (cursor != null) 'thread_cursor_id': cursor.eventId,
+    },
+  );
+}
+
 class ThreadLocalRepliesNotifier extends Notifier<List<NostrEvent>> {
   final ThreadRepliesArgs args;
 
   ThreadLocalRepliesNotifier(this.args);
 
   @override
-  List<NostrEvent> build() => const [];
+  List<NostrEvent> build() {
+    // Keep optimistic replies across route disposal, but release empty overlays.
+    KeepAliveLink? retention;
+    listenSelf((previous, next) {
+      if (next.isNotEmpty) {
+        retention ??= ref.keepAlive();
+      } else {
+        retention?.close();
+        retention = null;
+      }
+    });
+    return const [];
+  }
 
   void add(NostrEvent event) {
     state = _mergeReplies(state, [event]);
@@ -368,12 +543,10 @@ class ThreadLocalRepliesNotifier extends Notifier<List<NostrEvent>> {
   }
 }
 
-final threadLocalRepliesProvider =
-    NotifierProvider.family<
-      ThreadLocalRepliesNotifier,
-      List<NostrEvent>,
-      ThreadRepliesArgs
-    >(ThreadLocalRepliesNotifier.new);
+final threadLocalRepliesProvider = NotifierProvider.autoDispose
+    .family<ThreadLocalRepliesNotifier, List<NostrEvent>, ThreadRepliesArgs>(
+      ThreadLocalRepliesNotifier.new,
+    );
 
 /// Relay-backed replies merged with signed local replies that are still
 /// waiting for acknowledgement.
@@ -382,7 +555,7 @@ final threadLocalRepliesProvider =
 /// alive until confirmation so it can survive closing and reopening a thread.
 final threadRepliesWithLocalProvider = Provider.autoDispose
     .family<AsyncValue<List<NostrEvent>>, ThreadRepliesArgs>((ref, args) {
-      final relayReplies = ref.watch(threadRepliesProvider(args));
+      final relayReplies = ref.watch(threadPageRepliesProvider(args));
       final pagination = ref.watch(threadReplyPaginationProvider(args));
       final localReplyArgs = _localReplyArgs(args);
       final localReplies = ref.watch(
@@ -404,30 +577,26 @@ final threadRepliesWithLocalProvider = Provider.autoDispose
           final pendingMessagesNotifier = ref.read(
             pendingLocalMessagesProvider(args.channelId).notifier,
           );
+          final channelMessages = ref.read(
+            channelMessagesProvider(args.channelId).notifier,
+          );
+          final confirmedReplies = authoritative
+              .where(
+                (event) => localReplies.any((local) => local.id == event.id),
+              )
+              .toList();
           Future.microtask(() {
+            channelMessages.cacheConfirmedThreadReplies(confirmedReplies);
             localRepliesNotifier.confirm(authoritativeIds);
             pendingMessagesNotifier.confirm(authoritativeIds);
           });
         }
       }
-      if (localReplies.isEmpty) {
-        return relayReplies.whenData(
-          (events) => mergeThreadEvents(events, pagedEvents),
-        );
-      }
       if (authoritative != null) {
         return AsyncData(mergeThreadEvents(authoritative, localReplies));
       }
-      return relayReplies.when(
-        data: (events) => AsyncData(
-          mergeThreadEvents(
-            mergeThreadEvents(events, pagedEvents),
-            localReplies,
-          ),
-        ),
-        loading: () => AsyncData(localReplies),
-        error: (error, stackTrace) => AsyncData(localReplies),
-      );
+      if (localReplies.isEmpty) return relayReplies;
+      return AsyncData(localReplies);
     });
 
 /// Union two event lists by id, newest-wins, in timeline order.
