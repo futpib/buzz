@@ -16,6 +16,26 @@ check delivery completeness and avoidable handoffs. The latter fails only when
 the supplied context itself establishes a safe next step or existing convention;
 insufficient context and genuine user-only decisions pass.
 
+The same judge also runs at the harness's `completed` lifecycle boundary. It
+checks all user requests and subparts in the thread, including earlier requests
+that newer questions did not clearly supersede. Promises and progress updates
+are not resolution once the turn stops. Delivered results, explicit user
+cancellations/replacements, and genuine user-only blockers are valid stopping
+points. New work arriving during evaluation invalidates the stale verdict.
+
+All judge checks share a maximum of **three automatic corrective turns per
+thread since the newest user message**. Signed corrective messages carry the
+user ID and retry number, so restarting the coordinator does not reset the
+budget. Edits and judge-generated messages do not reset it. At the cap, failures
+still receive a verdict reaction but no further agent mention. A new user
+message opens a fresh budget. The worker serializes checks to prevent competing
+checks from spending the same slot.
+
+Completion checks use the full available thread up to 200,000 content characters;
+larger threads produce an explicit error rather than silently dropping old
+requests. Completion lifecycle events are ephemeral: a completion missed while
+the coordinator is offline is not replayed. This is not a durable task queue.
+
 An optional emoji reactor runs a separate persistent ACP session. For each new
 top-level kind `9` message, it chooses one relevant reaction from the message's
 topic, intent, and tone. The choice is not restricted to a hardcoded set: any

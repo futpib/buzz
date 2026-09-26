@@ -1,5 +1,7 @@
 //! Route owner messages, judge agent delivery, and react to new Buzz threads.
 
+mod turn_judge;
+
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::sync::Arc;
@@ -315,12 +317,14 @@ struct JudgeDelivery {
     verdict: Option<JudgeVerdict>,
     reaction_event_id: Option<EventId>,
     critique_event_id: Option<EventId>,
+    retry_exhausted: bool,
 }
 
 impl JudgeDelivery {
     fn complete(&self) -> bool {
         self.verdict.as_ref().is_some_and(|verdict| {
-            self.reaction_event_id.is_some() && (verdict.pass || self.critique_event_id.is_some())
+            self.reaction_event_id.is_some()
+                && (verdict.pass || self.critique_event_id.is_some() || self.retry_exhausted)
         })
     }
 
@@ -334,6 +338,12 @@ struct JudgeTracker {
     deliveries: HashMap<EventId, JudgeDelivery>,
     queued: HashSet<EventId>,
     latest: HashMap<EventId, (JudgeRevision, EventId)>,
+    turns: HashMap<(ThreadKey, PublicKey), Event>,
+}
+
+enum JudgeWork {
+    Message(Box<JudgeJob>),
+    Turn(Box<Event>),
 }
 
 #[derive(Clone)]
@@ -704,7 +714,7 @@ fn take_due_route_retry(routes: &mut RouteState, now: tokio::time::Instant) -> O
 
 async fn listen_once(
     config: &Config,
-    judge_tx: Option<&mpsc::Sender<JudgeJob>>,
+    judge_tx: Option<&mpsc::Sender<JudgeWork>>,
     judge_tracker: Arc<Mutex<JudgeTracker>>,
     emoji_tx: Option<&mpsc::Sender<EmojiJob>>,
     emoji_tracker: Arc<Mutex<EmojiTracker>>,
@@ -890,6 +900,9 @@ async fn listen_once(
                     event,
                 }) if subscription_id.starts_with(LIVE_SUBSCRIPTION_ID) => {
                     if event.kind == Kind::Custom(KIND_AGENT_THREAD_LIFECYCLE as u16) {
+                        if let Some(judge_tx) = judge_tx {
+                            turn_judge::enqueue(config, judge_tx, &judge_tracker, &event).await?;
+                        }
                         if let Err(error) = handle_thread_lifecycle(
                             config,
                             &mut connection,
@@ -1337,7 +1350,7 @@ async fn load_channel_members(config: &Config, channel_id: Uuid) -> Result<HashS
 
 async fn maybe_enqueue_judge(
     config: &Config,
-    judge_tx: &mpsc::Sender<JudgeJob>,
+    judge_tx: &mpsc::Sender<JudgeWork>,
     tracker: &Arc<Mutex<JudgeTracker>>,
     candidate: &Event,
 ) -> Result<()> {
@@ -1402,7 +1415,7 @@ async fn maybe_enqueue_judge(
             }
         }
     }
-    if let Err(error) = judge_tx.send(job).await {
+    if let Err(error) = judge_tx.send(JudgeWork::Message(Box::new(job))).await {
         tracker.lock().await.queued.remove(&candidate.id);
         return Err(anyhow!("judge worker stopped: {error}"));
     }
@@ -1412,13 +1425,39 @@ async fn maybe_enqueue_judge(
 async fn run_judge_worker(
     config: Config,
     tracker: Arc<Mutex<JudgeTracker>>,
-    mut jobs: mpsc::Receiver<JudgeJob>,
+    mut jobs: mpsc::Receiver<JudgeWork>,
 ) {
     let Some(judge_config) = config.judge.clone() else {
         return;
     };
     let mut session = None;
-    while let Some(job) = jobs.recv().await {
+    while let Some(work) = jobs.recv().await {
+        let job = match work {
+            JudgeWork::Message(job) => job,
+            JudgeWork::Turn(event) => {
+                for attempt in 0..JUDGE_RETRY_LIMIT {
+                    match turn_judge::process(
+                        &config,
+                        &judge_config,
+                        &tracker,
+                        &mut session,
+                        &event,
+                    )
+                    .await
+                    {
+                        Ok(()) => break,
+                        Err(error) => {
+                            eprintln!("failed to judge completed turn {}: {error:#}", event.id);
+                            if attempt + 1 < JUDGE_RETRY_LIMIT {
+                                tokio::time::sleep(retry_backoff(attempt as u32 + 1)).await;
+                            }
+                        }
+                    }
+                }
+                tracker.lock().await.queued.remove(&event.id);
+                continue;
+            }
+        };
         let latest = tracker
             .lock()
             .await
@@ -1843,6 +1882,14 @@ async fn request_judge_verdict(
     context: &[JudgeContextMessage],
 ) -> Result<JudgeVerdict> {
     let base_prompt = judge_prompt(event, context);
+    request_judge_prompt(config, session, base_prompt).await
+}
+
+async fn request_judge_prompt(
+    config: &JudgeConfig,
+    session: &mut Option<PersistentAcpSession>,
+    base_prompt: String,
+) -> Result<JudgeVerdict> {
     let mut invalid_output = None;
     for attempt in 0..JUDGE_RETRY_LIMIT {
         if session.is_none() {
@@ -1899,6 +1946,14 @@ async fn apply_judge_verdict(
     job: &JudgeJob,
     verdict: &JudgeVerdict,
 ) -> Result<()> {
+    let retry = if verdict.pass {
+        None
+    } else {
+        let root = parse_thread_relation(&job.target)
+            .map_or(job.target.id, |relation| relation.root_event_id);
+        let events = load_thread(config, job.channel_id, root).await?;
+        Some(turn_judge::retry_budget(config, &events)?)
+    };
     let mut connection = NostrWsConnection::connect_authenticated(
         &config.relay_url,
         &config.bot_keys,
@@ -1914,12 +1969,11 @@ async fn apply_judge_verdict(
         .cloned()
         .unwrap_or_default();
     if current.reaction_event_id.is_none() {
-        let reaction = config.sign(build_judge_reaction(
-            job.channel_id,
-            &job.event,
-            &job.target,
-            verdict,
-        )?)?;
+        let mut reaction = build_judge_reaction(job.channel_id, &job.event, &job.target, verdict)?;
+        if retry.as_ref().is_some_and(|budget| budget.exhausted()) {
+            reaction = reaction.tag(Tag::parse([turn_judge::EXHAUSTED_TAG, "true"])?);
+        }
+        let reaction = config.sign(reaction)?;
         let reaction_event_id = reaction.id;
         publish_required(&mut connection, reaction, "judge reaction").await?;
         let mut tracker = tracker.lock().await;
@@ -1927,6 +1981,7 @@ async fn apply_judge_verdict(
         delivery.target_id = Some(job.target.id);
         delivery.verdict = Some(verdict.clone());
         delivery.reaction_event_id = Some(reaction_event_id);
+        delivery.retry_exhausted = retry.as_ref().is_some_and(|budget| budget.exhausted());
     }
     if !verdict.pass {
         let critiqued = tracker
@@ -1935,19 +1990,23 @@ async fn apply_judge_verdict(
             .deliveries
             .get(&job.event.id)
             .is_some_and(|delivery| delivery.critique_event_id.is_some());
-        if !critiqued {
+        if !critiqued && !retry.as_ref().is_some_and(|budget| budget.exhausted()) {
             let agent_hex = job.target.pubkey.to_hex();
             let label = load_profile_label(config, &job.target.pubkey)
                 .await
                 .unwrap_or_else(|_| format!("agent-{}", &agent_hex[..8]));
-            let critique = config.sign(build_judge_critique(
+            let mut critique = build_judge_critique(
                 job.channel_id,
                 &job.event,
                 &job.target,
                 verdict,
                 &agent_hex,
                 &label,
-            )?)?;
+            )?;
+            if let Some(budget) = &retry {
+                critique = budget.tag(critique)?;
+            }
+            let critique = config.sign(critique)?;
             let critique_event_id = critique.id;
             publish_required(&mut connection, critique, "judge critique").await?;
             let mut tracker = tracker.lock().await;
@@ -1976,7 +2035,9 @@ async fn remove_superseded_judgments(
             **source_id != job.event.id && delivery.target_id(**source_id) == job.target.id
         })
         .flat_map(|(source_id, delivery)| {
-            [delivery.reaction_event_id, delivery.critique_event_id]
+            // Keep corrective messages as durable retry-budget receipts even
+            // when an edit supersedes their original judgment.
+            [delivery.reaction_event_id]
                 .into_iter()
                 .flatten()
                 .map(|event_id| (*source_id, event_id))
@@ -2382,6 +2443,8 @@ fn record_judge_event(
         && reaction_target(event) == Some(target)
     {
         delivery.reaction_event_id = Some(event.id);
+        delivery.retry_exhausted =
+            unique_event_tag_value(event, turn_judge::EXHAUSTED_TAG) == Some("true");
     } else if event.kind == Kind::Custom(9)
         && parse_thread_relation(event).is_some_and(|relation| relation.parent_event_id == target)
     {
