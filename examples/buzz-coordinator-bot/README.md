@@ -127,6 +127,14 @@ concurrent agent turns, rejects reordered snapshots, expires stale work, and
 recovers its tagged durable root reactions after restart. See
 [`NIP-AT`](../../docs/nips/NIP-AT.md).
 
+Publisher revisions are compared only with that publisher's lifecycle events,
+never with coordinator wall-clock revisions. Owner-directed replies are a
+fallback for agents without lifecycle evidence, not proof that a managed turn
+has stopped; replay uses the reply's original timestamp. Expiry marks a lease
+stale without changing its publisher revision or inventing a terminal event, so
+a fresh heartbeat can recover it. Durable reactions retain lifecycle provenance
+and terminal fences across reconnects, while accepting older receipt formats.
+
 To upgrade from standalone mode, generate the bot-specific attestation once
 and save its output as `BUZZ_AUTH_TAG`. The verified attestation adds its signer
 to the configured owners:

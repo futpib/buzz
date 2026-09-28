@@ -263,6 +263,8 @@ struct AgentTurnRecord {
     turn_id: String,
     expires_at: Option<u64>,
     authoritative: bool,
+    created_at: u64,
+    stale: bool,
 }
 
 #[derive(Clone)]
@@ -273,6 +275,7 @@ struct StatusProjection {
     expires_at: Option<u64>,
     created_at: u64,
     active_agents: HashSet<PublicKey>,
+    terminal_events: HashSet<EventId>,
 }
 
 impl StatusProjection {
@@ -925,24 +928,12 @@ async fn listen_once(
                         &config.owner_pubkeys,
                         &config.bot_keys.public_key(),
                     );
-                    if let Some(key) = agent_handoff_thread(
+                    if let Some(key) = record_agent_handoff(
+                        &mut routes,
                         &event,
                         &config.owner_pubkeys,
                         &config.bot_keys.public_key(),
                     ) {
-                        record_agent_turn(
-                            &mut routes,
-                            key,
-                            event.pubkey,
-                            AgentTurnRecord {
-                                state: AgentThreadState::Human,
-                                revision: unix_revision(),
-                                event_id: event.id,
-                                turn_id: format!("handoff:{}", event.id.to_hex()),
-                                expires_at: None,
-                                authoritative: true,
-                            },
-                        );
                         if let Err(error) = reconcile_thread_status(
                             config,
                             &mut connection,
@@ -1276,6 +1267,8 @@ async fn maybe_route(
             turn_id: format!("route:{}", candidate.id.to_hex()),
             expires_at: Some(unix_seconds().saturating_add(ROUTED_STATUS_EXPIRY_SECS)),
             authoritative: false,
+            created_at: candidate.created_at.as_secs(),
+            stale: false,
         },
     );
     reconcile_thread_status(config, live_connection, routes, thread_key).await?;
@@ -2665,6 +2658,7 @@ async fn load_route_state(config: &Config, channel_ids: &[Uuid]) -> Result<Route
         state.emoji_reactions.extend(channel_state.emoji_reactions);
         state.last_agents.extend(channel_state.last_agents);
         state.thread_agents.extend(channel_state.thread_agents);
+        state.agent_turns.extend(channel_state.agent_turns);
         state.status.extend(channel_state.status);
         state
             .obsolete_status_events
@@ -2946,7 +2940,16 @@ fn recover_status_projections(
             expires_at: unique_event_tag_value(event, STATUS_EXPIRES_TAG)
                 .and_then(|value| value.parse().ok()),
             created_at: event.created_at.as_secs(),
-            active_agents: recovered_agents.keys().copied().collect(),
+            active_agents: recovered_agents
+                .iter()
+                .filter(|(_, record)| record.state == AgentThreadState::Agent && !record.stale)
+                .map(|(agent, _)| *agent)
+                .collect(),
+            terminal_events: recovered_agents
+                .values()
+                .filter(|record| record.state != AgentThreadState::Agent || record.stale)
+                .map(|record| record.event_id)
+                .collect(),
         };
         let replaces_current = state.status.get(&key).is_none_or(|existing| {
             (existing.created_at, existing.event_id.to_hex())
@@ -2981,7 +2984,9 @@ fn parse_status_agents(event: &Event) -> HashMap<PublicKey, AgentTurnRecord> {
         .iter()
         .filter_map(|tag| {
             let parts = tag.as_slice();
-            if parts.first().map(String::as_str) != Some(STATUS_AGENT_TAG) || parts.len() != 6 {
+            if parts.first().map(String::as_str) != Some(STATUS_AGENT_TAG)
+                || !matches!(parts.len(), 6 | 10)
+            {
                 return None;
             }
             let agent = PublicKey::parse(&parts[1]).ok()?;
@@ -2991,12 +2996,22 @@ fn parse_status_agents(event: &Event) -> HashMap<PublicKey, AgentTurnRecord> {
             Some((
                 agent,
                 AgentTurnRecord {
-                    state: AgentThreadState::Agent,
+                    state: match parts.get(6).map(String::as_str) {
+                        None | Some("agent") => AgentThreadState::Agent,
+                        Some("human") => AgentThreadState::Human,
+                        Some("failed") => AgentThreadState::Failed,
+                        _ => return None,
+                    },
                     revision,
                     event_id,
                     turn_id: parts[2].clone(),
-                    expires_at: Some(expires_at),
-                    authoritative: false,
+                    expires_at: (expires_at != 0).then_some(expires_at),
+                    authoritative: parts.get(7).is_some_and(|value| value == "true"),
+                    created_at: parts
+                        .get(8)
+                        .and_then(|value| value.parse().ok())
+                        .unwrap_or(event.created_at.as_secs()),
+                    stale: parts.get(9).is_some_and(|value| value == "true"),
                 },
             ))
         })
@@ -3141,6 +3156,31 @@ fn agent_handoff_thread(event: &Event, owners: &[PublicKey], bot: &PublicKey) ->
     })
 }
 
+fn record_agent_handoff(
+    state: &mut RouteState,
+    event: &Event,
+    owners: &[PublicKey],
+    bot: &PublicKey,
+) -> Option<ThreadKey> {
+    let key = agent_handoff_thread(event, owners, bot)?;
+    record_agent_turn(
+        state,
+        key,
+        event.pubkey,
+        AgentTurnRecord {
+            state: AgentThreadState::Human,
+            revision: 0,
+            event_id: event.id,
+            turn_id: format!("handoff:{}", event.id.to_hex()),
+            expires_at: None,
+            authoritative: false,
+            created_at: event.created_at.as_secs(),
+            stale: false,
+        },
+    );
+    Some(key)
+}
+
 async fn handle_thread_lifecycle(
     config: &Config,
     connection: &mut NostrWsConnection,
@@ -3181,6 +3221,8 @@ async fn handle_thread_lifecycle(
             turn_id: parsed.lifecycle.turn_id,
             expires_at: parsed.lifecycle.expires_at,
             authoritative: true,
+            created_at: event.created_at.as_secs(),
+            stale: false,
         },
     );
     reconcile_thread_status(config, connection, state, key).await
@@ -3194,17 +3236,40 @@ fn record_agent_turn(
 ) {
     let records = state.agent_turns.entry(key).or_default();
     if let Some(existing) = records.get(&agent) {
-        if existing.turn_id == incoming.turn_id
+        if existing.authoritative
+            && incoming.authoritative
+            && existing.turn_id == incoming.turn_id
             && existing.state != AgentThreadState::Agent
             && incoming.state == AgentThreadState::Agent
         {
             return;
         }
         match (existing.authoritative, incoming.authoritative) {
+            // Publisher revisions and local inference clocks are different
+            // domains. Only compare revisions between real lifecycle events.
+            (false, true)
+                if existing.state == AgentThreadState::Agent
+                    && incoming.created_at < existing.created_at =>
+            {
+                return
+            }
             (false, true) => {}
-            (true, false) if existing.state == AgentThreadState::Agent => return,
+            (true, false)
+                if incoming.state == AgentThreadState::Human
+                    || (existing.state == AgentThreadState::Agent && !existing.stale)
+                    || incoming.created_at <= existing.created_at =>
+            {
+                return
+            }
             (true, false) => {}
-            _ => {
+            (false, false) => {
+                if (existing.created_at, existing.event_id)
+                    >= (incoming.created_at, incoming.event_id)
+                {
+                    return;
+                }
+            }
+            (true, true) => {
                 if (existing.revision, existing.event_id.to_hex())
                     >= (incoming.revision, incoming.event_id.to_hex())
                 {
@@ -3223,7 +3288,7 @@ fn aggregate_thread_status(
     let records = state.agent_turns.get(&key)?;
     let active_expiry = records
         .values()
-        .filter(|record| record.state == AgentThreadState::Agent)
+        .filter(|record| record.state == AgentThreadState::Agent && !record.stale)
         .filter_map(|record| record.expires_at)
         .max();
     if active_expiry.is_some() {
@@ -3231,7 +3296,7 @@ fn aggregate_thread_status(
     }
     if records
         .values()
-        .any(|record| record.state == AgentThreadState::Failed)
+        .any(|record| record.state == AgentThreadState::Failed || record.stale)
     {
         return Some((AgentThreadState::Failed, None));
     }
@@ -3261,21 +3326,22 @@ async fn set_thread_status(
     status: AgentThreadState,
     expires_at: Option<u64>,
 ) -> Result<()> {
-    let active_records = if status == AgentThreadState::Agent {
-        state
-            .agent_turns
-            .get(&key)
-            .into_iter()
-            .flat_map(|records| records.iter())
-            .filter(|(_, record)| record.state == AgentThreadState::Agent)
-            .map(|(agent, record)| (*agent, record.clone()))
-            .collect::<Vec<_>>()
-    } else {
-        Vec::new()
-    };
-    let active_agents = active_records
+    let records = state
+        .agent_turns
+        .get(&key)
+        .into_iter()
+        .flat_map(|records| records.iter())
+        .map(|(agent, record)| (*agent, record.clone()))
+        .collect::<Vec<_>>();
+    let active_agents = records
         .iter()
+        .filter(|(_, record)| record.state == AgentThreadState::Agent && !record.stale)
         .map(|(agent, _)| *agent)
+        .collect::<HashSet<_>>();
+    let terminal_events = records
+        .iter()
+        .filter(|(_, record)| record.state != AgentThreadState::Agent || record.stale)
+        .map(|(_, record)| record.event_id)
         .collect::<HashSet<_>>();
     let obsolete = state
         .obsolete_status_events
@@ -3292,6 +3358,7 @@ async fn set_thread_status(
             });
         current.state != status
             || current.active_agents != active_agents
+            || current.terminal_events != terminal_events
             || refresh_needed
             || current.needs_emoji_refresh()
     });
@@ -3305,10 +3372,7 @@ async fn set_thread_status(
     }
 
     let reaction = config.sign(build_thread_status_reaction(
-        key,
-        status,
-        expires_at,
-        &active_records,
+        key, status, expires_at, &records,
     )?)?;
     let mut replaced = obsolete;
     if let Some(previous) = state.status.get(&key) {
@@ -3350,6 +3414,7 @@ async fn set_thread_status(
             expires_at,
             created_at: reaction.created_at.as_secs(),
             active_agents,
+            terminal_events,
         },
     );
     eprintln!(
@@ -3364,7 +3429,7 @@ fn build_thread_status_reaction(
     key: ThreadKey,
     status: AgentThreadState,
     expires_at: Option<u64>,
-    active_records: &[(PublicKey, AgentTurnRecord)],
+    records: &[(PublicKey, AgentTurnRecord)],
 ) -> Result<EventBuilder> {
     let channel = key.channel_id.to_string();
     let root = key.root_event_id.to_hex();
@@ -3377,7 +3442,8 @@ fn build_thread_status_reaction(
         let expires_at = expires_at.to_string();
         builder = builder.tag(Tag::parse([STATUS_EXPIRES_TAG, expires_at.as_str()])?);
     }
-    for (agent, record) in active_records {
+    // Persist terminal and stale fences too, including their provenance.
+    for (agent, record) in records {
         let agent = agent.to_hex();
         let revision = record.revision.to_string();
         let expires_at = record.expires_at.unwrap_or_default().to_string();
@@ -3389,6 +3455,14 @@ fn build_thread_status_reaction(
             revision.as_str(),
             expires_at.as_str(),
             source_event.as_str(),
+            record.state.as_str(),
+            if record.authoritative {
+                "true"
+            } else {
+                "false"
+            },
+            &record.created_at.to_string(),
+            if record.stale { "true" } else { "false" },
         ])?);
     }
     Ok(builder)
@@ -3417,23 +3491,7 @@ async fn expire_thread_statuses(
     state: &mut RouteState,
 ) -> Result<()> {
     let now = unix_seconds();
-    let revision = unix_revision();
-    let mut changed = HashSet::new();
-    for (key, records) in &mut state.agent_turns {
-        for record in records.values_mut() {
-            if record.state == AgentThreadState::Agent
-                && record
-                    .expires_at
-                    .is_some_and(|expires_at| expires_at <= now)
-            {
-                record.state = AgentThreadState::Failed;
-                record.phase_to_stale();
-                record.revision = revision;
-                record.expires_at = None;
-                changed.insert(*key);
-            }
-        }
-    }
+    let mut changed = expire_agent_turns(state, now);
     for (key, projection) in &state.status {
         if projection.state == AgentThreadState::Agent
             && !state.agent_turns.contains_key(key)
@@ -3475,10 +3533,21 @@ async fn expire_thread_statuses(
     Ok(())
 }
 
-impl AgentTurnRecord {
-    fn phase_to_stale(&mut self) {
-        self.turn_id = format!("stale:{}", self.turn_id);
+fn expire_agent_turns(state: &mut RouteState, now: u64) -> HashSet<ThreadKey> {
+    let mut changed = HashSet::new();
+    for (key, records) in &mut state.agent_turns {
+        for record in records.values_mut() {
+            if record.state == AgentThreadState::Agent
+                && record
+                    .expires_at
+                    .is_some_and(|expires_at| expires_at <= now)
+            {
+                record.stale = true;
+                changed.insert(*key);
+            }
+        }
     }
+    changed
 }
 
 fn unix_seconds() -> u64 {
@@ -3958,6 +4027,7 @@ fn env_u64(name: &str, default: u64) -> Result<u64> {
 
 #[cfg(test)]
 mod tests {
+    mod status;
     use super::*;
 
     fn auth_tag(owner: &Keys, agent: &Keys) -> Tag {
@@ -5266,6 +5336,8 @@ mod tests {
                 turn_id: "agent-a".to_string(),
                 expires_at: Some(100),
                 authoritative: true,
+                created_at: 1,
+                stale: false,
             },
         );
         record_agent_turn(
@@ -5279,6 +5351,8 @@ mod tests {
                 turn_id: "agent-b".to_string(),
                 expires_at: None,
                 authoritative: true,
+                created_at: 2,
+                stale: false,
             },
         );
 
@@ -5298,6 +5372,8 @@ mod tests {
                 turn_id: "agent-a".to_string(),
                 expires_at: None,
                 authoritative: true,
+                created_at: 3,
+                stale: false,
             },
         );
         assert_eq!(
@@ -5316,6 +5392,8 @@ mod tests {
                 turn_id: "agent-b".to_string(),
                 expires_at: None,
                 authoritative: true,
+                created_at: 4,
+                stale: false,
             },
         );
         assert_eq!(
@@ -5343,6 +5421,8 @@ mod tests {
                 turn_id: "same-turn".to_string(),
                 expires_at: None,
                 authoritative: true,
+                created_at: 10,
+                stale: false,
             },
         );
         record_agent_turn(
@@ -5356,6 +5436,8 @@ mod tests {
                 turn_id: "same-turn".to_string(),
                 expires_at: Some(100),
                 authoritative: true,
+                created_at: 11,
+                stale: false,
             },
         );
 
@@ -5384,6 +5466,8 @@ mod tests {
                 turn_id: "route".to_string(),
                 expires_at: Some(100),
                 authoritative: false,
+                created_at: 1,
+                stale: false,
             },
         );
         record_agent_turn(
@@ -5397,6 +5481,8 @@ mod tests {
                 turn_id: "lifecycle".to_string(),
                 expires_at: None,
                 authoritative: true,
+                created_at: 2,
+                stale: false,
             },
         );
 
@@ -5425,6 +5511,8 @@ mod tests {
                 turn_id: "finished".to_string(),
                 expires_at: None,
                 authoritative: true,
+                created_at: 1,
+                stale: false,
             },
         );
         record_agent_turn(
@@ -5438,6 +5526,8 @@ mod tests {
                 turn_id: "route".to_string(),
                 expires_at: Some(100),
                 authoritative: false,
+                created_at: 2,
+                stale: false,
             },
         );
 
@@ -5648,6 +5738,8 @@ mod tests {
             turn_id: "active-turn".to_string(),
             expires_at: Some(123),
             authoritative: true,
+            created_at: 42,
+            stale: false,
         };
         let reaction = build_thread_status_reaction(
             key,

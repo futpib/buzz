@@ -46,8 +46,15 @@ the latest revision from the same agent for the same thread. A terminal
 snapshot also dominates a later-delivered `agent` refresh carrying the same
 `turnId`, closing the completion/liveness delivery race.
 
+Revisions are not wall-clock timestamps. Locally inferred routing, message
+handoffs, and lease expiry must not create revisions in a publisher's sequence.
+An inferred handoff must not override known lifecycle evidence. Replaying an
+old message does not make it a new lifecycle event.
+
 `expiresAt` is required for `agent` and forbidden for terminal states. An
 expired agent snapshot becomes `failed` unless a newer refresh arrives.
+This is a stale projection, not an authoritative terminal snapshot: preserve
+the publisher revision and allow a newer heartbeat for the same turn to recover.
 
 ## Coordinator behavior
 
