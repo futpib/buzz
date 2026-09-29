@@ -1,0 +1,140 @@
+#!/usr/bin/env bash
+# Bounded, read-only health checks and validated Redis disaster-recovery snapshots.
+set -euo pipefail
+umask 077
+
+redis_container=${BUZZ_REDIS_CONTAINER:-buzz-prod-redis-1}
+relay_container=${BUZZ_RELAY_CONTAINER:-buzz-prod-relay-1}
+backup_dir=${BUZZ_REDIS_BACKUP_DIR:-$HOME/buzz-backups/redis}
+state_dir=${XDG_STATE_HOME:-$HOME/.local/state}/buzz-resilience
+mkdir -p "$state_dir"
+
+validate() {
+    local snapshot=$1 image=$2
+    [[ -f "$snapshot" && ! -L "$snapshot" ]] || return 1
+    timeout 45 docker run --rm --network none --read-only \
+        --mount "type=bind,src=$snapshot,dst=/snapshot.rdb,readonly" \
+        "$image" redis-check-rdb /snapshot.rdb
+}
+
+health() {
+    local container
+    for container in "$redis_container" "$relay_container"; do
+        [[ $(timeout 10 docker inspect --format '{{.State.Health.Status}}' "$container") == healthy ]] || return 1
+    done
+    # /health is only liveness. Probe dependencies and the authenticated public path.
+    timeout 10 docker exec "$relay_container" bash -ec \
+        'exec 3<>/dev/tcp/127.0.0.1/8080; printf "GET /_readiness HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n" >&3; head -n 1 <&3 | grep -q " 200 "' || return 1
+    timeout 30 buzz-machine channels list | jq -e 'type == "array"' >/dev/null || return 1
+}
+
+case ${1:-} in
+    alert)
+        logger -p user.err -t buzz-resilience 'Buzz Redis backup failed; inspect buzz-redis-backup.service'
+        if command -v notify-send >/dev/null; then
+            timeout 5 notify-send --urgency=critical 'Buzz backup failed' 'Inspect buzz-redis-backup.service. Previous validated snapshots were preserved.' || true
+        fi
+        ;;
+    health)
+        if health; then
+            if [[ -e "$state_dir/unhealthy" ]]; then
+                logger -t buzz-resilience 'Buzz authenticated service recovered'
+                rm -- "$state_dir/unhealthy"
+            fi
+            echo 'Buzz readiness and authenticated request succeeded'
+        else
+            logger -p user.err -t buzz-resilience 'Buzz unavailable: dependency readiness or authenticated request failed'
+            if [[ ! -e "$state_dir/unhealthy" ]]; then
+                touch "$state_dir/unhealthy"
+                if command -v notify-send >/dev/null; then
+                    timeout 5 notify-send --urgency=critical 'Buzz is unavailable' 'Readiness or an authenticated request failed. Check buzz-health.service.' || true
+                fi
+            fi
+            exit 1
+        fi
+        ;;
+    backup)
+        exec 9>"$state_dir/backup.lock"
+        flock -w 5 9
+        mkdir -p "$backup_dir"
+        backup_dir=$(realpath "$backup_dir")
+        image=$(docker inspect --format '{{.Image}}' "$redis_container")
+        temporary=$(mktemp "$backup_dir/.snapshot.XXXXXXXX.rdb")
+        remote=/tmp/buzz-snapshot-$(basename "$temporary")
+        cleanup() {
+            rm -f -- "$temporary"
+            timeout 10 docker exec "$redis_container" rm -f -- "$remote" >/dev/null 2>&1 || true
+        }
+        trap cleanup EXIT
+        # Redis's replication snapshot is consistent while writes continue.
+        # Expanded inside the Redis container, never in the host's argv.
+        # shellcheck disable=SC2016
+        timeout 120 docker exec "$redis_container" sh -ec \
+            'export REDISCLI_AUTH="$REDIS_PASSWORD"; exec redis-cli --rdb "$1"' sh "$remote"
+        docker cp "$redis_container:$remote" "$temporary"
+        validate "$temporary" "$image"
+        sync -f "$temporary"
+        # Forty-eight hourly slots: never replace a known-good slot with a bad snapshot.
+        slot=$(( $(date +%s) / 3600 % 48 ))
+        destination=$backup_dir/snapshot-$slot.rdb
+        mv -f -- "$temporary" "$destination"
+        sync -f "$backup_dir"
+        echo "Validated Redis snapshot: $destination"
+        ;;
+    verify)
+        snapshot=$(realpath "${2:?usage: buzz-resilience verify SNAPSHOT.rdb}")
+        image=$(docker inspect --format '{{.Image}}' "$redis_container")
+        validate "$snapshot" "$image"
+        ;;
+    restore)
+        exec 9>"$state_dir/backup.lock"
+        flock -w 5 9
+        # Explicit operator action only. Never truncate an AOF or restart a live service.
+        snapshot=$(realpath "${2:?usage: buzz-resilience restore SNAPSHOT.rdb}")
+        [[ $(docker inspect --format '{{.State.Status}}' "$redis_container") == exited ]] || {
+            echo 'Refusing restore: stop the exact Redis container first' >&2
+            exit 1
+        }
+        image=$(docker inspect --format '{{.Image}}' "$redis_container")
+        validate "$snapshot" "$image"
+        data_dir=$(docker inspect --format '{{json .Mounts}}' "$redis_container" |
+            jq -er '[.[] | select(.Destination == "/data" and .Type == "bind") | .Source] | if length == 1 then .[0] else error("one /data bind mount required") end')
+        data_dir=$(realpath "$data_dir")
+        [[ "$data_dir" != / && "$data_dir" != "$HOME" && "$data_dir" != /home ]] || exit 1
+        archive=$(mktemp -d "$(dirname "$data_dir")/redis-recovery.XXXXXXXX")
+        # Redis needs writable staging; the complete old directory is retained.
+        # shellcheck disable=SC2016
+        timeout 120 docker run --rm --network none --user 0 \
+            --mount "type=bind,src=$data_dir,dst=/data" \
+            --mount "type=bind,src=$archive,dst=/recovery" \
+            --mount "type=bind,src=$snapshot,dst=/snapshot.rdb,readonly" \
+            "$image" sh -ec '
+                cp -a /data /recovery/original
+                mkdir /recovery/candidate
+                cp /snapshot.rdb /recovery/candidate/dump.rdb
+                redis-server --dir /recovery/candidate --appendonly no --save "" --daemonize yes --pidfile /tmp/recovery.pid --logfile /tmp/recovery.log
+                redis-cli CONFIG SET appendonly yes
+                count=0
+                while ! redis-cli INFO persistence | tr -d "\r" | grep -q "^aof_rewrite_in_progress:0$"; do
+                    count=$((count + 1))
+                    [ "$count" -lt 60 ] || exit 1
+                    sleep 1
+                done
+                redis-cli INFO persistence | tr -d "\r" | grep -q "^aof_last_bgrewrite_status:ok$"
+                redis-cli SHUTDOWN SAVE
+                redis-check-aof /recovery/candidate/appendonlydir/appendonly.aof.manifest
+                mkdir /recovery/retired
+                if [ -e /data/appendonlydir ]; then mv /data/appendonlydir /recovery/retired/; fi
+                if [ -e /data/dump.rdb ]; then mv /data/dump.rdb /recovery/retired/; fi
+                cp -a /recovery/candidate/appendonlydir /recovery/candidate/dump.rdb /data/
+                chown -R "$(stat -c %u:%g /data)" /data/appendonlydir /data/dump.rdb
+                sync
+            '
+        echo "Restored validated snapshot; original files retained at $archive/original"
+        echo "Redis remains stopped. Start $redis_container, then run buzz-resilience health."
+        ;;
+    *)
+        echo 'Usage: buzz-resilience health | backup | verify SNAPSHOT.rdb | restore SNAPSHOT.rdb' >&2
+        exit 2
+        ;;
+esac

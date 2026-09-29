@@ -1,0 +1,10 @@
+[Unit]
+Description=Keep 48 hourly Redis recovery snapshots
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+RandomizedDelaySec=2min
+
+[Install]
+WantedBy=timers.target

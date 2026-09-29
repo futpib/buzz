@@ -1,0 +1,8 @@
+[Unit]
+Description=Check Buzz dependencies and authenticated public access
+
+[Service]
+Type=oneshot
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=%h/.local/libexec/buzz-resilience health
+TimeoutStartSec=75

@@ -59,6 +59,51 @@ The bootstrap owner keypair is stored outside the repository at
 secret key is the initial owner identity and must never be committed or pasted
 into logs.
 
+## Outage detection and Redis recovery
+
+Run `bash deploy/private-host/install-resilience.sh` to install the minute-level
+dependency/authenticated-request health timer and hourly Redis snapshots.
+This does not restart running agents or Redis. It also gives installed bridges
+75 seconds to finish their existing 30-second drain and adapter cleanup before
+systemd resorts to SIGKILL. Turn recovery uses the coordinator's durable state,
+not an assumption that shutdown always finishes.
+
+`buzz-health.service` checks Docker dependency health, `/_readiness`, and the
+authenticated public `buzz-machine channels list` path. `/health` alone is not
+an availability check. Failures remain in the journal/failed service status and
+produce a local desktop notification when available; backup failures also alert.
+
+Snapshots live in `~/buzz-backups/redis/snapshot-N.rdb`, in 48 hourly slots.
+Each snapshot is obtained through Redis replication, checked with the running
+image's `redis-check-rdb`, synced, then atomically replaces its slot. Failed
+backups leave previous snapshots intact. These are local recovery copies, not
+protection from host/disk loss; include this directory and PostgreSQL/media/git
+backups in an independently secured off-host backup policy.
+
+There is deliberately no automatic AOF truncation or snapshot rollback. Restoring
+an older snapshot discards Redis changes since that snapshot. Inspect the cause
+and select an appropriate recovery point first. For a confirmed corrupt AOF:
+
+```bash
+~/.local/libexec/buzz-resilience verify /absolute/path/to/snapshot.rdb
+docker stop --timeout 15 buzz-prod-redis-1
+~/.local/libexec/buzz-resilience restore /absolute/path/to/snapshot.rdb
+docker start buzz-prod-redis-1
+~/.local/libexec/buzz-resilience health
+```
+
+Restore refuses a live Redis container and invalid RDBs. It retains the entire
+old data directory beside Redis in `redis-recovery.*/original`, builds/checks a
+new AOF in isolated staging, then replaces only Redis's AOF directory and RDB.
+It leaves Redis stopped on success or failure; PostgreSQL is never modified.
+Preserved archives are not automatically pruned. Container names and backup
+location can be overridden with `BUZZ_REDIS_CONTAINER`, `BUZZ_RELAY_CONTAINER`,
+and `BUZZ_REDIS_BACKUP_DIR` (systemd overrides must set them for the services).
+
+`bash deploy/private-host/test-resilience.sh` exercises real snapshot/restore,
+corrupt-AOF recovery, live/invalid-restore refusal, failed-backup preservation,
+and archival against a temporary isolated Redis container, then cleans it up.
+
 ## Always-on agents
 
 The four Buzz ACP bridges are installed from the tracked launcher and systemd

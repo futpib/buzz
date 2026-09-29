@@ -1,0 +1,9 @@
+[Unit]
+Description=Create and validate a rotating Redis recovery snapshot
+OnFailure=buzz-resilience-alert.service
+
+[Service]
+Type=oneshot
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=%h/.local/libexec/buzz-resilience backup
+TimeoutStartSec=4min

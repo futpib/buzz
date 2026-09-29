@@ -23,7 +23,8 @@ ExecStart=%h/.local/libexec/buzz-slopd-agent
 Restart=always
 RestartSec=5
 KillMode=mixed
-TimeoutStopSec=30
+# Allow the harness's 30-second drain plus adapter cleanup before SIGKILL.
+TimeoutStopSec=75
 
 [Install]
 WantedBy=default.target

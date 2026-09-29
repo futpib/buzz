@@ -1,0 +1,7 @@
+[Unit]
+Description=Report a failed Buzz backup
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/libexec/buzz-resilience alert
+TimeoutStartSec=10
