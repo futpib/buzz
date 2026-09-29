@@ -169,6 +169,23 @@ async fn live_relay_completion_retries_stop_at_three_after_tracker_restart() {
         .await
         .unwrap();
 
+    // Persist a working lease, then lose every in-memory coordinator record.
+    // The ephemeral lifecycle event itself is never sent to the new listener.
+    let interrupted = f.lifecycle(AgentThreadState::Agent, "working", unix_revision());
+    let mut prior = RouteState::default();
+    let mut prior_connection = NostrWsConnection::connect_authenticated(
+        &config.relay_url,
+        &config.bot_keys,
+        config.owner_auth_tag.as_ref(),
+    )
+    .await
+    .unwrap();
+    handle_thread_lifecycle(&config, &mut prior_connection, &interrupted, &mut prior)
+        .await
+        .unwrap();
+    prior_connection.disconnect().await.unwrap();
+    drop(prior);
+
     let tracker = Arc::new(Mutex::new(JudgeTracker::default()));
     let (tx, rx) = mpsc::channel(16);
     let worker = tokio::spawn(run_judge_worker(config.clone(), tracker.clone(), rx));
@@ -184,10 +201,20 @@ async fn live_relay_completion_retries_stop_at_three_after_tracker_restart() {
         )
         .await
     });
-    // Allow the authenticated subscription and history replay to establish.
-    tokio::time::sleep(Duration::from_secs(3)).await;
+    let recovered = await_delivery(&tracker, interrupted.id).await;
+    assert!(!recovered.verdict.unwrap().pass);
+    assert!(recovered.critique_event_id.is_some());
+    eprintln!(
+        "fresh coordinator recovered an expired durable turn after grace; one corrective mention"
+    );
+    // The agent socket was idle throughout the restart grace period.
+    let _ = agent_connection.disconnect().await;
+    agent_connection =
+        NostrWsConnection::connect_authenticated(&config.relay_url, &f.agent, Some(&auth))
+            .await
+            .unwrap();
     let mut last = None;
-    for index in 1..=4 {
+    for index in 2..=4 {
         let event = f.lifecycle(
             AgentThreadState::Human,
             "completed",
@@ -234,6 +261,15 @@ async fn live_relay_completion_retries_stop_at_three_after_tracker_restart() {
         })
         .count();
     assert_eq!(corrections, 3);
+    let notices = events
+        .iter()
+        .filter(|e| unique_event_tag_value(e, "judge-cap-user").is_some())
+        .collect::<Vec<_>>();
+    assert_eq!(notices.len(), 1, "exhaustion must be visible exactly once");
+    assert!(
+        !event_has_mention(notices[0]),
+        "cap notice must not start another turn"
+    );
     assert!(retry_budget(&config, &events).unwrap().exhausted());
     // The regular message judge must respect the same exhausted budget.
     let job = JudgeJob {

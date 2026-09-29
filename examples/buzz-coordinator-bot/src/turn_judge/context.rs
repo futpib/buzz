@@ -83,6 +83,62 @@ pub(super) async fn load(config: &Config, key: ThreadKey) -> Result<Vec<Event>> 
     Ok(events)
 }
 
+// Refresh the actual root receipts before replacing a verdict. The latest
+// reaction can outlive the coordinator's recent-history startup window.
+pub(super) async fn receipts(config: &Config, key: ThreadKey) -> Result<Vec<Event>> {
+    let mut connection = NostrWsConnection::connect_authenticated(
+        &config.relay_url,
+        &config.bot_keys,
+        config.owner_auth_tag.as_ref(),
+    )
+    .await?;
+    connection
+        .send_raw(&json!([
+            "REQ",
+            "turn-judge-receipts",
+            Filter::new()
+                .kind(Kind::Reaction)
+                .author(config.bot_keys.public_key())
+                .custom_tags(
+                    SingleLetterTag::lowercase(Alphabet::H),
+                    [key.channel_id.to_string()]
+                )
+                .custom_tags(
+                    SingleLetterTag::lowercase(Alphabet::E),
+                    [key.root_event_id.to_hex()]
+                )
+                .limit(THREAD_PAGE_SIZE)
+        ]))
+        .await?;
+    let mut events = Vec::new();
+    loop {
+        match connection.next_event(THREAD_QUERY_TIMEOUT).await? {
+            RelayMessage::Event {
+                subscription_id,
+                event,
+            } if subscription_id == "turn-judge-receipts" => {
+                event.verify()?;
+                events.push(*event);
+                if events.len() >= THREAD_PAGE_SIZE {
+                    bail!("turn receipts exceed query limit; refusing an incomplete recovery");
+                }
+            }
+            RelayMessage::Eose { subscription_id } if subscription_id == "turn-judge-receipts" => {
+                break
+            }
+            RelayMessage::Closed {
+                subscription_id,
+                message,
+            } if subscription_id == "turn-judge-receipts" => {
+                bail!("turn receipt query closed: {message}")
+            }
+            _ => {}
+        }
+    }
+    let _ = connection.disconnect().await;
+    Ok(events)
+}
+
 pub(super) fn effective_messages(events: &[Event]) -> Vec<Event> {
     let mut messages = events
         .iter()

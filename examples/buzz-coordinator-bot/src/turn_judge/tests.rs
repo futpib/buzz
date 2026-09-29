@@ -3,6 +3,26 @@ use buzz_core::agent_thread_lifecycle::{build_agent_thread_lifecycle, AgentThrea
 
 mod live;
 
+#[tokio::test]
+async fn lifecycle_ingestion_fences_recovery_before_status_publication() {
+    let f = Fixture::new();
+    let tracker = Arc::new(Mutex::new(JudgeTracker::default()));
+    tracker.lock().await.recovery.connect(&HashMap::new());
+    let (tx, _rx) = mpsc::channel(1);
+    let old = f.lifecycle(AgentThreadState::Agent, "working", 1);
+    enqueue(&f.config, &tx, &tracker, &old).await.unwrap();
+    let (key, agent) = coordinates(&old).unwrap();
+    let check = recovery::Check {
+        key,
+        agent,
+        source: old.id,
+    };
+    assert!(tracker.lock().await.recovery.current(&check, u64::MAX));
+    let fresh = f.lifecycle(AgentThreadState::Agent, "working", 2);
+    enqueue(&f.config, &tx, &tracker, &fresh).await.unwrap();
+    assert!(!tracker.lock().await.recovery.current(&check, u64::MAX));
+}
+
 struct Fixture {
     config: Config,
     owner: Keys,

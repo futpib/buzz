@@ -110,6 +110,20 @@ pub(super) async fn enqueue(
             }
         }
         tracker.turns.insert(key, event.clone());
+        tracker.recovery.observe(
+            key.0,
+            key.1,
+            AgentTurnRecord {
+                state: parsed.lifecycle.state,
+                revision: parsed.lifecycle.revision,
+                event_id: event.id,
+                turn_id: parsed.lifecycle.turn_id,
+                expires_at: parsed.lifecycle.expires_at,
+                authoritative: true,
+                created_at: event.created_at.as_secs(),
+                stale: false,
+            },
+        );
         if parsed.lifecycle.state != AgentThreadState::Human
             || parsed.lifecycle.phase != "completed"
             || tracker
@@ -179,16 +193,73 @@ pub(super) async fn process(
     session: &mut Option<PersistentAcpSession>,
     event: &Event,
 ) -> Result<()> {
-    if !is_current(tracker, event).await? {
+    let (key, agent) = coordinates(event)?;
+    process_check(
+        config,
+        judge,
+        tracker,
+        session,
+        &recovery::Check {
+            key,
+            agent,
+            source: event.id,
+        },
+        Some(event),
+    )
+    .await
+}
+
+pub(super) async fn process_recovery(
+    config: &Config,
+    judge: &JudgeConfig,
+    tracker: &Arc<Mutex<JudgeTracker>>,
+    session: &mut Option<PersistentAcpSession>,
+    check: &recovery::Check,
+) -> Result<()> {
+    if !load_channel_members(config, check.key.channel_id)
+        .await?
+        .contains(&check.agent)
+    {
+        bail!("recovery agent is no longer a channel member");
+    }
+    process_check(config, judge, tracker, session, check, None).await
+}
+
+async fn check_current(
+    tracker: &Arc<Mutex<JudgeTracker>>,
+    check: &recovery::Check,
+    live: Option<&Event>,
+) -> Result<bool> {
+    match live {
+        Some(event) => is_current(tracker, event).await,
+        None => Ok(tracker.lock().await.recovery.current(check, unix_seconds())),
+    }
+}
+
+async fn process_check(
+    config: &Config,
+    judge: &JudgeConfig,
+    tracker: &Arc<Mutex<JudgeTracker>>,
+    session: &mut Option<PersistentAcpSession>,
+    check: &recovery::Check,
+    live: Option<&Event>,
+) -> Result<()> {
+    if !check_current(tracker, check, live).await? {
         return Ok(());
     }
-    let (key, agent) = coordinates(event)?;
+    let recovery::Check { key, agent, source } = *check;
     let events = context::load(config, key).await?;
+    let receipts = context::receipts(config, key).await?;
     {
         let mut tracker = tracker.lock().await;
         recover_judge_deliveries(
             &mut tracker.deliveries,
             &events,
+            &config.bot_keys.public_key(),
+        );
+        recover_judge_deliveries(
+            &mut tracker.deliveries,
+            &receipts,
             &config.bot_keys.public_key(),
         );
     }
@@ -198,7 +269,7 @@ pub(super) async fn process(
         .lock()
         .await
         .deliveries
-        .get(&event.id)
+        .get(&source)
         .cloned()
         .unwrap_or_default();
     if existing.complete() {
@@ -206,11 +277,17 @@ pub(super) async fn process(
     }
     let verdict = match existing.verdict {
         Some(verdict) => verdict,
-        None => request_judge_prompt(judge, session, prompt(agent, &context)).await?,
+        None => {
+            let mut text = prompt(agent, &context);
+            if live.is_none() {
+                text.push_str("\nRecovery context: the coordinator recovered a durable terminal or expired turn record after lost contact. Completion may have happened while it was offline. Do not assume work was lost or repeat already delivered work. If unresolved work remains, instruct the agent to inspect its existing session, workspace and external effects before continuing; do not blindly repeat side effects.");
+            }
+            request_judge_prompt(judge, session, text).await?
+        }
     };
     // A new request, reply, or lifecycle transition invalidates this assessment.
     let fresh = context::load(config, key).await?;
-    if !is_current(tracker, event).await? || conversation(config, &fresh)? != context {
+    if !check_current(tracker, check, live).await? || conversation(config, &fresh)? != context {
         return Ok(());
     }
     let root = fresh
@@ -223,21 +300,36 @@ pub(super) async fn process(
         config.owner_auth_tag.as_ref(),
     )
     .await?;
-    remove_superseded_judgments(
+    remove_superseded_judgments_for(
         config,
         tracker,
-        &JudgeJob {
-            event: event.clone(),
-            target: root.clone(),
-            channel_id: key.channel_id,
-        },
+        source,
+        root.id,
+        key.channel_id,
         &mut connection,
     )
     .await?;
     // Persist the same tagged verdict format as message checks, so reconnect
     // recovery can finish a reaction/critique pair without reevaluating it.
+    if !verdict.pass
+        && budget.exhausted()
+        && !fresh.iter().any(|message| {
+            message.pubkey == config.bot_keys.public_key()
+                && unique_event_tag_value(message, "judge-cap-user")
+                    == Some(budget.user.to_hex().as_str())
+        })
+    {
+        let notice = config.sign(buzz_sdk::build_message(
+            key.channel_id,
+            "Automatic recovery stopped after three corrective turns for the latest user request. Work remains unresolved; send a new instruction to continue or change direction. No further automatic agent retries will be sent for this request.",
+            Some(&ThreadRef { root_event_id: root.id, parent_event_id: root.id }),
+            &[], false, &[], &[],
+        )?.tag(Tag::parse(["judge-cap-user", budget.user.to_hex().as_str()])?))?;
+        publish_required(&mut connection, notice, "retry limit notice").await?;
+    }
     if existing.reaction_event_id.is_none() {
-        let mut reaction = build_judge_reaction(key.channel_id, event, root, &verdict)?;
+        let mut reaction = build_judge_reaction_for(key.channel_id, source, root, &verdict)?
+            .tag(Tag::parse(["t", "buzz-turn-judge"])?);
         if budget.exhausted() {
             reaction = reaction.tag(Tag::parse([EXHAUSTED_TAG, "true"])?);
         }
@@ -245,7 +337,7 @@ pub(super) async fn process(
         let id = reaction.id;
         publish_required(&mut connection, reaction, "turn judge verdict").await?;
         let mut tracker = tracker.lock().await;
-        let delivery = tracker.deliveries.entry(event.id).or_default();
+        let delivery = tracker.deliveries.entry(source).or_default();
         delivery.target_id = Some(root.id);
         delivery.verdict = Some(verdict.clone());
         delivery.reaction_event_id = Some(id);
@@ -256,9 +348,9 @@ pub(super) async fn process(
         let label = load_profile_label(config, &agent)
             .await
             .unwrap_or_else(|_| format!("agent-{}", &agent_hex[..8]));
-        let critique = config.sign(budget.tag(build_judge_critique(
+        let critique = config.sign(budget.tag(build_judge_critique_for(
             key.channel_id,
-            event,
+            source,
             root,
             &verdict,
             &agent_hex,
@@ -270,13 +362,13 @@ pub(super) async fn process(
             .lock()
             .await
             .deliveries
-            .entry(event.id)
+            .entry(source)
             .or_default()
             .critique_event_id = Some(id);
     }
     eprintln!(
         "judged completed turn {}: {}; retries {}/{}",
-        event.id,
+        source,
         if verdict.pass { "pass" } else { "fail" },
         budget.used,
         MAX_RETRY_TURNS

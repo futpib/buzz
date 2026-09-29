@@ -1,5 +1,6 @@
 //! Route owner messages, judge agent delivery, and react to new Buzz threads.
 
+mod recovery;
 mod turn_judge;
 
 use std::collections::{HashMap, HashSet};
@@ -193,6 +194,7 @@ async fn main() -> Result<()> {
                 Arc::clone(&emoji_tracker),
             ) => result,
         };
+        judge_tracker.lock().await.recovery.disconnect();
         if connected_at.elapsed() >= RECONNECT_RESET_AFTER {
             reconnect_failures = 0;
         }
@@ -342,11 +344,13 @@ struct JudgeTracker {
     queued: HashSet<EventId>,
     latest: HashMap<EventId, (JudgeRevision, EventId)>,
     turns: HashMap<(ThreadKey, PublicKey), Event>,
+    recovery: recovery::Tracker,
 }
 
 enum JudgeWork {
     Message(Box<JudgeJob>),
     Turn(Box<Event>),
+    Recovery(recovery::Check),
 }
 
 #[derive(Clone)]
@@ -790,6 +794,11 @@ async fn listen_once(
         routes.pending.len(),
         routes.handled_sources.len()
     );
+    judge_tracker
+        .lock()
+        .await
+        .recovery
+        .connect(&routes.agent_turns);
 
     let refresh = tokio::time::sleep(CHANNEL_REFRESH_INTERVAL);
     tokio::pin!(refresh);
@@ -883,6 +892,9 @@ async fn listen_once(
                         }
                     }
                 }
+                if let Some(tx) = judge_tx {
+                    recovery::enqueue(tx, &judge_tracker, &routes).await?;
+                }
             }
             message = connection.next_event(RECEIVE_TIMEOUT) => match message {
                 Ok(RelayMessage::Event {
@@ -914,6 +926,7 @@ async fn listen_once(
                         ).await {
                             eprintln!("rejected thread lifecycle {}: {error:#}", event.id.to_hex());
                         }
+                        judge_tracker.lock().await.recovery.update(&routes);
                         continue;
                     }
                     record_last_agent(
@@ -1427,6 +1440,21 @@ async fn run_judge_worker(
     while let Some(work) = jobs.recv().await {
         let job = match work {
             JudgeWork::Message(job) => job,
+            JudgeWork::Recovery(check) => {
+                if let Err(error) = turn_judge::process_recovery(
+                    &config,
+                    &judge_config,
+                    &tracker,
+                    &mut session,
+                    &check,
+                )
+                .await
+                {
+                    eprintln!("turn recovery {} pending: {error:#}", check.source);
+                }
+                tracker.lock().await.queued.remove(&check.source);
+                continue;
+            }
             JudgeWork::Turn(event) => {
                 for attempt in 0..JUDGE_RETRY_LIMIT {
                     match turn_judge::process(
@@ -2019,13 +2047,32 @@ async fn remove_superseded_judgments(
     job: &JudgeJob,
     connection: &mut NostrWsConnection,
 ) -> Result<()> {
+    remove_superseded_judgments_for(
+        config,
+        tracker,
+        job.event.id,
+        job.target.id,
+        job.channel_id,
+        connection,
+    )
+    .await
+}
+
+async fn remove_superseded_judgments_for(
+    config: &Config,
+    tracker: &Arc<Mutex<JudgeTracker>>,
+    source: EventId,
+    target: EventId,
+    channel_id: Uuid,
+    connection: &mut NostrWsConnection,
+) -> Result<()> {
     let obsolete = tracker
         .lock()
         .await
         .deliveries
         .iter()
         .filter(|(source_id, delivery)| {
-            **source_id != job.event.id && delivery.target_id(**source_id) == job.target.id
+            **source_id != source && delivery.target_id(**source_id) == target
         })
         .flat_map(|(source_id, delivery)| {
             // Keep corrective messages as durable retry-budget receipts even
@@ -2037,12 +2084,7 @@ async fn remove_superseded_judgments(
         })
         .collect::<Vec<_>>();
     for (_, event_id) in &obsolete {
-        let deletion = config.sign(build_judge_deletion(
-            job.channel_id,
-            *event_id,
-            job.event.id,
-            job.target.id,
-        )?)?;
+        let deletion = config.sign(build_judge_deletion(channel_id, *event_id, source, target)?)?;
         publish_required(connection, deletion, "superseded judge output deletion").await?;
     }
     if !obsolete.is_empty() {
@@ -2285,13 +2327,19 @@ fn build_judge_reaction(
     target: &Event,
     verdict: &JudgeVerdict,
 ) -> Result<EventBuilder> {
+    build_judge_reaction_for(channel_id, source.id, target, verdict)
+}
+
+fn build_judge_reaction_for(
+    channel_id: Uuid,
+    source: EventId,
+    target: &Event,
+    verdict: &JudgeVerdict,
+) -> Result<EventBuilder> {
     Ok(
         buzz_sdk::build_reaction(target.id, if verdict.pass { "👍" } else { "👎" })?
             .tag(Tag::parse(["h", channel_id.to_string().as_str()])?)
-            .tag(Tag::parse([
-                JUDGED_SOURCE_TAG,
-                source.id.to_hex().as_str(),
-            ])?)
+            .tag(Tag::parse([JUDGED_SOURCE_TAG, source.to_hex().as_str()])?)
             .tag(Tag::parse([
                 JUDGED_TARGET_TAG,
                 target.id.to_hex().as_str(),
@@ -2306,6 +2354,24 @@ fn build_judge_reaction(
 fn build_judge_critique(
     channel_id: Uuid,
     source: &Event,
+    target: &Event,
+    verdict: &JudgeVerdict,
+    agent_hex: &str,
+    agent_label: &str,
+) -> Result<EventBuilder> {
+    build_judge_critique_for(
+        channel_id,
+        source.id,
+        target,
+        verdict,
+        agent_hex,
+        agent_label,
+    )
+}
+
+fn build_judge_critique_for(
+    channel_id: Uuid,
+    source: EventId,
     target: &Event,
     verdict: &JudgeVerdict,
     agent_hex: &str,
@@ -2347,7 +2413,7 @@ fn build_judge_critique(
     )?
     .tag(Tag::parse([
         JUDGED_SOURCE_TAG,
-        source.id.to_hex().as_str(),
+        source.to_hex().as_str(),
     ])?)
     .tag(Tag::parse([
         JUDGED_TARGET_TAG,
@@ -3234,7 +3300,16 @@ fn record_agent_turn(
     agent: PublicKey,
     incoming: AgentTurnRecord,
 ) {
-    let records = state.agent_turns.entry(key).or_default();
+    record_agent_turn_in(&mut state.agent_turns, key, agent, incoming);
+}
+
+fn record_agent_turn_in(
+    turns: &mut HashMap<ThreadKey, HashMap<PublicKey, AgentTurnRecord>>,
+    key: ThreadKey,
+    agent: PublicKey,
+    incoming: AgentTurnRecord,
+) {
+    let records = turns.entry(key).or_default();
     if let Some(existing) = records.get(&agent) {
         if existing.authoritative
             && incoming.authoritative

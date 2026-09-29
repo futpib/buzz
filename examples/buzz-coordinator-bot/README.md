@@ -33,8 +33,23 @@ checks from spending the same slot.
 
 Completion checks use the full available thread up to 200,000 content characters;
 larger threads produce an explicit error rather than silently dropping old
-requests. Completion lifecycle events are ephemeral: a completion missed while
-the coordinator is offline is not replayed. This is not a durable task queue.
+requests. Completion lifecycle events are ephemeral, but the coordinator now
+reconciles its durable per-thread lifecycle projections after reconnect and
+while online. After a two-minute reconnect grace and a two-minute expired-lease
+grace, it checks interrupted, failed, and completed turns through the same
+judge. Fresh heartbeats, any active agent in the thread, changed conversation,
+and changed turn IDs invalidate stale recovery assessments. Expired routed
+requests that never started are eligible too; synthetic historical handoffs
+are not.
+
+Recovery uses the same three-correction budget, current channel membership,
+and durable verdict receipts. A retry-limit notice does not mention an agent.
+Recovery instructions require inspecting existing work before repeating side
+effects; an expired lease is not proof that nothing ran. Query/worker failures
+remain eligible for paced retry, and a full worker queue never blocks heartbeat
+ingestion. This reconciles recorded work; it is not an exactly-once task queue.
+Events never observed/persisted by the coordinator and external side effects
+without idempotency keys cannot gain that guarantee.
 
 An optional emoji reactor runs a separate persistent ACP session. For each new
 top-level kind `9` message, it chooses one relevant reaction from the message's
