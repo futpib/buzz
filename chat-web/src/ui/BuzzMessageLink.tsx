@@ -45,12 +45,16 @@ export function BuzzMessageLink({
 
   return (
     <ViewLink
-      aria-label={`Open message in channel ${channelName}`}
+      aria-label={`Open message in channel ${channelName} in a new tab`}
       className={raw ? "buzz-message-link" : "buzz-message-anchor"}
       href={messageLinkRoute(link)}
       prefetchMode="intent"
+      rel="noopener noreferrer"
       scroll={false}
-      title={raw ? `Message in #${channelName}` : undefined}
+      target="_blank"
+      title={
+        raw ? `Message in #${channelName} (opens in a new tab)` : undefined
+      }
     >
       {contents}
     </ViewLink>

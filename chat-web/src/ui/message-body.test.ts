@@ -48,7 +48,7 @@ test("relay attachments use the authenticated new-tab control", () => {
   );
 });
 
-test("bare Buzz message links render as internal channel pills", () => {
+test("bare Buzz message pills open their web destination in a new tab", () => {
   const link = `buzz://message?channel=${channelId}&id=${messageId}&thread=${threadRootId}`;
   const html = renderToStaticMarkup(
     createElement(MessageBody, {
@@ -58,7 +58,9 @@ test("bare Buzz message links render as internal channel pills", () => {
   );
 
   assert.match(html, /class="buzz-message-link"/);
-  assert.match(html, /aria-label="Open message in channel buzz"/);
+  assert.match(html, /aria-label="Open message in channel buzz in a new tab"/);
+  assert.match(html, /target="_blank"/);
+  assert.match(html, /rel="noopener noreferrer"/);
   assert.match(html, />#buzz</);
   assert.match(
     html,
@@ -70,7 +72,7 @@ test("bare Buzz message links render as internal channel pills", () => {
   assert.match(html, /<\/a>\.<\/p>/);
 });
 
-test("labeled Buzz message links keep their label and navigate in-app", () => {
+test("labeled Buzz message links keep their label and open in a new tab", () => {
   const link = `buzz://message?channel=${channelId}&id=${messageId}`;
   const html = renderToStaticMarkup(
     createElement(MessageBody, {
@@ -81,7 +83,8 @@ test("labeled Buzz message links keep their label and navigate in-app", () => {
 
   assert.match(html, /class="buzz-message-anchor"/);
   assert.match(html, />Earlier update<\/a>/);
-  assert.doesNotMatch(html, /target="_blank"/);
+  assert.match(html, /target="_blank"/);
+  assert.match(html, /rel="noopener noreferrer"/);
 });
 
 test("malformed or unauthorized Buzz message links never become navigation", () => {
