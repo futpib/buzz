@@ -164,7 +164,11 @@ fn conversation(config: &Config, events: &[Event]) -> Result<String> {
         .iter()
         .map(|event| event.content.chars().count())
         .sum();
-    if chars > MAX_CONTEXT_CHARS {
+    let limit = config
+        .judge
+        .as_ref()
+        .map_or(MAX_CONTEXT_CHARS, |judge| judge.max_context_chars);
+    if chars > limit {
         bail!("thread exceeds completion judge context limit; refusing to omit old requests");
     }
     Ok(serde_json::to_string(&messages.into_iter().map(|event| json!({
@@ -263,8 +267,6 @@ async fn process_check(
             &config.bot_keys.public_key(),
         );
     }
-    let budget = retry_budget(config, &events)?;
-    let context = conversation(config, &events)?;
     let existing = tracker
         .lock()
         .await
@@ -275,6 +277,8 @@ async fn process_check(
     if existing.complete() {
         return Ok(());
     }
+    let budget = retry_budget(config, &events)?;
+    let context = conversation(config, &events)?;
     let verdict = match existing.verdict {
         Some(verdict) => verdict,
         None => {

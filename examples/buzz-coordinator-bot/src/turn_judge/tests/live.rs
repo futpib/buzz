@@ -323,6 +323,22 @@ async fn live_relay_completion_retries_stop_at_three_after_tracker_restart() {
     );
     assert!(delivery.critique_event_id.is_none());
     eprintln!("edited supersession: pass, no corrective mention");
+    let mut tiny = config.clone();
+    tiny.judge.as_mut().unwrap().max_context_chars = 1;
+    let mut unused_session = None;
+    process(
+        &tiny,
+        tiny.judge.as_ref().unwrap(),
+        &tracker,
+        &mut unused_session,
+        &resolved,
+    )
+    .await
+    .unwrap();
+    assert!(
+        unused_session.is_none(),
+        "a complete durable receipt must not invoke the judge again"
+    );
     listener.abort();
     let _ = listener.await;
     worker.await.unwrap();

@@ -234,6 +234,7 @@ struct JudgeConfig {
     cwd: String,
     idle_timeout: Duration,
     max_duration: Duration,
+    max_context_chars: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -535,12 +536,17 @@ impl JudgeConfig {
         let cwd = std::env::var("BUZZ_JUDGE_CWD")
             .or_else(|_| std::env::var("HOME"))
             .unwrap_or_else(|_| ".".to_string());
+        let max_context_chars = env_u64("BUZZ_JUDGE_MAX_CONTEXT_CHARS", 200_000)?;
+        if !(1..=1_000_000).contains(&max_context_chars) {
+            bail!("BUZZ_JUDGE_MAX_CONTEXT_CHARS must be between 1 and 1000000");
+        }
         Ok(Some(Self {
             command,
             args,
             cwd,
             idle_timeout: Duration::from_secs(env_u64("BUZZ_JUDGE_IDLE_TIMEOUT", 120)?),
             max_duration: Duration::from_secs(env_u64("BUZZ_JUDGE_MAX_DURATION", 600)?),
+            max_context_chars: max_context_chars as usize,
         }))
     }
 }

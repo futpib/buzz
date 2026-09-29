@@ -31,8 +31,11 @@ still receive a verdict reaction but no further agent mention. A new user
 message opens a fresh budget. The worker serializes checks to prevent competing
 checks from spending the same slot.
 
-Completion checks use the full available thread up to 200,000 content characters;
-larger threads produce an explicit error rather than silently dropping old
+Completion checks use the full available thread up to 200,000 content characters.
+`BUZZ_JUDGE_MAX_CONTEXT_CHARS` can raise this for a tested higher-context judge
+(hard ceiling 1,000,000). Complete durable receipts are checked before assembling
+the judge prompt, so previously assessed turns do not need to fit again.
+Larger threads produce an explicit error rather than silently dropping old
 requests. Completion lifecycle events are ephemeral, but the coordinator now
 reconciles its durable per-thread lifecycle projections after reconnect and
 while online. After a two-minute reconnect grace and a two-minute expired-lease

@@ -302,6 +302,29 @@ fn completion_context_preserves_old_requests_and_all_subsequent_answers() {
     assert!(conversation(&f.config, &events).is_err());
 }
 
+#[test]
+fn configured_context_budget_keeps_large_threads_whole() {
+    let mut f = Fixture::new();
+    let mut events = vec![f.root.clone()];
+    for time in 20..24 {
+        events.push(f.message(&f.agent, &"x".repeat(60_000), time));
+    }
+    assert!(conversation(&f.config, &events).is_err());
+    f.config.judge = Some(JudgeConfig {
+        command: "unused".into(),
+        args: vec![],
+        cwd: ".".into(),
+        idle_timeout: Duration::from_secs(1),
+        max_duration: Duration::from_secs(1),
+        max_context_chars: 400_000,
+    });
+    let context = conversation(&f.config, &events).unwrap();
+    assert!(context.contains(&f.root.id.to_hex()));
+    assert!(context.contains(&events[1].content));
+    f.config.judge.as_mut().unwrap().max_context_chars = 1000;
+    assert!(conversation(&f.config, &events).is_err());
+}
+
 #[tokio::test]
 #[ignore = "requires configured live judge ACP; does not publish Buzz messages"]
 async fn live_completion_judge_distinguishes_omission_supersession_and_resolution() {
