@@ -10,6 +10,7 @@ import {
 } from "@/client/identity";
 import { responseError, restoreBrowserSession } from "@/client/browser-session";
 import { PreferencePublisher } from "@/client/preference-publisher";
+import { readStatePayloads } from "@/client/read-state-payload";
 export { navigationPublishRetryDelay } from "@/client/preference-publisher";
 
 import type {
@@ -603,16 +604,6 @@ class NavigationController {
   }
 
   private payload(coordinate: string): { topic: string; value: unknown } {
-    if (coordinate.startsWith("read-state:")) {
-      return {
-        topic: "read-state",
-        value: {
-          v: 1,
-          client_id: this.snapshot.clientId,
-          contexts: this.snapshot.readContexts,
-        },
-      };
-    }
     if (coordinate === "channel-stars") {
       return {
         topic: coordinate,
@@ -662,36 +653,44 @@ class NavigationController {
     const credential = await loadSigningCredential(this.pubkey);
     if (!credential)
       throw new Error("Sign in again to sync your saved preferences");
-    const payload = this.payload(coordinate);
-    const createdAt = Math.max(
-      Math.floor(Date.now() / 1_000),
-      (this.publishCreatedAt.get(coordinate) ?? 0) + 1,
-    );
-    const event = makeEncryptedAppDataEvent(
-      credential,
-      { coordinate, ...payload },
-      createdAt,
-    );
-    const post = () =>
-      fetch("/api/navigation", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(event),
-        signal: AbortSignal.any([identitySignal, AbortSignal.timeout(30_000)]),
-      });
-    let response = await post();
-    if (response.status === 401) {
-      await restoreBrowserSession(this.pubkey);
-      response = await post();
-      if (!identitySignal.aborted) this.connectLive();
+    const payloads = coordinate.startsWith("read-state:")
+      ? readStatePayloads(this.snapshot.clientId, this.snapshot.readContexts)
+      : [{ coordinate, ...this.payload(coordinate) }];
+    // One durable queue entry covers the whole snapshot. Partial failure leaves
+    // it pending; a newer local edit gets its own pass after this one completes.
+    for (const payload of payloads) {
+      identitySignal.throwIfAborted();
+      const createdAt = Math.max(
+        Math.floor(Date.now() / 1_000),
+        (this.publishCreatedAt.get(payload.coordinate) ?? 0) + 1,
+      );
+      const event = makeEncryptedAppDataEvent(credential, payload, createdAt);
+      const post = () =>
+        fetch("/api/navigation", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(event),
+          signal: AbortSignal.any([
+            identitySignal,
+            AbortSignal.timeout(30_000),
+          ]),
+        });
+      let response = await post();
+      if (response.status === 401) {
+        await restoreBrowserSession(this.pubkey);
+        response = await post();
+        if (!identitySignal.aborted) this.connectLive();
+      }
+      if (!response.ok)
+        throw new Error(
+          await responseError(response, "Preference sync failed"),
+        );
+      // Failed attempts must not keep moving the timestamp into the future.
+      this.publishCreatedAt.set(
+        payload.coordinate,
+        Math.max(this.publishCreatedAt.get(payload.coordinate) ?? 0, createdAt),
+      );
     }
-    if (!response.ok)
-      throw new Error(await responseError(response, "Preference sync failed"));
-    // Failed attempts must not keep moving the timestamp into the future.
-    this.publishCreatedAt.set(
-      coordinate,
-      Math.max(this.publishCreatedAt.get(coordinate) ?? 0, createdAt),
-    );
   }
 
   markChannelRead(channelId: string) {

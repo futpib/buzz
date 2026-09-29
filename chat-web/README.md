@@ -19,6 +19,12 @@ the private key stays in the browser. Writes are serialized per preference
 coordinate so an older acknowledgement cannot discard a newer edit. Offline
 writes survive reloads, retry with capped backoff, and expose the failure reason
 and a Retry sync button after repeated failures.
+Accumulated read markers are split into stable encrypted records with a 32 KiB
+plaintext budget. Existing queued histories are split automatically on retry;
+all local markers are retained, and the outbox stays pending until every record
+is acknowledged. A fresh device merges the records using the existing read-state
+format. Uploads are bounded to 128 records per snapshot; a capacity error keeps
+the local history and queue intact.
 
 Authenticated channel, thread, Inbox, Threads-index, and search projections use a
 bounded session-scoped stale-while-revalidate cache. Next.js keeps prefetched

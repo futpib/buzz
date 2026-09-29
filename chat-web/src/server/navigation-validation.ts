@@ -33,8 +33,11 @@ export function validateNavigationAppDataEvent(
   if (event.kind !== APP_DATA_KIND) {
     throw new Error("Preference event kind is not allowed");
   }
-  if (!event.content || Buffer.byteLength(event.content, "utf8") > 128 * 1024) {
-    throw new Error("Preference payload is invalid");
+  if (!event.content) throw new Error("Preference payload is empty");
+  if (Buffer.byteLength(event.content, "utf8") > 128 * 1024) {
+    throw new Error(
+      "Preference payload exceeds the 128 KiB sync limit; refresh to update the client",
+    );
   }
   if (Math.abs(nowSeconds - event.created_at) > 300) {
     throw new Error("Preference timestamp is stale");
