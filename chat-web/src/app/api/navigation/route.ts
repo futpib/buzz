@@ -2,6 +2,7 @@ import { assertSameOrigin, getRequestSession } from "@/server/auth";
 import {
   applyNavigationAppDataEvent,
   loadNavigationWorkspace,
+  markNavigationViewsStale,
   refreshNavigationWorkspace,
 } from "@/server/navigation";
 import { validateNavigationAppDataEvent } from "@/server/navigation-validation";
@@ -66,7 +67,10 @@ export async function POST(request: Request): Promise<Response> {
     const event = JSON.parse(raw) as NostrEvent;
     validateNavigationAppDataEvent(session.pubkey, event);
     await publishPreferenceWithRetry(session, event);
-    await applyNavigationAppDataEvent(session, event);
+    await applyNavigationAppDataEvent(session, event).catch(() => {
+      // The relay acknowledged the write; a stale cache remains a retry record.
+      markNavigationViewsStale(session);
+    });
     return Response.json({ id: event.id });
   } catch (error) {
     return Response.json(

@@ -3369,3 +3369,15 @@ a {
   gap: 3px;
   padding: 0 6px;
 }
+
+.sidebar-error button {
+  display: block;
+  min-height: 44px;
+  margin-top: 4px;
+  padding: 0 10px;
+  border: 1px solid currentColor;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}

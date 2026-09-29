@@ -13,6 +13,13 @@ NIP-42 proofs and signed message events. It holds the authenticated relay
 WebSocket behind an opaque, HttpOnly session cookie so React Server Components
 can render authorized views without holding a private key.
 
+Navigation preferences use a durable, per-identity browser outbox. An expired
+HTTP session is renewed with the saved browser signer before retrying a write;
+the private key stays in the browser. Writes are serialized per preference
+coordinate so an older acknowledgement cannot discard a newer edit. Offline
+writes survive reloads, retry with capped backoff, and expose the failure reason
+and a Retry sync button after repeated failures.
+
 Authenticated channel, thread, Inbox, Threads-index, and search projections use a
 bounded session-scoped stale-while-revalidate cache. Next.js keeps prefetched
 route payloads in its client cache; sidebar destinations warm eagerly and

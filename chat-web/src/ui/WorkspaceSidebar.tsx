@@ -295,6 +295,11 @@ export function WorkspaceSidebar({
       {snapshot.error || logoutError ? (
         <p className="sidebar-error" role="alert">
           {logoutError ?? snapshot.error}
+          {snapshot.pendingPublishes.length > 0 ? (
+            <button type="button" onClick={controller.retryPending}>
+              Retry sync
+            </button>
+          ) : null}
         </p>
       ) : null}
       {channelMenu ? (

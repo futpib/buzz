@@ -19,6 +19,18 @@ const IDENTITY_DATABASE_TIMEOUT_MS = 1_500;
 let persistentCredentialRequest: Promise<BrowserCredential | null> | null =
   null;
 let identityGeneration = 0;
+let identityAbort = new AbortController();
+
+/** Cancel background authentication/writes when the browser identity changes. */
+export function signingIdentitySignal(): AbortSignal {
+  return identityAbort.signal;
+}
+
+function advanceIdentityGeneration() {
+  identityGeneration += 1;
+  identityAbort.abort();
+  identityAbort = new AbortController();
+}
 let memoryCredential: BrowserCredential | null = null;
 
 function secretKey(nsec: string): Uint8Array {
@@ -504,7 +516,7 @@ export async function storeCredential(
 ): Promise<void> {
   const parsed = parseStoredCredential(credential);
   if (!parsed) throw new Error("Browser credential is invalid");
-  identityGeneration += 1;
+  advanceIdentityGeneration();
   activateCredential(parsed);
   setStorageValue(
     browserLocalStorage(),
@@ -590,7 +602,7 @@ export async function loadSigningCredential(
 }
 
 export async function forgetCredential(): Promise<void> {
-  identityGeneration += 1;
+  advanceIdentityGeneration();
   memoryCredential = null;
   removeStorageValue(browserSessionStorage(), BROWSER_CREDENTIAL_KEY);
   removeStorageValue(browserLocalStorage(), PERSISTENT_CREDENTIAL_KEY);

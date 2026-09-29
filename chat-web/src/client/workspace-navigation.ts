@@ -6,7 +6,12 @@ import {
   decryptOwnAppDataEvent,
   loadSigningCredential,
   makeEncryptedAppDataEvent,
+  signingIdentitySignal,
 } from "@/client/identity";
+import { responseError, restoreBrowserSession } from "@/client/browser-session";
+import { PreferencePublisher } from "@/client/preference-publisher";
+export { navigationPublishRetryDelay } from "@/client/preference-publisher";
+
 import type {
   ChannelView,
   NavigationCandidateView,
@@ -55,8 +60,6 @@ export type ChannelNavigationMeta = {
 
 const STORAGE_PREFIX = "buzz.web-navigation.v1";
 const MAX_CANDIDATES = 5_000;
-const PUBLISH_DELAY_MS = 800;
-const MAX_PUBLISH_RETRY_DELAY_MS = 60_000;
 const EMPTY: NavigationSnapshot = {
   version: 1,
   clientId: "pending",
@@ -315,13 +318,6 @@ export function navigationReadContextsForChannel(
   return readContexts;
 }
 
-export function navigationPublishRetryDelay(attempt: number): number {
-  return Math.min(
-    MAX_PUBLISH_RETRY_DELAY_MS,
-    2_000 * 2 ** Math.min(Math.max(0, attempt - 1), 5),
-  );
-}
-
 class NavigationController {
   private listeners = new Set<() => void>();
   private channels: ChannelView[] = [];
@@ -329,11 +325,9 @@ class NavigationController {
   private started = false;
   private bootstrapAttempt = 0;
   private initialReadStateSeeded = false;
-  private publishTimers = new Map<string, number>();
+  private publisher: PreferencePublisher;
   private publishCreatedAt = new Map<string, number>();
-  private publishAttempts = new Map<string, number>();
   private pendingCoordinates: Set<string>;
-  private publishedEventIds = new Map<string, string>();
   snapshot: NavigationSnapshot;
 
   constructor(readonly pubkey: string) {
@@ -342,6 +336,14 @@ class NavigationController {
       ...{ ready: false, candidates: [], error: null },
     };
     this.pendingCoordinates = new Set(this.snapshot.pendingPublishes);
+    this.publisher = new PreferencePublisher({
+      initial: this.snapshot.pendingPublishes,
+      send: (coordinate) => this.publish(coordinate),
+      changed: (pendingPublishes, error) => {
+        this.pendingCoordinates = new Set(pendingPublishes);
+        this.commit({ pendingPublishes, error });
+      },
+    });
   }
 
   subscribe = (listener: () => void) => {
@@ -386,11 +388,7 @@ class NavigationController {
     void this.bootstrap();
   }
 
-  private retryPending = () => {
-    for (const coordinate of this.pendingCoordinates) {
-      this.schedulePublish(coordinate, 0, false);
-    }
-  };
+  retryPending = () => this.publisher.retry();
 
   private async bootstrap() {
     try {
@@ -455,10 +453,6 @@ class NavigationController {
               event.created_at,
             ),
           );
-          if (this.publishedEventIds.get(coordinate) === event.id) {
-            this.pendingCoordinates.delete(coordinate);
-            this.publishedEventIds.delete(coordinate);
-          }
         }
         if (coordinate?.startsWith("read-state:")) {
           if (record(value) && value.v === 1) {
@@ -604,28 +598,8 @@ class NavigationController {
     };
   }
 
-  private schedulePublish(
-    coordinate: string,
-    delay = PUBLISH_DELAY_MS,
-    resetAttempts = true,
-  ) {
-    if (resetAttempts) {
-      this.publishAttempts.delete(coordinate);
-      this.publishedEventIds.delete(coordinate);
-      this.pendingCoordinates.add(coordinate);
-      this.commit({
-        pendingPublishes: [...this.pendingCoordinates].sort(),
-      });
-    }
-    const current = this.publishTimers.get(coordinate);
-    if (current) window.clearTimeout(current);
-    this.publishTimers.set(
-      coordinate,
-      window.setTimeout(() => {
-        this.publishTimers.delete(coordinate);
-        void this.publish(coordinate);
-      }, delay),
-    );
+  private schedulePublish(coordinate: string) {
+    this.publisher.enqueue(coordinate);
   }
 
   private payload(coordinate: string): { topic: string; value: unknown } {
@@ -684,51 +658,40 @@ class NavigationController {
   }
 
   private async publish(coordinate: string) {
-    try {
-      const credential = await loadSigningCredential(this.pubkey);
-      if (!credential)
-        throw new Error("Browser signing identity is unavailable");
-      const payload = this.payload(coordinate);
-      const now = Math.floor(Date.now() / 1_000);
-      const createdAt = Math.max(
-        now,
-        (this.publishCreatedAt.get(coordinate) ?? 0) + 1,
-      );
-      this.publishCreatedAt.set(coordinate, createdAt);
-      const event = makeEncryptedAppDataEvent(
-        credential,
-        { coordinate, ...payload },
-        createdAt,
-      );
-      this.publishedEventIds.set(coordinate, event.id);
-      const response = await fetch("/api/navigation", {
+    const identitySignal = signingIdentitySignal();
+    const credential = await loadSigningCredential(this.pubkey);
+    if (!credential)
+      throw new Error("Sign in again to sync your saved preferences");
+    const payload = this.payload(coordinate);
+    const createdAt = Math.max(
+      Math.floor(Date.now() / 1_000),
+      (this.publishCreatedAt.get(coordinate) ?? 0) + 1,
+    );
+    const event = makeEncryptedAppDataEvent(
+      credential,
+      { coordinate, ...payload },
+      createdAt,
+    );
+    const post = () =>
+      fetch("/api/navigation", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(event),
+        signal: AbortSignal.any([identitySignal, AbortSignal.timeout(30_000)]),
       });
-      if (!response.ok) throw new Error("Navigation preference sync failed");
-      this.publishAttempts.delete(coordinate);
-      this.pendingCoordinates.delete(coordinate);
-      this.publishedEventIds.delete(coordinate);
-      this.commit({
-        error: this.pendingCoordinates.size === 0 ? null : this.snapshot.error,
-        pendingPublishes: [...this.pendingCoordinates].sort(),
-      });
-    } catch {
-      const attempt = (this.publishAttempts.get(coordinate) ?? 0) + 1;
-      this.publishAttempts.set(coordinate, attempt);
-      if (attempt >= 3) {
-        this.commit(
-          { error: "Navigation preferences are waiting to sync" },
-          false,
-        );
-      }
-      this.schedulePublish(
-        coordinate,
-        navigationPublishRetryDelay(attempt),
-        false,
-      );
+    let response = await post();
+    if (response.status === 401) {
+      await restoreBrowserSession(this.pubkey);
+      response = await post();
+      if (!identitySignal.aborted) this.connectLive();
     }
+    if (!response.ok)
+      throw new Error(await responseError(response, "Preference sync failed"));
+    // Failed attempts must not keep moving the timestamp into the future.
+    this.publishCreatedAt.set(
+      coordinate,
+      Math.max(this.publishCreatedAt.get(coordinate) ?? 0, createdAt),
+    );
   }
 
   markChannelRead(channelId: string) {

@@ -24,49 +24,13 @@ import {
   forgetCredential,
   loadCredential,
   loadPersistentCredential,
-  makeAuthEvent,
   parseAuthTag,
   storeCredential,
   type BrowserCredential,
 } from "@/client/identity";
 import { BrowserPairingSession, type PairingSnapshot } from "@/client/pairing";
 
-type LoginStart = {
-  attemptId: string;
-  challenge: string;
-  relayUrl: string;
-};
-
-async function errorMessage(response: Response, fallback: string) {
-  try {
-    const body = (await response.json()) as { error?: string };
-    return body.error || fallback;
-  } catch {
-    return fallback;
-  }
-}
-
-async function createBrowserSession(credential: BrowserCredential) {
-  const startResponse = await fetch("/api/auth/start", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: "{}",
-  });
-  if (!startResponse.ok) {
-    throw new Error(await errorMessage(startResponse, "Login could not start"));
-  }
-  const start = (await startResponse.json()) as LoginStart;
-  const event = makeAuthEvent(credential, start.challenge, start.relayUrl);
-  const sessionResponse = await fetch("/api/auth/session", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ attemptId: start.attemptId, event }),
-  });
-  if (!sessionResponse.ok) {
-    throw new Error(await errorMessage(sessionResponse, "Login failed"));
-  }
-  await storeCredential(credential);
-}
+import { createBrowserSession } from "@/client/browser-session";
 
 export function LoginForm({
   nextPath,
@@ -93,6 +57,7 @@ export function LoginForm({
     setError(null);
     try {
       await createBrowserSession(credential);
+      await storeCredential(credential);
       return true;
     } catch (caught) {
       await forgetCredential();
