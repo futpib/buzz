@@ -6,9 +6,11 @@ import ReactMarkdown, {
 import remarkGfm from "remark-gfm";
 
 import type { ChannelView } from "@/server/types";
+import { isVideoAttachmentUrl } from "@/shared/attachments";
 import { parseMessageLink } from "@/shared/message-link";
 import { AuthenticatedAttachmentLink } from "@/ui/AuthenticatedAttachmentLink";
 import { AuthenticatedImage } from "@/ui/AuthenticatedImage";
+import { AuthenticatedVideo } from "@/ui/AuthenticatedVideo";
 import { BuzzMessageLink } from "@/ui/BuzzMessageLink";
 import remarkMessageLinks from "@/ui/remark-message-links";
 import remarkMessagePreview from "@/ui/remark-message-preview";
@@ -36,6 +38,20 @@ export const MessageBody = memo(function MessageBody({
   );
   const markdownComponents: Components = {
     a: ({ node: _node, children, href, title }) => {
+      if (href && isVideoAttachmentUrl(href)) {
+        return (
+          <>
+            <AuthenticatedVideo
+              src={href}
+              label={childText(children)}
+              title={title}
+            />
+            <AuthenticatedAttachmentLink href={href} title={title}>
+              {children}
+            </AuthenticatedAttachmentLink>
+          </>
+        );
+      }
       const link = typeof href === "string" ? parseMessageLink(href) : null;
       if (link) {
         return (
@@ -55,7 +71,9 @@ export const MessageBody = memo(function MessageBody({
       );
     },
     img: ({ alt = "", src, title }) =>
-      typeof src === "string" ? (
+      typeof src === "string" && isVideoAttachmentUrl(src) ? (
+        <AuthenticatedVideo src={src} label={alt} title={title} />
+      ) : typeof src === "string" ? (
         <AuthenticatedImage alt={alt} src={src} title={title} />
       ) : null,
   };

@@ -891,7 +891,8 @@ a {
   padding-block: 7px;
 }
 
-.message-media-image {
+.message-media-image,
+.message-media-video {
   display: block;
   max-width: min(100%, 720px);
   max-height: min(62vh, 720px);
@@ -1062,7 +1063,8 @@ a {
   font-size: 11px;
 }
 
-.message-body-preview .message-media-image {
+.message-body-preview .message-media-image,
+.message-body-preview .message-media-video {
   max-width: min(100%, 240px);
   max-height: 6em;
   margin-block: 3px;

@@ -48,6 +48,30 @@ test("relay attachments use the authenticated new-tab control", () => {
   );
 });
 
+test("MP4 image Markdown uses authenticated video loading rather than the image viewer", () => {
+  const src = `https://relay.example/media/${"a".repeat(64)}.mp4`;
+  for (const content of [`![video](${src})`, `[gameplay.mp4](${src})`]) {
+    const html = renderToStaticMarkup(createElement(MessageBody, { content }));
+    assert.match(html, /Loading video/);
+    assert.doesNotMatch(html, /Loading image|message-media-trigger|<img/);
+    assert.doesNotMatch(html, /<video[^>]*src="https:\/\/relay/);
+  }
+});
+
+test("public video attachments render native inline controls and retain new-tab links", () => {
+  const html = renderToStaticMarkup(
+    createElement(MessageBody, {
+      content: "[Game clip](https://example.com/game.MP4?download=1)",
+    }),
+  );
+  assert.match(html, /<video[^>]*controls=""/);
+  assert.match(html, /playsInline=""/);
+  assert.match(html, /preload="metadata"/);
+  assert.match(html, /aria-label="Game clip"/);
+  assert.match(html, /target="_blank"/);
+  assert.doesNotMatch(html, /autoPlay/);
+});
+
 test("bare Buzz message pills open their web destination in a new tab", () => {
   const link = `buzz://message?channel=${channelId}&id=${messageId}&thread=${threadRootId}`;
   const html = renderToStaticMarkup(

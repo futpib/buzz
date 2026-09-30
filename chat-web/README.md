@@ -67,6 +67,13 @@ replaces a snapshot and never reduces relay events.
 The layout uses a drawer on phone-width screens, full-screen threads on mobile,
 safe-area insets, and the operating system's light/dark color scheme.
 
+Video attachment URLs render with native playback controls, including legacy
+MP4 attachments written as Markdown images. Protected videos use browser-signed
+media authorization, validate the returned video MIME type, and load into a
+browser blob before playback. Failed loads can be retried, expired sessions are
+renewed, and leaving the message cancels the request and releases its blob URL.
+Ordinary attachment links retain their authenticated new-tab action.
+
 Channel headers expose a pinned-message list, including messages outside the
 current timeline window. Message actions publish browser-signed kind-40004 pins;
 “Remove my pin” deletes the viewer's pin events (kind 5), leaving other members'

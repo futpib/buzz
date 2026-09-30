@@ -3,6 +3,19 @@ export const MAX_VIDEO_BYTES = 500 * 1024 * 1024;
 export const MAX_FILE_BYTES = 100 * 1024 * 1024;
 export const MAX_ATTACHMENTS_PER_MESSAGE = 10;
 
+/** Recognize video URLs in both legacy image Markdown and attachment links. */
+export function isVideoAttachmentUrl(src: string): boolean {
+  try {
+    const url = new URL(src, "https://relative.invalid");
+    return (
+      /^https?:$/.test(url.protocol) &&
+      /\.(?:mp4|webm|ogv|m4v)$/i.test(url.pathname)
+    );
+  } catch {
+    return false;
+  }
+}
+
 const HASH = /^[0-9a-f]{64}$/;
 const CANONICAL_IMAGE_MIME = new Set([
   "image/jpeg",
