@@ -8,7 +8,7 @@ import { createPortal } from "react-dom";
 import type { ImageGalleryItem } from "@/ui/image-gallery";
 
 const MIN_ZOOM_PERCENT = 100;
-const MAX_ZOOM_MULTIPLIER = 2;
+const MAX_ZOOM_MULTIPLIER = 8;
 const ZOOM_STEP_MULTIPLIER = 0.5;
 const CONTROL_ANIMATION_MS = 180;
 
