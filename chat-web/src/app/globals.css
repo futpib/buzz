@@ -1,4 +1,5 @@
 @import "photoswipe/style.css";
+@import "./message-table.css";
 
 :root {
   color-scheme: light dark;

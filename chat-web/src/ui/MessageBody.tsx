@@ -12,6 +12,7 @@ import { AuthenticatedAttachmentLink } from "@/ui/AuthenticatedAttachmentLink";
 import { AuthenticatedImage } from "@/ui/AuthenticatedImage";
 import { AuthenticatedVideo } from "@/ui/AuthenticatedVideo";
 import { BuzzMessageLink } from "@/ui/BuzzMessageLink";
+import { MessageTable, MessageTablePreview } from "@/ui/MessageTable";
 import remarkMessageLinks from "@/ui/remark-message-links";
 import remarkMessagePreview from "@/ui/remark-message-preview";
 
@@ -37,6 +38,7 @@ export const MessageBody = memo(function MessageBody({
     channels.map((channel) => [channel.id, channel.name]),
   );
   const markdownComponents: Components = {
+    table: preview ? MessageTablePreview : MessageTable,
     a: ({ node: _node, children, href, title }) => {
       if (href && isVideoAttachmentUrl(href)) {
         return (

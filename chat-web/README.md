@@ -67,6 +67,14 @@ replaces a snapshot and never reduces relay events.
 The layout uses a drawer on phone-width screens, full-screen threads on mobile,
 safe-area insets, and the operating system's light/dark color scheme.
 
+Full messages give each Markdown table its own Table, Cards, and Expand controls.
+Tables scroll within the message with edge shadows; Cards presents every row as
+labeled fields while preserving rich cell content. The full-screen reader has
+sticky headers and an optional frozen first column. Its view changes leave the
+inline view and conversation position intact; Close or Escape restores focus.
+Selections last while the table is mounted. Truncated index previews keep a
+scrollable table and use the existing Open message action for the full content.
+
 Video attachment URLs render with native playback controls, including legacy
 MP4 attachments written as Markdown images. Protected videos use browser-signed
 media authorization, validate the returned video MIME type, and load into a
