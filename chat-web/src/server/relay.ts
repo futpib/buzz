@@ -231,6 +231,7 @@ export class RelayConnection {
     },
     signal: AbortSignal,
   ): Promise<void> {
+    signal.throwIfAborted();
     this.assertReady();
     const subscriptionId = `web-live-${randomUUID()}`;
     return new Promise<void>((resolve, reject) => {

@@ -76,17 +76,36 @@ export function channelLiveStream<
       const listen = async () => {
         if (stopped) return;
         emit("status", { state: "connecting" });
-        try {
-          await input.listen(
-            () => {
-              listenDelay = 2_000;
-              void refresh();
-            },
-            (value) => emit("typing", value),
-            abort.signal,
+        const attempt = new AbortController();
+        const signal = AbortSignal.any([abort.signal, attempt.signal]);
+        let catchUpTimer: ReturnType<typeof setTimeout> | undefined;
+        const catchUpDeadline = new Promise<never>((_resolve, reject) => {
+          catchUpTimer = setTimeout(
+            () => reject(new Error("Live catch-up timed out")),
+            15_000,
           );
+        });
+        try {
+          await Promise.race([
+            input.listen(
+              () => {
+                if (signal.aborted) return;
+                clearTimeout(catchUpTimer);
+                listenDelay = 2_000;
+                void refresh();
+              },
+              (value) => {
+                if (!signal.aborted) emit("typing", value);
+              },
+              signal,
+            ),
+            catchUpDeadline,
+          ]);
         } catch (error) {
           degraded(error);
+        } finally {
+          clearTimeout(catchUpTimer);
+          attempt.abort();
         }
         if (!stopped) {
           listenTimer = setTimeout(() => void listen(), listenDelay);

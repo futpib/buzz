@@ -73,3 +73,40 @@ test("canceling a pending refresh suppresses its result and stops the subscripti
   assert.equal(stopped, true);
   assert.equal((await reader.read()).done, true);
 });
+
+test("a subscription with no catch-up response times out, aborts, and retries", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const abort = new AbortController();
+  const attempts: AbortSignal[] = [];
+  const stream = channelLiveStream({
+    signal: abort.signal,
+    listen: async (dirty, _typing, signal) => {
+      attempts.push(signal);
+      if (attempts.length > 1) dirty();
+      await new Promise<void>((resolve) =>
+        signal.addEventListener("abort", () => resolve(), { once: true }),
+      );
+    },
+    load: async () => ({ revision: "recovered" }),
+  });
+  let output = "";
+  const read = (async () => {
+    for await (const chunk of stream) output += new TextDecoder().decode(chunk);
+  })();
+  const settle = () => new Promise((resolve) => setImmediate(resolve));
+  try {
+    await settle();
+    t.mock.timers.tick(15_000);
+    await settle();
+    assert.equal(attempts[0].aborted, true);
+    assert.match(output, /Live catch-up timed out/);
+    assert.equal(attempts.length, 1);
+    t.mock.timers.tick(2_000);
+    await settle();
+    assert.equal(attempts.length, 2);
+    assert.match(output, /"revision":"recovered"/);
+  } finally {
+    abort.abort();
+    await read;
+  }
+});
