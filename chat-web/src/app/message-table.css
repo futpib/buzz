@@ -26,13 +26,15 @@
 }
 
 .message-table-toolbar button {
-  min-height: 44px;
-  padding: 6px 12px;
+  min-height: 28px;
+  padding: 3px 8px;
   border: 1px solid var(--line);
   border-radius: 7px;
   background: var(--panel);
   color: var(--ink);
   font: inherit;
+  font-size: 12px;
+  line-height: 20px;
   cursor: pointer;
 }
 
@@ -212,4 +214,23 @@
   min-height: 0;
   overflow: auto;
   overscroll-behavior: contain;
+}
+
+@media (max-width: 820px) {
+  .message-table-frame[data-bleed="true"] {
+    width: var(--table-viewport, 100%);
+    max-width: none;
+    margin-left: calc(-1 * var(--table-gutter, 0px));
+  }
+
+  .message-table-frame[data-bleed="true"] .message-table-scroll {
+    border: 0;
+    border-radius: 0;
+  }
+
+  .message-table-frame[data-bleed="true"] table {
+    min-width: calc(100% - var(--table-gutter, 0px));
+    margin-left: var(--table-gutter, 0px);
+    border: 1px solid var(--line);
+  }
 }

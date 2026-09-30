@@ -51,9 +51,11 @@ function TableCards({ children }: { children: ReactNode }) {
 function TableScroller({
   children,
   frozen = false,
+  bleed = false,
 }: {
   children: ReactNode;
   frozen?: boolean;
+  bleed?: boolean;
 }) {
   const scroll = useRef<HTMLElement>(null);
   const [edges, setEdges] = useState({ left: false, right: false });
@@ -66,19 +68,45 @@ function TableScroller({
         right:
           element.scrollLeft + element.clientWidth < element.scrollWidth - 1,
       });
-    update();
-    const observer = new ResizeObserver(update);
+    const frame = element.parentElement;
+    const anchor = frame?.parentElement;
+    const viewport = element.closest<HTMLElement>(
+      ".timeline, .thread-messages",
+    );
+    const measure = () => {
+      if (bleed && frame && anchor && viewport && anchor.clientWidth > 0) {
+        // The gutter belongs to the scrollable content, so it slides away
+        // naturally without changing the viewport width during a gesture.
+        const left =
+          anchor.getBoundingClientRect().left -
+          viewport.getBoundingClientRect().left -
+          viewport.clientLeft;
+        frame.style.setProperty("--table-gutter", `${Math.max(0, left)}px`);
+        frame.style.setProperty(
+          "--table-viewport",
+          `${viewport.clientWidth}px`,
+        );
+      }
+      update();
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
     observer.observe(element);
     if (element.firstElementChild) observer.observe(element.firstElementChild);
+    if (bleed && anchor && viewport) {
+      observer.observe(anchor);
+      observer.observe(viewport);
+    }
     element.addEventListener("scroll", update, { passive: true });
     return () => {
       observer.disconnect();
       element.removeEventListener("scroll", update);
     };
-  }, []);
+  }, [bleed]);
   return (
     <div
       className="message-table-frame"
+      data-bleed={bleed}
       data-left={edges.left}
       data-right={edges.right}
     >
@@ -177,7 +205,7 @@ export function MessageTable({ children }: { children?: ReactNode }) {
         </button>
       </div>
       <div hidden={view !== "table"}>
-        <TableScroller>{children}</TableScroller>
+        <TableScroller bleed>{children}</TableScroller>
       </div>
       {view === "cards" ? <TableCards>{children}</TableCards> : null}
       {expanded

@@ -74,6 +74,9 @@ sticky headers and an optional frozen first column. Its view changes leave the
 inline view and conversation position intact; Close or Escape restores focus.
 Selections last while the table is mounted. Truncated index previews keep a
 scrollable table and use the existing Open message action for the full content.
+On mobile, inline tables use the conversation's full width: a scrollable leading
+gutter aligns the first column with the message text, then slides away as the
+reader swipes. Compact view controls stay aligned with the text.
 
 Video attachment URLs render with native playback controls, including legacy
 MP4 attachments written as Markdown images. Protected videos use browser-signed
