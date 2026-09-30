@@ -1,7 +1,10 @@
 "use client";
 
-import { Inbox, Menu } from "lucide-react";
-import { useEffect, useState } from "react";
+import { Inbox, Menu, RefreshCw } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+
+import { responseError, restoreBrowserSession } from "@/client/browser-session";
+import { startInboxRefresh } from "@/client/inbox-refresh";
 
 import type {
   ChannelView,
@@ -87,43 +90,44 @@ export function InboxShell({ initial }: { initial: InboxWorkspaceView }) {
     initial.cacheState === "stale",
   );
 
+  const [refreshError, setRefreshError] = useState<string | null>(null);
+  const refresh = useRef<() => void>(() => undefined);
+
   useEffect(() => {
     setView(initial);
     const shouldRevalidate =
       initial.cacheState === "stale" ||
       Date.now() - initial.generatedAt >= INBOX_CLIENT_REVALIDATE_AFTER_MS;
-    setRevalidating(shouldRevalidate);
-    if (!shouldRevalidate) {
-      setRevalidating(false);
-      return;
-    }
-    const controller = new AbortController();
-    let disposed = false;
-    void fetch("/api/inbox?fresh=1", {
-      cache: "no-store",
-      signal: controller.signal,
-    })
-      .then(async (response) => {
+    const loop = startInboxRefresh({
+      delay: shouldRevalidate
+        ? 0
+        : Math.max(0, 15_000 - (Date.now() - initial.generatedAt)),
+      onState: (active, error) => {
+        setRevalidating(active);
+        setRefreshError(error);
+      },
+      load: async (signal) => {
+        const request = () =>
+          fetch("/api/inbox?fresh=1", { cache: "no-store", signal });
+        let response = await request();
         if (response.status === 401) {
-          window.location.assign(
-            `/login?next=${encodeURIComponent(location.pathname + location.search)}`,
-          );
-          return null;
+          await restoreBrowserSession(initial.identity.pubkey);
+          signal.throwIfAborted();
+          response = await request();
         }
-        if (!response.ok) return null;
-        return (await response.json()) as InboxWorkspaceView;
-      })
-      .then((fresh) => {
-        if (fresh && !controller.signal.aborted) setView(fresh);
-      })
-      .catch(() => undefined)
-      .finally(() => {
-        if (!disposed) setRevalidating(false);
-      });
-    return () => {
-      disposed = true;
-      controller.abort();
-    };
+        if (!response.ok)
+          throw new Error(
+            await responseError(response, "Inbox could not refresh"),
+          );
+        const fresh = (await response.json()) as InboxWorkspaceView;
+        signal.throwIfAborted();
+        setView(fresh);
+      },
+    });
+    setRevalidating(false);
+    setRefreshError(null);
+    refresh.current = loop.refresh;
+    return () => loop.dispose();
   }, [initial]);
 
   return (
@@ -144,7 +148,9 @@ export function InboxShell({ initial }: { initial: InboxWorkspaceView }) {
         identity={view.identity}
         selectedId={null}
       />
-      <section className="threads-panel">
+      <section
+        className={`threads-panel${refreshError ? " inbox-panel-error" : ""}`}
+      >
         <header className="channel-header">
           <button
             aria-controls="channel-navigation"
@@ -168,8 +174,32 @@ export function InboxShell({ initial }: { initial: InboxWorkspaceView }) {
             <span className="thread-total">
               {view.items.length} conversations
             </span>
+            <button
+              aria-label="Refresh inbox"
+              title="Refresh inbox"
+              disabled={revalidating}
+              onClick={() => refresh.current()}
+              type="button"
+            >
+              <RefreshCw aria-hidden="true" size={17} />
+            </button>
           </div>
         </header>
+        {refreshError ? (
+          <div className="inbox-refresh-error" role="status">
+            <span>
+              {refreshError}. Showing saved conversations; retrying
+              automatically.
+            </span>
+            <button
+              disabled={revalidating}
+              onClick={() => refresh.current()}
+              type="button"
+            >
+              Retry now
+            </button>
+          </div>
+        ) : null}
         <section className="threads-list" aria-label="Inbox conversations">
           {view.items.length === 0 ? (
             <p className="empty-timeline">Your inbox is clear.</p>

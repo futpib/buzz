@@ -3384,3 +3384,27 @@ a {
   color: inherit;
   cursor: pointer;
 }
+
+.inbox-refresh-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 16px;
+  color: var(--error);
+  font-size: 12px;
+}
+
+.inbox-refresh-error button {
+  flex-shrink: 0;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 6px 8px;
+  background: var(--panel);
+  color: var(--ink);
+  cursor: pointer;
+}
+
+.inbox-panel-error {
+  grid-template-rows: auto auto minmax(0, 1fr);
+}

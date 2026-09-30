@@ -35,6 +35,10 @@ the relay live stream and the Threads index refreshes in the background.
 Channel timelines scan the relay with a composite cursor until they contain a
 real page of top-level roots; reaching the top loads the next page without
 dropping the reader's scroll position.
+Inbox refreshes every 15 seconds while visible and on focus, tab return, or
+network recovery. Requests are serialized, timed out, and retried with capped
+backoff; failures keep existing conversations visible with a Retry action.
+Expired sessions renew through the saved browser signer before retrying.
 Every cache seed awaits the message set and its reaction/edit/deletion closure
 as one server projection, so opening a prewarmed thread cannot paint first and
 fill reactions in during a later refresh.
