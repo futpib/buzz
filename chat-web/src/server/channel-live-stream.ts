@@ -1,8 +1,10 @@
 import type { ChannelSnapshot, TypingIndicatorView } from "@/server/types";
 
 /** Keep an authoritative projected stream alive across transient relay failures. */
-export function channelLiveStream(input: {
-  load: () => Promise<ChannelSnapshot>;
+export function channelLiveStream<
+  T extends { revision: string } = ChannelSnapshot,
+>(input: {
+  load: () => Promise<T>;
   listen: (
     dirty: () => void,
     typing: (value: TypingIndicatorView) => void,

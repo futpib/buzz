@@ -3385,7 +3385,7 @@ a {
   cursor: pointer;
 }
 
-.inbox-refresh-error {
+.view-refresh-error {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -3395,7 +3395,7 @@ a {
   font-size: 12px;
 }
 
-.inbox-refresh-error button {
+.view-refresh-error button {
   flex-shrink: 0;
   border: 1px solid var(--line);
   border-radius: 6px;
@@ -3405,6 +3405,12 @@ a {
   cursor: pointer;
 }
 
-.inbox-panel-error {
+.view-panel-error {
   grid-template-rows: auto auto minmax(0, 1fr);
+}
+
+@media (max-width: 820px) {
+  .live-status.live-reconnecting {
+    display: inline-flex;
+  }
 }

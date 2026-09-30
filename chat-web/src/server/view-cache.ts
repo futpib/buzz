@@ -13,6 +13,8 @@ type Entry<T> = {
   generation: number;
   refresh: Promise<void> | null;
   refreshGeneration: number | null;
+  failures: number;
+  retryAt: number;
 };
 
 type ViewCacheOptions = {
@@ -61,11 +63,11 @@ export class ViewCache<T> {
       return { value: entry.value, state: "fresh", ageMs };
     }
 
-    this.startRefresh(key, entry, load).catch((error) => {
-      // The stale value remains a durable retry record. A later read will see
-      // it as stale and attempt the refresh again.
-      this.onBackgroundError(error, key);
-    });
+    if (!entry.refresh && now >= entry.retryAt) {
+      this.startRefresh(key, entry, load).catch((error) => {
+        this.onBackgroundError(error, key);
+      });
+    }
     return { value: entry.value, state: "stale", ageMs };
   }
 
@@ -105,6 +107,8 @@ export class ViewCache<T> {
       existing.generation += 1;
       existing.value = value;
       existing.updatedAt = now;
+      existing.failures = 0;
+      existing.retryAt = 0;
       existing.lastAccessedAt = now;
     } else {
       this.entries.set(key, {
@@ -114,6 +118,8 @@ export class ViewCache<T> {
         generation: 0,
         refresh: null,
         refreshGeneration: null,
+        failures: 0,
+        retryAt: 0,
       });
       this.evictIfNeeded(key);
     }
@@ -124,6 +130,7 @@ export class ViewCache<T> {
       if (!matches(key)) continue;
       entry.generation += 1;
       entry.updatedAt = 0;
+      entry.retryAt = 0;
     }
   }
 
@@ -181,7 +188,18 @@ export class ViewCache<T> {
         const now = this.now();
         entry.value = value;
         entry.updatedAt = now;
+        entry.failures = 0;
+        entry.retryAt = 0;
         entry.lastAccessedAt = now;
+      })
+      .catch((error) => {
+        if (entry.generation === generation) {
+          entry.failures += 1;
+          entry.retryAt =
+            this.now() +
+            Math.min(30_000, 1_000 * 2 ** Math.min(entry.failures - 1, 5));
+        }
+        throw error;
       })
       .finally(() => {
         if (entry.refresh === refresh) {
@@ -203,6 +221,8 @@ export class ViewCache<T> {
       generation: 0,
       refresh: null,
       refreshGeneration: null,
+      failures: 0,
+      retryAt: 0,
     };
   }
 

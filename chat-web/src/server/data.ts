@@ -513,8 +513,9 @@ export async function loadChannelHistoryPage(
   session: AuthSession,
   channelId: string,
   cursor: ChannelTimelineCursor,
+  fresh = false,
 ): Promise<ChannelHistoryPage> {
-  const result = await historyCache.get(
+  const result = await historyCache[fresh ? "refresh" : "get"](
     historyCacheKey(session, channelId, cursor),
     () => loadChannelHistoryPageFresh(session, channelId, cursor),
   );

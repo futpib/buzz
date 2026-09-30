@@ -1,19 +1,20 @@
 "use client";
 
 import { Menu, MessageSquareText } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 
 import {
   type ChannelNavigationMeta,
   navigationUnreadForThread,
   useWorkspaceNavigation,
 } from "@/client/workspace-navigation";
+import { useRefreshingView } from "@/client/use-refreshing-view";
+import { ViewRefreshError } from "@/ui/ViewRefreshError";
+
 import type { ThreadSummaryView, ThreadsWorkspaceView } from "@/server/types";
 import { MessageSurfaceCard } from "@/ui/MessageSurfaceCard";
 import { ViewRefreshIndicator } from "@/ui/ViewRefreshIndicator";
 import { WorkspaceSidebar } from "@/ui/WorkspaceSidebar";
-
-const THREADS_CLIENT_REVALIDATE_AFTER_MS = 10_000;
 
 function relativeTime(timestamp: number, now: number): string {
   const seconds = Math.max(0, Math.floor(now / 1_000) - timestamp);
@@ -84,11 +85,13 @@ export function ThreadSurfaceRow({
 }
 
 export function ThreadsShell({ initial }: { initial: ThreadsWorkspaceView }) {
-  const [view, setView] = useState(initial);
+  const {
+    view,
+    refreshing: revalidating,
+    error: refreshError,
+    refresh,
+  } = useRefreshingView(initial, "/api/threads", "Threads");
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
-  const [revalidating, setRevalidating] = useState(
-    initial.cacheState === "stale",
-  );
   const navigation = useWorkspaceNavigation(
     view.identity.pubkey,
     view.channels,
@@ -108,45 +111,6 @@ export function ThreadsShell({ initial }: { initial: ThreadsWorkspaceView }) {
     );
   });
 
-  useEffect(() => {
-    setView(initial);
-    const shouldRevalidate =
-      initial.cacheState === "stale" ||
-      Date.now() - initial.generatedAt >= THREADS_CLIENT_REVALIDATE_AFTER_MS;
-    setRevalidating(shouldRevalidate);
-    if (!shouldRevalidate) {
-      setRevalidating(false);
-      return;
-    }
-    const controller = new AbortController();
-    let disposed = false;
-    void fetch("/api/threads?fresh=1", {
-      cache: "no-store",
-      signal: controller.signal,
-    })
-      .then(async (response) => {
-        if (response.status === 401) {
-          window.location.assign(
-            `/login?next=${encodeURIComponent(location.pathname + location.search)}`,
-          );
-          return null;
-        }
-        if (!response.ok) return null;
-        return (await response.json()) as ThreadsWorkspaceView;
-      })
-      .then((fresh) => {
-        if (fresh && !controller.signal.aborted) setView(fresh);
-      })
-      .catch(() => undefined)
-      .finally(() => {
-        if (!disposed) setRevalidating(false);
-      });
-    return () => {
-      disposed = true;
-      controller.abort();
-    };
-  }, [initial]);
-
   return (
     <main
       className={`workspace workspace-threads${mobileNavOpen ? " mobile-nav-open" : ""}`}
@@ -165,7 +129,9 @@ export function ThreadsShell({ initial }: { initial: ThreadsWorkspaceView }) {
         identity={view.identity}
         selectedId={null}
       />
-      <section className="threads-panel">
+      <section
+        className={`threads-panel${refreshError ? " view-panel-error" : ""}`}
+      >
         <header className="channel-header">
           <button
             aria-controls="channel-navigation"
@@ -189,6 +155,11 @@ export function ThreadsShell({ initial }: { initial: ThreadsWorkspaceView }) {
             <span className="thread-total">{view.threads.length} total</span>
           </div>
         </header>
+        <ViewRefreshError
+          error={refreshError}
+          active={revalidating}
+          retry={refresh}
+        />
         <nav className="threads-list" aria-label="All threads">
           {view.threads.length === 0 ? (
             <p className="empty-timeline">No threads yet.</p>

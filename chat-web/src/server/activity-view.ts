@@ -2,7 +2,7 @@ import {
   eventConversationId,
   eventThreadTarget,
 } from "@/server/event-navigation";
-import { fallbackProfile } from "@/server/projector";
+import { fallbackProfile, projectMessages } from "@/server/projector";
 import type {
   ActivityItemKind,
   ActivityItemView,
@@ -54,6 +54,13 @@ export function projectActivityItems(
     channels.map((channel) => [channel.id, channel]),
   );
   const groups = new Map<string, NostrEvent[]>();
+  const messages = new Map(
+    channels
+      .flatMap((channel) =>
+        projectMessages(events, channel.id, profiles, viewerPubkey),
+      )
+      .map((message) => [message.id, message]),
+  );
 
   for (const event of new Map(
     events.map((candidate) => [candidate.id, candidate]),
@@ -64,7 +71,12 @@ export function projectActivityItems(
     const conversationId = eventConversationId(event);
     const groupKey = `${channelId ?? "global"}:${conversationId}`;
     const group = groups.get(groupKey) ?? [];
-    group.push(event);
+    const kind = activityKind(event.kind);
+    if (kind === "message" || kind === "forum") {
+      const message = messages.get(event.id);
+      if (!message) continue;
+      group.push({ ...event, content: message.content });
+    } else group.push(event);
     groups.set(groupKey, group);
   }
 

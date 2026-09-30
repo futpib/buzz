@@ -63,6 +63,7 @@ test("returns stale immediately, refreshes once, and retries failures", async ()
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(errors.length, 1);
 
+  now += 1_000;
   const replacement = deferred<string>();
   assert.equal(
     (await cache.get("session:threads", () => replacement.promise)).value,
@@ -157,4 +158,72 @@ test("bounds idle entries by least-recent access", async () => {
   assert.equal(loaded.state, "miss");
   assert.equal(loaded.value, "B2");
   assert.equal(loads, 1);
+});
+
+test("a burst of stale readers logs one failure and backs off without losing cached data", async () => {
+  let now = 100;
+  let loads = 0;
+  let errors = 0;
+  const cache = new ViewCache<string>({
+    maxEntries: 4,
+    staleAfterMs: 10,
+    now: () => now,
+    onBackgroundError: () => errors++,
+  });
+  cache.set("view", "saved");
+  now += 11;
+  const pending = deferred<string>();
+  const load = () => {
+    loads++;
+    return pending.promise;
+  };
+  const reads = await Promise.all(
+    Array.from({ length: 20 }, () => cache.get("view", load)),
+  );
+  assert.ok(reads.every((result) => result.value === "saved"));
+  assert.equal(loads, 1);
+  pending.reject(new Error("rate limited"));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(errors, 1);
+  await cache.get("view", async () => {
+    loads++;
+    return "unexpected";
+  });
+  assert.equal(loads, 1);
+  now += 1000;
+  await cache.get("view", async () => {
+    loads++;
+    return "new";
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(loads, 2);
+  assert.equal((await cache.get("view", async () => "unused")).value, "new");
+});
+
+test("an obsolete failed refresh cannot delay a newly invalidated generation", async () => {
+  let now = 100;
+  const cache = new ViewCache<string>({
+    maxEntries: 4,
+    staleAfterMs: 10,
+    now: () => now,
+    onBackgroundError: () => {},
+  });
+  cache.set("view", "saved");
+  now += 11;
+  const pending = deferred<string>();
+  await cache.get("view", () => pending.promise);
+  cache.markStale((key) => key === "view");
+  pending.reject(new Error("obsolete failure"));
+  await new Promise((resolve) => setImmediate(resolve));
+  let refreshed = false;
+  await cache.get("view", async () => {
+    refreshed = true;
+    return "current";
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(refreshed, true);
+  assert.equal(
+    (await cache.get("view", async () => "unused")).value,
+    "current",
+  );
 });

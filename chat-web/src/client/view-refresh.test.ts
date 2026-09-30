@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { startInboxRefresh } from "./inbox-refresh";
+import { startViewRefresh } from "./view-refresh";
 
 function environment() {
   const doc = Object.assign(new EventTarget(), { visibilityState: "visible" });
@@ -38,7 +38,8 @@ test("an open Inbox keeps refreshing, pauses while hidden, resumes and cleans up
   let calls = 0;
   let finish: (() => void) | undefined;
   let signal: AbortSignal | undefined;
-  const loop = startInboxRefresh({
+  const loop = startViewRefresh({
+    label: "Inbox",
     delay: 15000,
     onState: () => {},
     load: (s) => {
@@ -90,7 +91,8 @@ test("failed and hung Inbox refreshes surface errors and recover with bounded re
   let calls = 0;
   let hang = false;
   const states: [boolean, string | null][] = [];
-  const loop = startInboxRefresh({
+  const loop = startViewRefresh({
+    label: "Inbox",
     delay: 0,
     onState: (busy, error) => states.push([busy, error]),
     load: async (signal) => {

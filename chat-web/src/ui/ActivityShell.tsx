@@ -1,7 +1,10 @@
 "use client";
 
 import { Bell, Bot, Menu } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useState } from "react";
+
+import { useRefreshingView } from "@/client/use-refreshing-view";
+import { ViewRefreshError } from "@/ui/ViewRefreshError";
 
 import type {
   ActivityItemView,
@@ -11,8 +14,6 @@ import type {
 import { MessageSurfaceCard } from "@/ui/MessageSurfaceCard";
 import { ViewRefreshIndicator } from "@/ui/ViewRefreshIndicator";
 import { WorkspaceSidebar } from "@/ui/WorkspaceSidebar";
-
-const ACTIVITY_CLIENT_REVALIDATE_AFTER_MS = 10_000;
 
 function relativeTime(timestamp: number, now: number): string {
   const seconds = Math.max(0, Math.floor(now / 1_000) - timestamp);
@@ -92,66 +93,18 @@ export function ActivityRow({
 }
 
 export function ActivityShell({ initial }: { initial: ActivityWorkspaceView }) {
-  const [view, setView] = useState(initial);
-  const [mobileNavOpen, setMobileNavOpen] = useState(false);
-  const [revalidating, setRevalidating] = useState(
-    initial.cacheState === "stale",
+  const {
+    view,
+    refreshing: revalidating,
+    error: refreshError,
+    refresh,
+  } = useRefreshingView(
+    initial,
+    "/api/activity",
+    "Activity",
+    "/api/activity/live",
   );
-
-  useEffect(() => {
-    setView(initial);
-    const shouldRevalidate =
-      initial.cacheState === "stale" ||
-      Date.now() - initial.generatedAt >= ACTIVITY_CLIENT_REVALIDATE_AFTER_MS;
-    setRevalidating(shouldRevalidate);
-    if (!shouldRevalidate) {
-      setRevalidating(false);
-      return;
-    }
-    const controller = new AbortController();
-    let disposed = false;
-    void fetch("/api/activity?fresh=1", {
-      cache: "no-store",
-      signal: controller.signal,
-    })
-      .then(async (response) => {
-        if (response.status === 401) {
-          window.location.assign(
-            `/login?next=${encodeURIComponent(location.pathname + location.search)}`,
-          );
-          return null;
-        }
-        if (!response.ok) return null;
-        return (await response.json()) as ActivityWorkspaceView;
-      })
-      .then((fresh) => {
-        if (fresh && !controller.signal.aborted) setView(fresh);
-      })
-      .catch(() => undefined)
-      .finally(() => {
-        if (!disposed) setRevalidating(false);
-      });
-    return () => {
-      disposed = true;
-      controller.abort();
-    };
-  }, [initial]);
-
-  useEffect(() => {
-    const source = new EventSource("/api/activity/live");
-    source.addEventListener("snapshot", (event) => {
-      setView(JSON.parse((event as MessageEvent<string>).data));
-      setRevalidating(false);
-    });
-    source.addEventListener("status", (event) => {
-      const status = JSON.parse((event as MessageEvent<string>).data) as {
-        state?: string;
-      };
-      setRevalidating(status.state === "refreshing");
-    });
-    source.onerror = () => setRevalidating(false);
-    return () => source.close();
-  }, []);
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
 
   return (
     <main
@@ -171,7 +124,9 @@ export function ActivityShell({ initial }: { initial: ActivityWorkspaceView }) {
         identity={view.identity}
         selectedId={null}
       />
-      <section className="threads-panel">
+      <section
+        className={`threads-panel${refreshError ? " view-panel-error" : ""}`}
+      >
         <header className="channel-header">
           <button
             aria-controls="channel-navigation"
@@ -195,6 +150,11 @@ export function ActivityShell({ initial }: { initial: ActivityWorkspaceView }) {
             <span className="thread-total">{view.items.length} updates</span>
           </div>
         </header>
+        <ViewRefreshError
+          error={refreshError}
+          active={revalidating}
+          retry={refresh}
+        />
         <section className="threads-list" aria-label="Recent activity">
           {view.items.length === 0 ? (
             <div className="empty-timeline">

@@ -1,5 +1,7 @@
 "use client";
 
+import { fetchView } from "@/client/fetch-view";
+
 import {
   Hash,
   LockKeyhole,
@@ -98,6 +100,7 @@ export function WorkspaceShell({
   const timelinePinnedToBottom = useRef(true);
   const historyLoaded = useRef(false);
   const historyLoadingRef = useRef(false);
+  const historyAbort = useRef<AbortController | null>(null);
   const restoreTimelineScroll = useRef<{
     height: number;
     top: number;
@@ -137,6 +140,8 @@ export function WorkspaceShell({
   }, []);
 
   useEffect(() => {
+    historyAbort.current?.abort();
+    restoreTimelineScroll.current = null;
     setPins(initial.pins);
     setTimeline(initial.timeline);
     setOlderTimeline([]);
@@ -191,62 +196,94 @@ export function WorkspaceShell({
   useEffect(() => {
     const params = new URLSearchParams({ channel: initial.selectedChannel.id });
     if (rootId) params.set("thread", rootId);
-    const source = new EventSource(`/api/live?${params}`);
-    source.onopen = () => setLiveState("live");
-    source.onerror = () => {
-      setLiveState("reconnecting");
-      setRevalidating(false);
-      void fetch("/api/auth/status", { cache: "no-store" })
-        .then((response) => {
-          if (response.status === 401) {
-            window.location.assign(
-              `/login?next=${encodeURIComponent(location.pathname + location.search)}`,
-            );
-          }
-        })
-        .catch(() => undefined);
+    const abort = new AbortController();
+    let source: EventSource;
+    let recovering = false;
+    let recoveryTimer: ReturnType<typeof setTimeout> | undefined;
+    let recoveryDelay = 2_000;
+    const scheduleRecovery = () => {
+      if (abort.signal.aborted || recovering || recoveryTimer) return;
+      recoveryTimer = setTimeout(() => {
+        recoveryTimer = undefined;
+        if (source.readyState !== EventSource.CLOSED) return;
+        recovering = true;
+        void fetchView(
+          "/api/auth/status",
+          initial.identity.pubkey,
+          AbortSignal.any([abort.signal, AbortSignal.timeout(30_000)]),
+        )
+          .then(() => {
+            if (!abort.signal.aborted) connect();
+          })
+          .catch(() => undefined)
+          .finally(() => {
+            recovering = false;
+            if (source.readyState === EventSource.CLOSED) scheduleRecovery();
+          });
+      }, recoveryDelay);
+      recoveryDelay = Math.min(30_000, recoveryDelay * 2);
     };
-    source.addEventListener("snapshot", (event) => {
-      const snapshot = JSON.parse(
-        (event as MessageEvent<string>).data,
-      ) as ChannelSnapshot;
-      setPins(snapshot.pins);
-      setTimeline(snapshot.timeline);
-      if (!historyLoaded.current) {
-        setTimelineHasMore(snapshot.timelineHasMore);
-        setTimelineCursor(snapshot.timelineCursor);
-      }
-      setThread(snapshot.thread);
-      setTypingEntries((current) => clearCompletedTyping(current, snapshot));
-      setRevalidating(false);
-      setLiveState("live");
-    });
-    source.addEventListener("typing", (event) => {
-      const typing = JSON.parse(
-        (event as MessageEvent<string>).data,
-      ) as TypingIndicatorView;
-      setTypingEntries((current) =>
-        registerTypingEntry(current, typing, initial.identity.pubkey),
-      );
-    });
-    source.addEventListener("status", (event) => {
-      const status = JSON.parse((event as MessageEvent<string>).data) as {
-        state?: string;
-      };
-      if (status.state === "degraded") {
-        setRevalidating(false);
-        setLiveState("reconnecting");
-      } else if (
-        status.state === "refreshing" ||
-        status.state === "connecting"
-      ) {
+    const connect = () => {
+      source?.close();
+      source = new EventSource(`/api/live?${params}`);
+      source.onopen = () => {
+        setLiveState("connecting");
         setRevalidating(true);
-      } else if (status.state === "live") {
+      };
+      source.onerror = () => {
+        setLiveState("reconnecting");
+        setRevalidating(false);
+        scheduleRecovery();
+      };
+      source.addEventListener("snapshot", (event) => {
+        if (abort.signal.aborted) return;
+        recoveryDelay = 2_000;
+        const snapshot = JSON.parse(
+          (event as MessageEvent<string>).data,
+        ) as ChannelSnapshot;
+        setPins(snapshot.pins);
+        setTimeline(snapshot.timeline);
+        if (!historyLoaded.current) {
+          setTimelineHasMore(snapshot.timelineHasMore);
+          setTimelineCursor(snapshot.timelineCursor);
+        }
+        setThread(snapshot.thread);
+        setTypingEntries((current) => clearCompletedTyping(current, snapshot));
         setRevalidating(false);
         setLiveState("live");
-      }
-    });
-    return () => source.close();
+      });
+      source.addEventListener("typing", (event) => {
+        const typing = JSON.parse(
+          (event as MessageEvent<string>).data,
+        ) as TypingIndicatorView;
+        setTypingEntries((current) =>
+          registerTypingEntry(current, typing, initial.identity.pubkey),
+        );
+      });
+      source.addEventListener("status", (event) => {
+        const status = JSON.parse((event as MessageEvent<string>).data) as {
+          state?: string;
+        };
+        if (status.state === "degraded") {
+          setRevalidating(false);
+          setLiveState("reconnecting");
+        } else if (
+          status.state === "refreshing" ||
+          status.state === "connecting"
+        ) {
+          setRevalidating(true);
+        } else if (status.state === "live") {
+          setRevalidating(false);
+          setLiveState("live");
+        }
+      });
+    };
+    connect();
+    return () => {
+      abort.abort();
+      clearTimeout(recoveryTimer);
+      source.close();
+    };
   }, [initial.identity.pubkey, initial.selectedChannel.id, rootId]);
 
   useEffect(() => {
@@ -264,14 +301,14 @@ export function WorkspaceShell({
     }
   }, [timeline.length]);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: Restore after each page replacement, including same-size edits.
   useLayoutEffect(() => {
-    if (olderTimeline.length === 0) return;
     const restore = restoreTimelineScroll.current;
     const scroller = timelineScroller.current;
     if (!restore || !scroller) return;
     scroller.scrollTop = restore.top + scroller.scrollHeight - restore.height;
     restoreTimelineScroll.current = null;
-  }, [olderTimeline.length]);
+  }, [olderTimeline]);
 
   const renderedTimeline = useMemo(
     () =>
@@ -344,12 +381,20 @@ export function WorkspaceShell({
     [initial.selectedChannel.id, router],
   );
 
+  useEffect(() => () => historyAbort.current?.abort(), []);
+
   const loadOlder = useCallback(async () => {
     const cursor = timelineCursor;
     const scroller = timelineScroller.current;
     if (!timelineHasMore || !cursor || !scroller || historyLoadingRef.current) {
       return;
     }
+    const controller = new AbortController();
+    historyAbort.current = controller;
+    const signal = AbortSignal.any([
+      controller.signal,
+      AbortSignal.timeout(30_000),
+    ]);
     historyLoadingRef.current = true;
     historyLoaded.current = true;
     setHistoryLoading(true);
@@ -359,27 +404,17 @@ export function WorkspaceShell({
       top: scroller.scrollTop,
     };
     try {
-      const response = await fetch(
-        `/api/channels/${initial.selectedChannel.id}/history?${new URLSearchParams(
-          {
-            created_at: String(cursor.createdAt),
-            id: cursor.id,
-          },
-        )}`,
-        { cache: "no-store" },
+      const url = `/api/channels/${initial.selectedChannel.id}/history?${new URLSearchParams(
+        {
+          created_at: String(cursor.createdAt),
+          id: cursor.id,
+        },
+      )}`;
+      let page = await fetchView<ChannelHistoryPage>(
+        url,
+        initial.identity.pubkey,
+        signal,
       );
-      if (response.status === 401) {
-        window.location.assign(
-          `/login?next=${encodeURIComponent(location.pathname + location.search)}`,
-        );
-        return;
-      }
-      const page = (await response.json()) as ChannelHistoryPage & {
-        error?: string;
-      };
-      if (!response.ok) {
-        throw new Error(page.error || "Older messages could not be loaded");
-      }
       setOlderTimeline((current) => [
         ...new Map(
           [...page.messages, ...current].map((message) => [
@@ -388,6 +423,22 @@ export function WorkspaceShell({
           ]),
         ).values(),
       ]);
+      if (page.cacheState === "stale") {
+        const oldIds = new Set(page.messages.map((message) => message.id));
+        page = await fetchView<ChannelHistoryPage>(
+          `${url}&fresh=1`,
+          initial.identity.pubkey,
+          signal,
+        );
+        restoreTimelineScroll.current = {
+          height: scroller.scrollHeight,
+          top: scroller.scrollTop,
+        };
+        setOlderTimeline((current) => [
+          ...current.filter((message) => !oldIds.has(message.id)),
+          ...page.messages,
+        ]);
+      }
       const advanced =
         page.nextCursor &&
         (page.nextCursor.createdAt !== cursor.createdAt ||
@@ -397,6 +448,7 @@ export function WorkspaceShell({
       );
       setTimelineCursor(advanced ? page.nextCursor : null);
     } catch (caught) {
+      if (controller.signal.aborted) return;
       restoreTimelineScroll.current = null;
       setHistoryError(
         caught instanceof Error
@@ -404,10 +456,17 @@ export function WorkspaceShell({
           : "Older messages could not be loaded",
       );
     } finally {
-      historyLoadingRef.current = false;
-      setHistoryLoading(false);
+      if (!controller.signal.aborted) {
+        historyLoadingRef.current = false;
+        setHistoryLoading(false);
+      }
     }
-  }, [initial.selectedChannel.id, timelineCursor, timelineHasMore]);
+  }, [
+    initial.selectedChannel.id,
+    initial.identity.pubkey,
+    timelineCursor,
+    timelineHasMore,
+  ]);
 
   const jumpToFirstUnread = useCallback(async () => {
     const targetId = firstThreadUnreadId ?? firstUnreadId;

@@ -36,10 +36,12 @@ export async function GET(
     );
   }
   try {
-    const page = await loadChannelHistoryPage(session, channelId, {
-      createdAt,
-      id,
-    });
+    const page = await loadChannelHistoryPage(
+      session,
+      channelId,
+      { createdAt, id },
+      url.searchParams.get("fresh") === "1",
+    );
     return Response.json(page, {
       headers: {
         "Cache-Control": "private, no-cache",

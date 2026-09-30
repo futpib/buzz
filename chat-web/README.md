@@ -26,7 +26,7 @@ is acknowledged. A fresh device merges the records using the existing read-state
 format. Uploads are bounded to 128 records per snapshot; a capacity error keeps
 the local history and queue intact.
 
-Authenticated channel, thread, Inbox, Threads-index, and search projections use a
+Authenticated channel, thread, Inbox, Sent, Threads-index, Activity, and search projections use a
 bounded session-scoped stale-while-revalidate cache. Next.js keeps prefetched
 route payloads in its client cache; sidebar destinations warm eagerly and
 large thread/search result sets warm on navigation intent. Cold misses render a
@@ -35,10 +35,20 @@ the relay live stream and the Threads index refreshes in the background.
 Channel timelines scan the relay with a composite cursor until they contain a
 real page of top-level roots; reaching the top loads the next page without
 dropping the reader's scroll position.
-Inbox refreshes every 15 seconds while visible and on focus, tab return, or
+Inbox, Sent, and Threads refresh every 15 seconds while visible and on focus, tab return, or
 network recovery. Requests are serialized, timed out, and retried with capped
 backoff; failures keep existing conversations visible with a Retry action.
 Expired sessions renew through the saved browser signer before retrying.
+Activity uses authoritative live snapshots after subscription catch-up and on
+changes, with retry backoff and a 60-second HTTP fallback. Older HTTP responses
+cannot overwrite newer live data. Activity snapshots apply edits and deletions.
+Search retains each query's cached results during revalidation and errors, with
+visible loading and retry controls. Its local result cache holds at most 40
+identity-scoped queries, reuses fresh results for 10 seconds, and revalidates
+open searches every 30 seconds. Older-history pages explicitly fetch the fresh
+projection after displaying a stale cached page; they reconcile removed rows
+and preserve the current scroll position. Server background cache failures
+coalesce and back off rather than retrying for every stale reader.
 Every cache seed awaits the message set and its reaction/edit/deletion closure
 as one server projection, so opening a prewarmed thread cannot paint first and
 fill reactions in during a later refresh.

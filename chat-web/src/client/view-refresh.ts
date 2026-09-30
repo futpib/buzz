@@ -2,12 +2,16 @@ const INTERVAL_MS = 15_000;
 const TIMEOUT_MS = 30_000;
 
 /** One request at a time, only while visible; resume and retry without losing rows. */
-export function startInboxRefresh({
+export function startViewRefresh({
   delay,
+  label = "View",
+  interval = INTERVAL_MS,
   load,
   onState,
 }: {
   delay: number;
+  label?: string;
+  interval?: number;
   load: (signal: AbortSignal) => Promise<void>;
   onState: (refreshing: boolean, error: string | null) => void;
 }) {
@@ -37,16 +41,16 @@ export function startInboxRefresh({
       if (disposed) return;
       failures += 1;
       error = controller.signal.aborted
-        ? "Inbox refresh timed out"
+        ? `${label} refresh timed out`
         : cause instanceof Error
           ? cause.message
-          : "Inbox could not refresh";
+          : `${label} could not refresh`;
     } finally {
       clearTimeout(timeout);
       active = null;
       if (!disposed) {
         onState(false, error);
-        schedule(Math.min(60_000, INTERVAL_MS * 2 ** Math.min(failures, 2)));
+        schedule(Math.min(60_000, interval * 2 ** Math.min(failures, 2)));
       }
     }
   }

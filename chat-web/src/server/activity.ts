@@ -5,6 +5,7 @@ import type { AuthSession } from "@/server/auth";
 import { loadWorkspaceIndex } from "@/server/data";
 import { fallbackProfile, projectProfiles } from "@/server/projector";
 import type { ActivityWorkspaceView, NostrEvent } from "@/server/types";
+import { loadProjectionAuxClosureForChannels } from "@/server/projection-events";
 import { ViewCache } from "@/server/view-cache";
 
 const ACTIVITY_LIMIT = 100;
@@ -50,11 +51,23 @@ async function loadActivityWorkspaceFresh(
   const profileEvents = await session.relay.query([
     profileFilter(events, session.pubkey),
   ]);
+  const auxiliary = await loadProjectionAuxClosureForChannels(
+    (filters) => session.relay.query(filters),
+    channelIds,
+    events
+      .filter((event) => CHANNEL_ACTIVITY_KINDS.includes(event.kind))
+      .map((event) => event.id),
+  );
   const profiles = projectProfiles(profileEvents);
   return {
     identity: profiles.get(session.pubkey) ?? fallbackProfile(session.pubkey),
     channels,
-    items: projectActivityItems(events, channels, profiles, session.pubkey),
+    items: projectActivityItems(
+      [...events, ...auxiliary],
+      channels,
+      profiles,
+      session.pubkey,
+    ),
     generatedAt: Date.now(),
   };
 }

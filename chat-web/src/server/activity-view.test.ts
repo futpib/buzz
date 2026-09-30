@@ -116,3 +116,43 @@ test("keeps supported global agent work and drops unauthorized channel events", 
   assert.equal(rows[0].author.name, "Futpib");
   assert.equal(rows[0].isOwn, true);
 });
+
+test("Activity snapshots apply edits and deletion closure before grouping", () => {
+  const message = event({
+    id: "message",
+    createdAt: 1,
+    tags: [["h", "allowed"]],
+  });
+  const edit = event({
+    id: "edit",
+    kind: 40003,
+    createdAt: 2,
+    tags: [
+      ["h", "allowed"],
+      ["e", message.id],
+    ],
+  });
+  const deletedEdit = event({
+    id: "deleted-edit",
+    kind: 5,
+    createdAt: 3,
+    tags: [
+      ["h", "allowed"],
+      ["e", edit.id],
+    ],
+  });
+  const deletedMessage = event({
+    id: "deleted-message",
+    kind: 5,
+    createdAt: 4,
+    tags: [
+      ["h", "allowed"],
+      ["e", message.id],
+    ],
+  });
+  const project = (events: NostrEvent[]) =>
+    projectActivityItems(events, [channel], new Map(), message.pubkey);
+  assert.equal(project([message, edit])[0].content, "edit");
+  assert.equal(project([message, edit, deletedEdit])[0].content, "message");
+  assert.deepEqual(project([message, edit, deletedMessage]), []);
+});

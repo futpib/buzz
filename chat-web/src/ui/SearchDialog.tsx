@@ -3,6 +3,9 @@
 import { History, LoaderCircle, Search, Trash2, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import { fetchView } from "@/client/fetch-view";
+import { startViewRefresh } from "@/client/view-refresh";
+
 import {
   clearRecentSearches,
   loadRecentSearches,
@@ -13,6 +16,15 @@ import type { ChannelView, SearchResultView, SearchView } from "@/server/types";
 import { MessageSurfaceCard } from "@/ui/MessageSurfaceCard";
 
 const searchViewCache = new Map<string, SearchView>();
+function cacheSearch(key: string, value: SearchView) {
+  searchViewCache.delete(key);
+  searchViewCache.set(key, value);
+  while (searchViewCache.size > 40) {
+    const oldest = searchViewCache.keys().next().value;
+    if (oldest === undefined) break;
+    searchViewCache.delete(oldest);
+  }
+}
 
 function resultTimeLabel(timestamp: number): string {
   const date = new Date(timestamp * 1_000);
@@ -76,6 +88,7 @@ export function SearchDialog({
   const [error, setError] = useState<string | null>(null);
   const [recentSearches, setRecentSearches] = useState<string[]>([]);
   const input = useRef<HTMLInputElement>(null);
+  const retry = useRef<() => void>(() => {});
   const lastSuccessfulQuery = useRef("");
 
   useEffect(() => {
@@ -119,60 +132,42 @@ export function SearchDialog({
       setError(null);
       return;
     }
-    const cacheKey = `${viewerPubkey}\u0000${normalized.toLowerCase()}`;
+    const cacheKey = `${viewerPubkey}\u0000${normalized}`;
     const cached = searchViewCache.get(cacheKey);
-    if (cached) {
-      lastSuccessfulQuery.current = normalized;
-      setResults(cached.results);
-      setSearched(true);
-      setLoading(false);
-      setError(null);
-    }
-    const controller = new AbortController();
-    const timeout = window.setTimeout(async () => {
-      setLoading(true);
-      setError(null);
-      try {
-        const response = await fetch(
-          `/api/search?${new URLSearchParams({ q: normalized })}`,
-          { cache: "no-store", signal: controller.signal },
-        );
-        if (response.status === 401) {
-          window.location.assign(
-            `/login?next=${encodeURIComponent(location.pathname + location.search)}`,
-          );
-          return;
-        }
-        const body = (await response.json()) as SearchView & { error?: string };
-        if (!response.ok) throw new Error(body.error || "Search failed");
-        lastSuccessfulQuery.current = normalized;
-        searchViewCache.set(cacheKey, body);
+    setResults(cached?.results ?? []);
+    setSearched(Boolean(cached));
+    setError(null);
+    const age = cached ? Date.now() - cached.generatedAt : Infinity;
+    setLoading(age >= 10_000);
+    if (cached) lastSuccessfulQuery.current = normalized;
+    const loop = startViewRefresh({
+      label: "Search",
+      delay: age < 10_000 ? 10_000 - age : 180,
+      interval: 30_000,
+      onState: (active, failure) => {
+        setLoading(active);
+        setError(failure);
+      },
+      load: async (signal) => {
+        const url = `/api/search?${new URLSearchParams({ q: normalized })}`;
+        const body = await fetchView<SearchView>(url, viewerPubkey, signal);
+        cacheSearch(cacheKey, body);
         setResults(body.results);
         setSearched(true);
+        lastSuccessfulQuery.current = normalized;
         if (body.cacheState === "stale") {
-          const freshResponse = await fetch(
-            `/api/search?${new URLSearchParams({ q: normalized, fresh: "1" })}`,
-            { cache: "no-store", signal: controller.signal },
+          const fresh = await fetchView<SearchView>(
+            `${url}&fresh=1`,
+            viewerPubkey,
+            signal,
           );
-          if (freshResponse.ok) {
-            const fresh = (await freshResponse.json()) as SearchView;
-            searchViewCache.set(cacheKey, fresh);
-            setResults(fresh.results);
-          }
+          cacheSearch(cacheKey, fresh);
+          setResults(fresh.results);
         }
-      } catch (caught) {
-        if (controller.signal.aborted) return;
-        setError(caught instanceof Error ? caught.message : "Search failed");
-        setResults([]);
-        setSearched(true);
-      } finally {
-        if (!controller.signal.aborted) setLoading(false);
-      }
-    }, 180);
-    return () => {
-      window.clearTimeout(timeout);
-      controller.abort();
-    };
+      },
+    });
+    retry.current = loop.refresh;
+    return () => loop.dispose();
   }, [query, viewerPubkey]);
 
   return (
@@ -284,7 +279,18 @@ export function SearchDialog({
               <p>Find messages in every channel you can access.</p>
             )
           ) : null}
-          {error ? <p className="search-error">{error}</p> : null}
+          {error ? (
+            <p className="search-error">
+              {error}. Retrying automatically.{" "}
+              <button
+                type="button"
+                disabled={loading}
+                onClick={() => retry.current()}
+              >
+                Retry search
+              </button>
+            </p>
+          ) : null}
           {!loading && searched && !error && results.length === 0 ? (
             <p>No messages matched “{query.trim()}”.</p>
           ) : null}
