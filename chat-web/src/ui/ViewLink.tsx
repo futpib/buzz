@@ -53,47 +53,22 @@ function NavigationFeedback() {
         className="link-pending spin"
         size={14}
       />
-      {createPortal(
-        <span
-          aria-label="Loading destination"
-          aria-live="polite"
-          className="navigation-loading-overlay"
-          role="status"
-        >
-          <span className="loading-sidebar">
-            <span className="loading-sidebar-header">
-              <span className="loading-block loading-brand" />
-              <span className="loading-block loading-workspace-name" />
-            </span>
-            <span className="loading-sidebar-links">
-              {["one", "two", "three", "four", "five"].map((item) => (
-                <span
-                  className="loading-block loading-sidebar-link"
-                  key={item}
-                />
-              ))}
-            </span>
-          </span>
-          <span className="loading-main">
-            <span className="loading-header">
-              <span className="loading-block loading-title" />
-            </span>
-            <span className="loading-messages">
-              {["one", "two", "three", "four", "five", "six"].map((item) => (
-                <span className="loading-message" key={item}>
-                  <span className="loading-block loading-avatar" />
-                  <span className="loading-message-copy">
-                    <span className="loading-block loading-name" />
-                    <span className="loading-block loading-line" />
-                    <span className="loading-block loading-line loading-line-short" />
-                  </span>
-                </span>
-              ))}
-            </span>
-          </span>
-        </span>,
-        document.body,
-      )}
+      <NavigationProgress />
     </>
+  );
+}
+
+export function NavigationProgress() {
+  return createPortal(
+    <span
+      aria-label="Loading destination"
+      aria-live="polite"
+      className="navigation-progress"
+      role="status"
+    >
+      <LoaderCircle aria-hidden="true" className="spin" size={14} />
+      Loading…
+    </span>,
+    document.body,
   );
 }

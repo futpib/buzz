@@ -22,18 +22,21 @@ the browser. A pass is not complete until it covers the checks below.
   Exercise every distinct action with trusted browser input and verify its
   destination or state change. Placeholder controls must be visibly disabled;
   an enabled inert control anywhere in the product surface is a failure.
-- Require immediate pending feedback after a trusted navigation click and a
-  responsive, system-themed skeleton while server view data is loading.
+- Require immediate compact pending feedback after a trusted navigation click.
+  Existing content must remain visible and usable until the destination is ready;
+  no full-page skeleton may cover it, including on a cold destination.
 - Measure a cold route transition and a revisit to the same route. Require the
-  cold transition to paint the navigation skeleton, the revisit to reuse the
+  cold transition to retain the current content, the revisit to reuse the
   client route cache without another blocking relay projection, and a stale
   server entry to render immediately while one coalesced refresh runs. Inspect
   the production `data-cache-state` seam and network requests; the mere
   presence of cache code or a spinner is not evidence.
 - Exercise every navigation surface: sidebar channels, Threads, timeline
   thread summaries, nested branches, search results, and thread close. Large
-  result sets may warm on pointer/focus/touch intent; the bounded sidebar set
-  must be eagerly prefetched.
+  result sets may warm on pointer/focus/touch intent; sidebar destinations
+  warm on intent too, avoiding competing background history scans.
+- Load an older channel-history page, open and close a thread, and require the
+  older rows and channel scroll anchor to remain present.
 - From a cold Threads load, open a root with existing reactions and require
   those reactions in the first painted thread snapshot. A later live refresh
   must not be needed to fill reaction state into a prewarmed cache entry.

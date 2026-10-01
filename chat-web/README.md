@@ -30,9 +30,13 @@ Authenticated channel, thread, Inbox, Sent, Threads-index, Activity, and search 
 bounded session-scoped stale-while-revalidate cache shared across page and API
 bundles in the server process. Next.js keeps prefetched
 route payloads in its client cache; sidebar destinations and
-large thread/search result sets warm on navigation intent. Cold misses render a
-system-themed navigation skeleton, while active channel views reconcile from
-the relay live stream and the Threads index refreshes in the background.
+large thread/search result sets warm on navigation intent. Client navigation
+retains the current view until the destination is ready,
+with a compact pending indicator instead of a page-covering skeleton. Cached
+destinations render their snapshot while revalidating; active channel views
+reconcile from the relay live stream and the Threads index refreshes in the
+background. Opening and closing a thread preserves the channel’s loaded older
+history and scroll anchor.
 Channel timelines scan the relay with a composite cursor until they contain a
 real page of top-level roots; reaching the top loads the next page without
 dropping the reader's scroll position.

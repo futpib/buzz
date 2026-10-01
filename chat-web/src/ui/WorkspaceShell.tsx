@@ -20,6 +20,7 @@ import {
   useMemo,
   useRef,
   useState,
+  useTransition,
 } from "react";
 import { useRouter } from "next/navigation";
 
@@ -53,7 +54,7 @@ import { MessageRow } from "@/ui/MessageRow";
 import type { TypingParticipant } from "@/ui/TypingIndicator";
 import { ViewRefreshIndicator } from "@/ui/ViewRefreshIndicator";
 import { WorkspaceSidebar } from "@/ui/WorkspaceSidebar";
-import { ViewLink } from "@/ui/ViewLink";
+import { NavigationProgress, ViewLink } from "@/ui/ViewLink";
 
 type LiveState = "connecting" | "live" | "reconnecting";
 type ReplyTarget = { id: string; name: string };
@@ -67,6 +68,7 @@ export function WorkspaceShell({
   targetMessageId?: string | null;
 }) {
   const router = useRouter();
+  const [navigationPending, startNavigation] = useTransition();
   const [pins, setPins] = useState(initial.pins);
   const [timeline, setTimeline] = useState(initial.timeline);
   const [thread, setThread] = useState(initial.thread);
@@ -114,6 +116,8 @@ export function WorkspaceShell({
     startWidth: number;
     startX: number;
   } | null>(null);
+  const channelScope = `${initial.identity.pubkey}:${initial.selectedChannel.id}`;
+  const previousChannelScope = useRef(channelScope);
   const capturedUnreadChannel = useRef<string | null>(null);
   const capturedUnreadThread = useRef<string | null>(null);
   const rootId = initial.thread?.rootId ?? null;
@@ -140,28 +144,33 @@ export function WorkspaceShell({
   }, []);
 
   useEffect(() => {
-    historyAbort.current?.abort();
-    restoreTimelineScroll.current = null;
-    setPins(initial.pins);
-    setTimeline(initial.timeline);
-    setOlderTimeline([]);
-    setTimelineHasMore(initial.timelineHasMore);
-    setTimelineCursor(initial.timelineCursor);
-    setHistoryError(null);
-    setHistoryLoading(false);
-    historyLoaded.current = false;
-    historyLoadingRef.current = false;
-    timelinePinnedToBottom.current = true;
+    // Opening another branch must not discard loaded channel history or its
+    // scroll anchor. The live snapshot refreshes this retained channel state.
+    if (previousChannelScope.current !== channelScope) {
+      previousChannelScope.current = channelScope;
+      historyAbort.current?.abort();
+      restoreTimelineScroll.current = null;
+      setPins(initial.pins);
+      setTimeline(initial.timeline);
+      setOlderTimeline([]);
+      setTimelineHasMore(initial.timelineHasMore);
+      setTimelineCursor(initial.timelineCursor);
+      setHistoryError(null);
+      setHistoryLoading(false);
+      historyLoaded.current = false;
+      historyLoadingRef.current = false;
+      timelinePinnedToBottom.current = true;
+      setFirstUnreadId(null);
+      capturedUnreadChannel.current = null;
+    }
     setThread(initial.thread);
     setMobileNavOpen(false);
     setReplyTarget(null);
     setRevalidating(initial.cacheState === "stale");
     setTypingEntries([]);
-    setFirstUnreadId(null);
     setFirstThreadUnreadId(null);
-    capturedUnreadChannel.current = null;
     capturedUnreadThread.current = null;
-  }, [initial]);
+  }, [initial, channelScope]);
 
   useEffect(() => {
     if (
@@ -371,12 +380,14 @@ export function WorkspaceShell({
 
   const openMessageThread = useCallback(
     (messageId: string) => {
-      router.push(
-        `/channels/${initial.selectedChannel.id}?${new URLSearchParams({
-          thread: messageId,
-        })}`,
-        { scroll: false },
-      );
+      startNavigation(() => {
+        router.push(
+          `/channels/${initial.selectedChannel.id}?${new URLSearchParams({
+            thread: messageId,
+          })}`,
+          { scroll: false },
+        );
+      });
     },
     [initial.selectedChannel.id, router],
   );
@@ -493,13 +504,16 @@ export function WorkspaceShell({
       (item) => item.id === targetId,
     );
     if (candidate?.rootId) {
-      router.push(
-        `/channels/${initial.selectedChannel.id}?${new URLSearchParams({
-          thread: candidate.rootId,
-          message: candidate.id,
-        })}`,
-        { scroll: false },
-      );
+      const rootId = candidate.rootId;
+      startNavigation(() => {
+        router.push(
+          `/channels/${initial.selectedChannel.id}?${new URLSearchParams({
+            thread: rootId,
+            message: candidate.id,
+          })}`,
+          { scroll: false },
+        );
+      });
       return;
     }
     let cursor = timelineCursor;
@@ -671,6 +685,7 @@ export function WorkspaceShell({
 
   return (
     <ChannelPinsContext.Provider value={pins}>
+      {navigationPending ? <NavigationProgress /> : null}
       <main
         className={`${thread ? "workspace workspace-thread-open" : "workspace"}${mobileNavOpen ? " mobile-nav-open" : ""}${threadPanelResizing ? " workspace-thread-resizing" : ""}`}
         data-cache-state={initial.cacheState}
