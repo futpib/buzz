@@ -6,7 +6,7 @@ import { loadWorkspaceIndex } from "@/server/data";
 import { fallbackProfile, projectProfiles } from "@/server/projector";
 import type { ActivityWorkspaceView, NostrEvent } from "@/server/types";
 import { loadProjectionAuxClosureForChannels } from "@/server/projection-events";
-import { ViewCache } from "@/server/view-cache";
+import { sharedViewCache } from "@/server/view-cache";
 
 const ACTIVITY_LIMIT = 100;
 const ACTIVITY_STALE_AFTER_MS = 10_000;
@@ -14,7 +14,7 @@ const CHANNEL_ACTIVITY_KINDS = [9, 40_002, 45_001];
 const JOB_ACTIVITY_KINDS = [43_001, 43_003, 43_004];
 type ActivityWorkspacePayload = Omit<ActivityWorkspaceView, "cacheState">;
 
-const activityCache = new ViewCache<ActivityWorkspacePayload>({
+const activityCache = sharedViewCache<ActivityWorkspacePayload>("activity", {
   maxEntries: 128,
   staleAfterMs: ACTIVITY_STALE_AFTER_MS,
 });

@@ -58,7 +58,7 @@ test("live snapshots fence older HTTP results and retain data through refresh fa
   };
   let state: ReturnType<typeof useRefreshingView<typeof initial>> | undefined;
   function Probe() {
-    state = useRefreshingView(initial, "/view", "Test", "/live");
+    state = useRefreshingView(initial, "/view", "Test", { liveUrl: "/live" });
     return createElement("p", null, state.view.content);
   }
   const container = document.getElementById("root");

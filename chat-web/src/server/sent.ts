@@ -9,13 +9,13 @@ import {
 } from "@/server/projection-events";
 import { projectSentItems } from "@/server/sent-view";
 import type { SentWorkspaceView } from "@/server/types";
-import { ViewCache } from "@/server/view-cache";
+import { sharedViewCache } from "@/server/view-cache";
 
 const SENT_LIMIT = 100;
 const SENT_STALE_AFTER_MS = 10_000;
 type SentWorkspacePayload = Omit<SentWorkspaceView, "cacheState">;
 
-const sentCache = new ViewCache<SentWorkspacePayload>({
+const sentCache = sharedViewCache<SentWorkspacePayload>("sent", {
   maxEntries: 128,
   staleAfterMs: SENT_STALE_AFTER_MS,
 });

@@ -28,7 +28,7 @@ import type {
   WorkspaceView,
 } from "@/server/types";
 import { includePinnedReplies, loadChannelPins } from "@/server/pins";
-import { ViewCache } from "@/server/view-cache";
+import { sharedViewCache } from "@/server/view-cache";
 
 const CHANNEL_WINDOW_LIMIT = 20;
 const THREAD_WINDOW_LIMIT = 100;
@@ -49,19 +49,19 @@ type WorkspacePayload = Omit<WorkspaceView, "cacheState">;
 type ThreadsWorkspacePayload = Omit<ThreadsWorkspaceView, "cacheState">;
 type ChannelHistoryPayload = Omit<ChannelHistoryPage, "cacheState">;
 
-const workspaceIndexCache = new ViewCache<WorkspaceIndex>({
+const workspaceIndexCache = sharedViewCache<WorkspaceIndex>("workspace-index", {
   maxEntries: 128,
   staleAfterMs: INDEX_STALE_AFTER_MS,
 });
-const workspaceCache = new ViewCache<WorkspacePayload>({
+const workspaceCache = sharedViewCache<WorkspacePayload>("workspace", {
   maxEntries: 512,
   staleAfterMs: WORKSPACE_STALE_AFTER_MS,
 });
-const threadsCache = new ViewCache<ThreadsWorkspacePayload>({
+const threadsCache = sharedViewCache<ThreadsWorkspacePayload>("threads", {
   maxEntries: 128,
   staleAfterMs: THREADS_STALE_AFTER_MS,
 });
-const historyCache = new ViewCache<ChannelHistoryPayload>({
+const historyCache = sharedViewCache<ChannelHistoryPayload>("history", {
   maxEntries: 1_024,
   staleAfterMs: HISTORY_STALE_AFTER_MS,
 });

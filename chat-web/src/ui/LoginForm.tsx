@@ -42,6 +42,7 @@ export function LoginForm({
   const [nsec, setNsec] = useState("");
   const [authTag, setAuthTag] = useState("");
   const [pending, setPending] = useState(false);
+  const [ready, setReady] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [pairing, setPairing] = useState<PairingSnapshot | null>(null);
   const [copyStatus, setCopyStatus] = useState<"idle" | "copied" | "selected">(
@@ -109,14 +110,13 @@ export function LoginForm({
   useEffect(() => {
     if (automaticAttempt.current) return;
     automaticAttempt.current = true;
-    const stored = loadCredential();
-    if (stored) {
-      void login(stored);
-      return;
-    }
-    void loadPersistentCredential().then((credential) => {
-      if (credential) void login(credential);
-    });
+    // Keep the server-rendered form inert until hydration and saved-identity
+    // initialization finish; native form submission must never send a key.
+    const initialize = async () => {
+      const stored = loadCredential() ?? (await loadPersistentCredential());
+      if (stored) await login(stored);
+    };
+    void initialize().finally(() => setReady(true));
   }, [login]);
 
   useEffect(
@@ -200,6 +200,7 @@ export function LoginForm({
               </div>
               <button
                 className="pairing-button"
+                disabled={!ready || pending}
                 onClick={() => void startPairing()}
                 type="button"
               >
@@ -342,7 +343,7 @@ export function LoginForm({
           <span>or enter an nsec</span>
         </div>
 
-        <form onSubmit={submit}>
+        <form aria-busy={!ready || pending} onSubmit={submit}>
           <label className="field-label" htmlFor="nsec">
             Secret key
           </label>
@@ -352,9 +353,8 @@ export function LoginForm({
               autoCapitalize="none"
               autoComplete="off"
               autoCorrect="off"
-              disabled={pending}
+              disabled={!ready || pending}
               id="nsec"
-              name="nsec"
               onChange={(event) => setNsec(event.target.value)}
               placeholder="nsec1…"
               required
@@ -369,7 +369,7 @@ export function LoginForm({
               Optional NIP-OA auth tag
             </label>
             <textarea
-              disabled={pending}
+              disabled={!ready || pending}
               id="auth-tag"
               onChange={(event) => setAuthTag(event.target.value)}
               placeholder='["auth", "owner…", "", "signature…"]'
@@ -383,8 +383,12 @@ export function LoginForm({
               {error}
             </p>
           ) : null}
-          <button className="login-button" disabled={pending} type="submit">
-            {pending ? (
+          <button
+            className="login-button"
+            disabled={!ready || pending}
+            type="submit"
+          >
+            {!ready || pending ? (
               <LoaderCircle aria-hidden="true" className="spin" size={18} />
             ) : (
               <LockKeyhole aria-hidden="true" size={18} />

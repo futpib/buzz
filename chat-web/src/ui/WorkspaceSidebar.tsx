@@ -186,7 +186,6 @@ export function WorkspaceSidebar({
           className={activePage === "inbox" ? "primary-nav-active" : undefined}
           href="/inbox"
           onClick={close}
-          prefetchMode="eager"
         >
           <Inbox aria-hidden="true" size={18} /> <span>Inbox</span>
           {inboxCount > 0 ? (
@@ -203,7 +202,6 @@ export function WorkspaceSidebar({
           className={activePage === "sent" ? "primary-nav-active" : undefined}
           href="/sent"
           onClick={close}
-          prefetchMode="eager"
         >
           <Send aria-hidden="true" size={18} /> Sent
         </ViewLink>
@@ -213,7 +211,6 @@ export function WorkspaceSidebar({
           }
           href="/threads"
           onClick={close}
-          prefetchMode="eager"
         >
           <MessageSquareText aria-hidden="true" size={18} /> Threads
         </ViewLink>
@@ -223,7 +220,6 @@ export function WorkspaceSidebar({
           }
           href="/activity"
           onClick={close}
-          prefetchMode="eager"
         >
           <Bell aria-hidden="true" size={18} /> Activity
         </ViewLink>

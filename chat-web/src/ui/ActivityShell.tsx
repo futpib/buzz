@@ -98,12 +98,9 @@ export function ActivityShell({ initial }: { initial: ActivityWorkspaceView }) {
     refreshing: revalidating,
     error: refreshError,
     refresh,
-  } = useRefreshingView(
-    initial,
-    "/api/activity",
-    "Activity",
-    "/api/activity/live",
-  );
+  } = useRefreshingView(initial, "/api/activity", "Activity", {
+    liveUrl: "/api/activity/live",
+  });
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
 
   return (

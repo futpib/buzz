@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { ViewCache } from "./view-cache";
+import { ViewCache, sharedViewCache } from "./view-cache";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -225,5 +225,33 @@ test("an obsolete failed refresh cannot delay a newly invalidated generation", a
   assert.equal(
     (await cache.get("view", async () => "unused")).value,
     "current",
+  );
+});
+
+test("separate bundle consumers share a cache and pending load without crossing session keys", async () => {
+  const options = { maxEntries: 4, staleAfterMs: 10_000 };
+  const api = sharedViewCache<string>("search", options);
+  const page = sharedViewCache<string>("search", options);
+  const pending = deferred<string>();
+  let loads = 0;
+  const a = api.refresh("session-a:query", async () => {
+    loads++;
+    return pending.promise;
+  });
+  const b = page.get("session-a:query", async () => {
+    loads++;
+    return "duplicate";
+  });
+  pending.resolve("private result A");
+  assert.equal((await a).value, "private result A");
+  assert.equal((await b).value, "private result A");
+  assert.equal(loads, 1);
+  assert.equal(
+    (await page.get("session-a:query", async () => "unexpected")).state,
+    "fresh",
+  );
+  assert.equal(
+    (await page.get("session-b:query", async () => "private result B")).value,
+    "private result B",
   );
 });

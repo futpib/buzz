@@ -140,3 +140,34 @@ test("failed and hung Inbox refreshes surface errors and recover with bounded re
     env.restore();
   }
 });
+
+test("a long multi-query view retains its loading state through 30 seconds but has a bounded deadline", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const env = environment();
+  const states: [boolean, string | null][] = [];
+  const loop = startViewRefresh({
+    label: "Threads",
+    delay: 0,
+    timeoutMs: 60_000,
+    onState: (busy, error) => states.push([busy, error]),
+    load: (signal) =>
+      new Promise<void>((_resolve, reject) => {
+        signal.addEventListener("abort", () => reject(new Error("aborted")), {
+          once: true,
+        });
+      }),
+  });
+  try {
+    t.mock.timers.tick(0);
+    await settle();
+    t.mock.timers.tick(30_000);
+    await settle();
+    assert.deepEqual(states.at(-1), [true, null]);
+    t.mock.timers.tick(30_000);
+    await settle();
+    assert.deepEqual(states.at(-1), [false, "Threads refresh timed out"]);
+  } finally {
+    loop.dispose();
+    env.restore();
+  }
+});

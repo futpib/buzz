@@ -8,13 +8,13 @@ import {
   projectSearchResults,
 } from "@/server/search-view";
 import type { SearchView } from "@/server/types";
-import { ViewCache } from "@/server/view-cache";
+import { sharedViewCache } from "@/server/view-cache";
 
 const SEARCH_LIMIT = 40;
 const SEARCH_STALE_AFTER_MS = 10_000;
 type SearchPayload = Omit<SearchView, "cacheState">;
 
-const searchCache = new ViewCache<SearchPayload>({
+const searchCache = sharedViewCache<SearchPayload>("search", {
   maxEntries: 512,
   staleAfterMs: SEARCH_STALE_AFTER_MS,
 });

@@ -90,7 +90,9 @@ export function ThreadsShell({ initial }: { initial: ThreadsWorkspaceView }) {
     refreshing: revalidating,
     error: refreshError,
     refresh,
-  } = useRefreshingView(initial, "/api/threads", "Threads");
+  } = useRefreshingView(initial, "/api/threads", "Threads", {
+    timeoutMs: 60_000,
+  });
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const navigation = useWorkspaceNavigation(
     view.identity.pubkey,

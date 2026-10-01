@@ -3,6 +3,7 @@ import "server-only";
 import { randomUUID } from "node:crypto";
 
 import { getServerConfig } from "@/server/env";
+import { RelayQueryQueue } from "@/server/relay-query-queue";
 import { EventVerificationCache } from "@/server/event-verification";
 import type { NostrEvent } from "@/server/types";
 
@@ -15,7 +16,13 @@ const OPEN_TIMEOUT_MS = 4_000;
 const REQUEST_TIMEOUT_MS = 15_000;
 const MAX_QUERY_EVENTS = 5_000;
 const VERIFIED_EVENT_CACHE_LIMIT = 20_000;
-const verifiedEvents = new EventVerificationCache(VERIFIED_EVENT_CACHE_LIMIT);
+const globalRelay = globalThis as typeof globalThis & {
+  __buzzVerifiedEvents?: EventVerificationCache;
+};
+globalRelay.__buzzVerifiedEvents ??= new EventVerificationCache(
+  VERIFIED_EVENT_CACHE_LIMIT,
+);
+const verifiedEvents = globalRelay.__buzzVerifiedEvents;
 
 function parseFrame(data: unknown): RelayFrame | null {
   if (typeof data !== "string") return null;
@@ -75,6 +82,7 @@ export class RelayConnection {
   readonly relayUrl: string;
   private readonly socket: WebSocket;
   private readonly listeners = new Set<FrameListener>();
+  private readonly queryQueue = new RelayQueryQueue();
   private closed = false;
   private authenticated = false;
   private onClosed: (() => void) | null = null;
@@ -90,6 +98,7 @@ export class RelayConnection {
     });
     socket.addEventListener("close", () => {
       this.closed = true;
+      this.queryQueue.close(new Error("Relay WebSocket closed"));
       this.onClosed?.();
     });
   }
@@ -166,7 +175,11 @@ export class RelayConnection {
     this.authenticated = true;
   }
 
-  async query(filters: RelayFilter[]): Promise<NostrEvent[]> {
+  query(filters: RelayFilter[]): Promise<NostrEvent[]> {
+    return this.queryQueue.run(() => this.queryNow(filters));
+  }
+
+  private async queryNow(filters: RelayFilter[]): Promise<NostrEvent[]> {
     this.assertReady();
     if (filters.length === 0 || filters.length > 10) {
       throw new Error("Relay queries require between one and ten filters");
@@ -175,12 +188,18 @@ export class RelayConnection {
     const events = new Map<string, NostrEvent>();
     return new Promise<NostrEvent[]>((resolve, reject) => {
       const timeout = setTimeout(
-        () => finish(new Error("Relay query timed out")),
+        () =>
+          finish(
+            new Error(
+              `Relay query timed out (${events.size} verified events received)`,
+            ),
+          ),
         REQUEST_TIMEOUT_MS,
       );
       const cleanup = () => {
         clearTimeout(timeout);
         this.listeners.delete(onFrame);
+        this.socket.removeEventListener("close", onClose);
         if (this.isOpen()) {
           this.socket.send(JSON.stringify(["CLOSE", subscriptionId]));
         }
@@ -205,7 +224,10 @@ export class RelayConnection {
           finish(new Error(String(frame[2] ?? "Relay closed the query")));
         }
       };
+      const onClose = () =>
+        finish(new Error("Relay WebSocket closed during query"));
       this.listeners.add(onFrame);
+      this.socket.addEventListener("close", onClose, { once: true });
       this.socket.send(JSON.stringify(["REQ", subscriptionId, ...filters]));
     });
   }

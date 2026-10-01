@@ -240,3 +240,27 @@ export class ViewCache<T> {
     }
   }
 }
+
+type SharedViewName =
+  | "workspace-index"
+  | "workspace"
+  | "threads"
+  | "history"
+  | "inbox"
+  | "sent"
+  | "activity"
+  | "search";
+const globalViews = globalThis as typeof globalThis & {
+  __buzzProjectedViews?: Partial<Record<SharedViewName, ViewCache<unknown>>>;
+};
+
+/** Share bounded, session-keyed caches across Next.js page and route bundles. */
+export function sharedViewCache<T>(
+  name: SharedViewName,
+  options: ViewCacheOptions,
+): ViewCache<T> {
+  globalViews.__buzzProjectedViews ??= {};
+  const registry = globalViews.__buzzProjectedViews;
+  registry[name] ??= new ViewCache<unknown>(options);
+  return registry[name] as ViewCache<T>;
+}

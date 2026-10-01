@@ -27,8 +27,9 @@ format. Uploads are bounded to 128 records per snapshot; a capacity error keeps
 the local history and queue intact.
 
 Authenticated channel, thread, Inbox, Sent, Threads-index, Activity, and search projections use a
-bounded session-scoped stale-while-revalidate cache. Next.js keeps prefetched
-route payloads in its client cache; sidebar destinations warm eagerly and
+bounded session-scoped stale-while-revalidate cache shared across page and API
+bundles in the server process. Next.js keeps prefetched
+route payloads in its client cache; sidebar destinations and
 large thread/search result sets warm on navigation intent. Cold misses render a
 system-themed navigation skeleton, while active channel views reconcile from
 the relay live stream and the Threads index refreshes in the background.
@@ -39,6 +40,12 @@ Inbox, Sent, and Threads refresh every 15 seconds while visible and on focus, ta
 network recovery. Requests are serialized, timed out, and retried with capped
 backoff; failures keep existing conversations visible with a Retry action.
 Expired sessions renew through the saved browser signer before retrying.
+The complete Threads refresh has a 60-second deadline to accommodate its
+multi-query history projection; other view refreshes use 30 seconds. Relay
+history queries share a two-request concurrency limit per connection, with
+bounded queue capacity/wait and a 15-second active-query deadline. Socket closure
+rejects active and queued work immediately. Verified-event memoization is also
+shared across server bundles.
 Activity uses authoritative live snapshots after subscription catch-up and on
 changes, with retry backoff and a 60-second HTTP fallback. Older HTTP responses
 cannot overwrite newer live data. Activity snapshots apply edits and deletions.
@@ -68,6 +75,9 @@ export BUZZ_WEB_DEFAULT_CHANNEL=<channel-uuid>           # optional
 pnpm --dir chat-web build
 pnpm --dir chat-web start --hostname :: --port 4180
 ```
+
+Login controls stay disabled until browser initialization finishes. The secret
+input has no form field name, so native form submission cannot put it into a URL.
 
 Every application route, live stream, and write endpoint requires a verified
 login session. Only the login handshake and framework assets are available

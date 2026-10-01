@@ -14,8 +14,9 @@ export function useRefreshingView<T extends ProjectedView>(
   initial: T,
   path: string,
   label: string,
-  liveUrl?: string,
+  options: { liveUrl?: string; timeoutMs?: number } = {},
 ) {
+  const { liveUrl, timeoutMs = 30_000 } = options;
   const [view, setView] = useState(initial);
   const [refreshing, setRefreshing] = useState(initial.cacheState === "stale");
   const [error, setError] = useState<string | null>(null);
@@ -33,6 +34,7 @@ export function useRefreshingView<T extends ProjectedView>(
       );
     const loop = startViewRefresh({
       label,
+      timeoutMs,
       interval: liveUrl ? 60_000 : 15_000,
       delay: liveUrl
         ? 60_000
@@ -94,7 +96,7 @@ export function useRefreshingView<T extends ProjectedView>(
       loop.dispose();
       source?.close();
     };
-  }, [initial, path, label, liveUrl]);
+  }, [initial, path, label, liveUrl, timeoutMs]);
   return {
     view,
     refreshing: refreshing || liveRefreshing,

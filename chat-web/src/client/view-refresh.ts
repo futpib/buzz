@@ -6,12 +6,14 @@ export function startViewRefresh({
   delay,
   label = "View",
   interval = INTERVAL_MS,
+  timeoutMs = TIMEOUT_MS,
   load,
   onState,
 }: {
   delay: number;
   label?: string;
   interval?: number;
+  timeoutMs?: number;
   load: (signal: AbortSignal) => Promise<void>;
   onState: (refreshing: boolean, error: string | null) => void;
 }) {
@@ -31,7 +33,7 @@ export function startViewRefresh({
     const controller = new AbortController();
     active = controller;
     onState(true, error);
-    const timeout = setTimeout(() => controller.abort(), TIMEOUT_MS);
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
     try {
       await load(controller.signal);
       controller.signal.throwIfAborted();
