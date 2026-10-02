@@ -1,0 +1,82 @@
+#!/usr/bin/env python3
+"""Admit or revoke one playground user, including coordinator routing."""
+import argparse
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+
+B = Path('/opt/buzz')
+
+
+def readenv(path):
+    return dict((k, json.loads(v)) for k, v in (line.split('=', 1) for line in path.read_text().splitlines()))
+
+
+def writeenv(path, values):
+    temporary = path.with_suffix('.new')
+    temporary.write_text(''.join(f'{k}={json.dumps(v)}\n' for k, v in values.items()))
+    st = path.stat()
+    os.chmod(temporary, st.st_mode & 0o777)
+    os.chown(temporary, st.st_uid, st.st_gid)
+    temporary.replace(path)
+
+
+def run(*args, **kwargs):
+    return subprocess.run(args, check=True, text=True, capture_output=True, **kwargs).stdout
+
+
+p = argparse.ArgumentParser(description=__doc__)
+p.add_argument('action', choices=['add', 'remove'])
+p.add_argument('name', help='local label for this person')
+p.add_argument('--pubkey', help='existing 64-character hex public key; otherwise create a login')
+a = p.parse_args()
+if not re.fullmatch('[a-zA-Z0-9_-]{1,40}', a.name):
+    p.error('name must contain only letters, digits, underscore or hyphen')
+if a.pubkey and not re.fullmatch('[a-f0-9]{64}', a.pubkey):
+    p.error('--pubkey must be 64 lowercase hex characters')
+users = B / 'config/users'
+users.mkdir(mode=0o700, exist_ok=True)
+record = users / (a.name+'.json')
+if a.action == 'remove' and not record.exists():
+    p.error('no saved user with this name')
+if record.exists():
+    user = json.loads(record.read_text())
+    if a.pubkey and user['pubkey'] != a.pubkey:
+        p.error('this name already belongs to a different public key')
+elif a.pubkey:
+    user = {'pubkey': a.pubkey}
+else:
+    user = json.loads(run('docker', 'exec', 'buzz-playground-chat-web-1', 'node', '--input-type=module', '-e', 'import {generateSecretKey,getPublicKey,nip19} from "nostr-tools"; const s=generateSecretKey(); console.log(JSON.stringify({pubkey:getPublicKey(s),nsec:nip19.nsecEncode(s)}));'))
+if a.action == 'add':
+    user.update(web='https://178.18.254.153:8444', relay='wss://178.18.254.153:8443')
+    fd = os.open(record, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, 'w') as f:
+        json.dump(user, f, indent=2)
+        f.write('\n')
+env = {**os.environ, **readenv(B / 'config/relay.env')}
+run(str(B / 'bin/buzz-admin'), 'add-member' if a.action == 'add' else 'remove-member', '--pubkey', user['pubkey'], env=env)
+channel_file = B / 'config/playground-channel.json'
+if channel_file.exists():
+    channel = json.loads(channel_file.read_text())['channel_id']
+    run(str(B / 'bin/buzz-machine'), 'channels', 'add-member' if a.action == 'add' else 'remove-member', '--channel', channel, '--pubkey', user['pubkey'])
+if a.action == 'add' and 'nsec' in user:
+    run(str(B / 'bin/buzz'), 'users', 'set-profile', '--name', a.name,
+        env={**os.environ, **readenv(B / 'config/admin.env'), 'BUZZ_PRIVATE_KEY': user['nsec']})
+for filename, key in [('agent.env', 'BUZZ_AGENT_RESPOND_TO_ALLOWLIST'), ('coordinator.env', 'BUZZ_OWNER_PUBKEYS')]:
+    path = B / 'home/config' / filename
+    values = readenv(path)
+    members = set(values[key].split(','))
+    if a.action == 'add':
+        members.add(user['pubkey'])
+    else:
+        members.discard(user['pubkey'])
+    values[key] = ','.join(sorted(members))
+    writeenv(path, values)
+run('systemctl', 'restart', 'buzz-agent', 'buzz-coordinator')
+if a.action == 'remove':
+    record.unlink()
+    print('Revoked membership and bot access for '+a.name)
+else:
+    print('User admitted; privately share the login details in '+str(record))

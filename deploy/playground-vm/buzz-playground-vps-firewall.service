@@ -1,0 +1,12 @@
+[Unit]
+Description=Fence the Buzz playground peer from the VPS and other peers
+After=wg-quick@wg-buzz.service
+Requires=wg-quick@wg-buzz.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/opt/buzz-playground/vps/vps-firewall
+
+[Install]
+WantedBy=multi-user.target

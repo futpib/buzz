@@ -1,0 +1,58 @@
+[Unit]
+Description=Buzz playground Firecracker VM
+Requires=buzz-playground-network.service
+After=buzz-playground-network.service
+StartLimitIntervalSec=0
+
+[Service]
+User=buzzvm
+Group=buzzvm
+SupplementaryGroups=kvm
+RootDirectory=/opt/buzz-playground/jail
+RootDirectoryStartOnly=yes
+WorkingDirectory=/
+ExecStart=/firecracker --no-api --config-file /vm.json
+ExecStop=+/opt/buzz-playground/host/stop
+Restart=always
+RestartSec=3
+TimeoutStopSec=45
+CPUQuota=160%
+MemoryMax=6656M
+TasksMax=32
+LimitNOFILE=1024
+LimitCORE=0
+UMask=0077
+NetworkNamespacePath=/opt/buzz-playground/netns
+BindReadOnlyPaths=/usr/bin/firecracker:/firecracker
+BindReadOnlyPaths=/usr/lib/libc.so.6:/usr/lib/libc.so.6
+BindReadOnlyPaths=/usr/lib/libgcc_s.so.1:/usr/lib/libgcc_s.so.1
+BindReadOnlyPaths=/usr/lib/ld-linux-x86-64.so.2:/lib64/ld-linux-x86-64.so.2
+BindReadOnlyPaths=/opt/buzz-playground/vmlinux:/vmlinux
+BindReadOnlyPaths=/opt/buzz-playground/vm.json:/vm.json
+BindPaths=/opt/buzz-playground/rootfs.ext4:/rootfs.ext4
+BindPaths=/dev/kvm /dev/net/tun
+PrivateDevices=yes
+DevicePolicy=closed
+DeviceAllow=/dev/kvm rw
+DeviceAllow=/dev/net/tun rw
+ProtectSystem=strict
+ReadWritePaths=/rootfs.ext4
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+PrivateTmp=yes
+PrivatePIDs=yes
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+RestrictNamespaces=yes
+RestrictAddressFamilies=AF_UNIX
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

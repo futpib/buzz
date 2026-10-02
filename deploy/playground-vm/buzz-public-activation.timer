@@ -1,0 +1,10 @@
+[Unit]
+Description=Check whether the deferred Buzz VPS setup is complete
+
+[Timer]
+OnBootSec=60
+OnUnitInactiveSec=30
+Unit=buzz-public-activation.service
+
+[Install]
+WantedBy=timers.target

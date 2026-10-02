@@ -1,0 +1,20 @@
+default_account = "slopd-codex-sol-medium"
+backend = "codex"
+config_dir = "/opt/buzz/home/.codex"
+
+[tmux]
+socket = "/opt/buzz/home/run/tmux.sock"
+session = "buzz"
+
+[run]
+slopctl = "/opt/buzz/bin/slopctl"
+
+[accounts.slopd-codex-sol-medium]
+backend = "codex"
+config_dir = "/opt/buzz/home/.codex"
+executable = ["/opt/buzz/bin/codex", "--model", "gpt-6-sol", "-c", "model_reasoning_effort=\"medium\"", "-c", "check_for_update_on_startup=false", "--disable", "apps", "--dangerously-bypass-approvals-and-sandbox"]
+
+[backup]
+auto_backup = true
+auto_restore = true
+interval_secs = 30

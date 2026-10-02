@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+set -euo pipefail
+base=/opt/buzz-playground
+ns() { nsenter --net="$base/netns" -- "$@"; }
+case "${1:-}" in
+  up)
+    if ! mountpoint -q "$base/netns"; then
+      touch "$base/netns"
+      unshare --net -- mount --bind /proc/self/ns/net "$base/netns"
+    fi
+    if ! ip link show buzz-vm-host >/dev/null 2>&1; then
+      ip link add buzz-vm-host type veth peer name buzz-vm-ns
+      ip link set buzz-vm-ns netns "$base/netns"
+    fi
+    ip address replace 172.30.90.1/30 dev buzz-vm-host
+    ip link set buzz-vm-host up
+    ns ip link set lo up
+    ns ip address replace 172.30.90.2/30 dev buzz-vm-ns
+    ns ip link set buzz-vm-ns up
+    if ! ns ip link show buzz-tap >/dev/null 2>&1; then
+      ns ip tuntap add dev buzz-tap mode tap user buzzvm
+    fi
+    ns ip address replace 172.30.91.1/30 dev buzz-tap
+    ns ip link set buzz-tap up
+    ns ip route replace default via 172.30.90.1
+    ns sysctl -q -w net.ipv4.ip_forward=1
+    ns sysctl -q -w net.ipv6.conf.all.disable_ipv6=1
+    ns nft -f "$base/host/namespace.nft"
+    ip route replace 172.30.91.0/30 via 172.30.90.2 dev buzz-vm-host
+    sysctl -q -w net.ipv4.ip_forward=1
+    nft -f "$base/host/host.nft"
+    ;;
+  down)
+    ip link delete buzz-vm-host 2>/dev/null || true
+    nft delete table inet buzz_playground 2>/dev/null || true
+    if mountpoint -q "$base/netns"; then umount "$base/netns"; fi
+    ;;
+  *) echo "Usage: $0 up|down" >&2; exit 2 ;;
+esac

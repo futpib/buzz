@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -euo pipefail
+# Caddy opens connections to the guest; replies remain allowed. The guest
+# must never initiate connections into the VPS or use it to reach other peers.
+iptables -C INPUT -i wg-buzz -s 10.77.77.3 -m conntrack --ctstate NEW -j DROP 2>/dev/null ||
+  iptables -I INPUT -i wg-buzz -s 10.77.77.3 -m conntrack --ctstate NEW -j DROP
+iptables -C FORWARD -i wg-buzz -s 10.77.77.3 -j DROP 2>/dev/null ||
+  iptables -I FORWARD -i wg-buzz -s 10.77.77.3 -j DROP

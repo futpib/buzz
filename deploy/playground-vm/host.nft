@@ -1,0 +1,23 @@
+destroy table inet buzz_playground
+table inet buzz_playground {
+  chain input {
+    type filter hook input priority -20; policy accept;
+    iifname "buzz-vm-host" ct state established,related accept
+    iifname "buzz-vm-host" drop
+  }
+  chain forward {
+    type filter hook forward priority -20; policy accept;
+    iifname "buzz-vm-host" ip saddr != 172.30.91.2 drop
+    iifname "buzz-vm-host" meta nfproto ipv6 drop
+    iifname "buzz-vm-host" ct state established,related accept
+    iifname "buzz-vm-host" ip daddr 178.18.254.153 udp dport 51820 accept
+    iifname "buzz-vm-host" ip daddr 178.18.254.153 tcp dport 8443 accept
+    iifname "buzz-vm-host" ip daddr { 0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/3, 178.18.254.153 } drop
+    oifname "buzz-vm-host" ct state established,related accept
+    oifname "buzz-vm-host" drop
+  }
+  chain postrouting {
+    type nat hook postrouting priority srcnat; policy accept;
+    ip saddr 172.30.91.2 oifname != "buzz-vm-host" masquerade
+  }
+}

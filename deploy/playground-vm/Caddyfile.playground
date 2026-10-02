@@ -1,0 +1,24 @@
+(playground_tls) {
+    tls {
+        issuer acme {
+            profile shortlived
+            disable_tlsalpn_challenge
+        }
+    }
+}
+
+https://178.18.254.153:8443 {
+    import playground_tls
+    handle /pair {
+        reverse_proxy 10.77.77.3:5000
+    }
+    handle {
+        reverse_proxy 10.77.77.3:3000
+    }
+}
+
+https://178.18.254.153:8444 {
+    import playground_tls
+    encode zstd gzip
+    reverse_proxy 10.77.77.3:4180
+}

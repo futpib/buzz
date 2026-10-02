@@ -1,0 +1,8 @@
+[Unit]
+Description=Activate the Buzz public URL once the VPS proxies this guest
+After=buzz-relay.service buzz-wireguard.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /opt/buzz/bin/activate-public.py
+TimeoutStartSec=240

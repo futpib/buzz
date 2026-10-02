@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+set -euo pipefail
+export PATH=/opt/buzz/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+case "$1" in
+  dependencies)
+    docker compose --env-file /opt/buzz/config/relay.env -f /opt/buzz/compose.yml up -d
+    exec python3 /opt/buzz/bin/init-media.py
+    ;;
+  relay)
+    set -a
+    # shellcheck source=/dev/null
+    source /opt/buzz/home/config/relay.env
+    set +a
+    exec buzz-relay
+    ;;
+  slopd)
+    if ! tmux -S /opt/buzz/home/run/tmux.sock list-sessions >/dev/null 2>&1; then
+      tmux -S /opt/buzz/home/run/tmux.sock new-session -d -s daemon-host
+    fi
+    exec slopd -v --config /opt/buzz/slopd.toml --socket /opt/buzz/home/run/slopd.sock
+    ;;
+  agent|coordinator)
+    while ! curl -fsS http://127.0.0.1:8080/_readiness >/dev/null; do sleep 2; done
+    set -a
+    # shellcheck source=/dev/null
+    source "/opt/buzz/home/config/$1.env"
+    set +a
+    if [[ "$1" == coordinator ]]; then exec buzz-coordinator-bot; fi
+    exec /opt/buzz/bin/buzz-slopd-agent
+    ;;
+  *) exit 2 ;;
+esac

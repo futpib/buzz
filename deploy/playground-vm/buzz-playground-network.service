@@ -1,0 +1,14 @@
+[Unit]
+Description=Isolated network for the Buzz playground VM
+Wants=network-online.target
+After=network-online.target
+Before=buzz-playground.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/opt/buzz-playground/host/network up
+ExecStop=/opt/buzz-playground/host/network down
+
+[Install]
+WantedBy=multi-user.target

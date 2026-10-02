@@ -1,0 +1,15 @@
+destroy table inet buzz_playground
+table inet buzz_playground {
+  chain input {
+    type filter hook input priority filter; policy drop;
+    iifname "lo" accept
+    ct state established,related accept
+  }
+  chain forward {
+    type filter hook forward priority filter; policy drop;
+    iifname "buzz-tap" ip saddr != 172.30.91.2 drop
+    ct state established,related accept
+    iifname "buzz-vm-ns" ip saddr 172.30.90.1 ip daddr 172.30.91.2 accept
+    iifname "buzz-tap" ip saddr 172.30.91.2 accept
+  }
+}

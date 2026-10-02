@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+set -euo pipefail
+iptables-legacy-restore --noflush <<'RULES'
+*filter
+:BUZZ-INPUT - [0:0]
+-F BUZZ-INPUT
+-A BUZZ-INPUT -i lo -j ACCEPT
+-A BUZZ-INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+-A BUZZ-INPUT -i eth0 -s 172.30.90.1 -j ACCEPT
+-A BUZZ-INPUT -i wg-playground -s 10.77.77.1 -p tcp --dport 3000 -j ACCEPT
+-A BUZZ-INPUT -i wg-playground -s 10.77.77.1 -p tcp --dport 4180 -j ACCEPT
+-A BUZZ-INPUT -i wg-playground -s 10.77.77.1 -p tcp --dport 5000 -j ACCEPT
+-A BUZZ-INPUT -p icmp -j ACCEPT
+-A BUZZ-INPUT -p udp -s 178.18.254.153 --sport 51820 -j ACCEPT
+-A BUZZ-INPUT -j DROP
+COMMIT
+RULES
+iptables-legacy -C INPUT -j BUZZ-INPUT 2>/dev/null || iptables-legacy -I INPUT -j BUZZ-INPUT

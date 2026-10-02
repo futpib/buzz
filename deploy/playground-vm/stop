@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+set -euo pipefail
+# A guest reboot exits Firecracker; systemd suppresses Restart=always while
+# stopping this unit. Guest poweroff only halts this minimal kernel.
+nsenter --target 1 --mount --net --pid --root --wd -- \
+  /opt/buzz-playground/host/ssh 'systemctl reboot' || true
+for ((attempt=0; attempt<30; attempt++)); do
+  kill -0 "${MAINPID:?}" 2>/dev/null || exit 0
+  sleep 1
+done
