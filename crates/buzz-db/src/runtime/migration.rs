@@ -705,15 +705,39 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 51);
+        assert_eq!(migrations.len(), 56);
         assert!(migrations
             .windows(2)
             .all(|pair| pair[0].version < pair[1].version));
         assert_eq!(migrations[48].version, 49);
+        assert_eq!(migrations[49].version, 50);
+        assert_eq!(migrations[50].version, 51);
+        assert_eq!(migrations[51].version, 52);
+        assert_eq!(migrations[52].version, 53);
+        assert_eq!(migrations[53].version, 54);
+        assert_eq!(migrations[54].version, 55);
+        assert_eq!(migrations[55].version, 56);
         assert!(migrations[48]
             .sql
             .as_str()
             .contains("idx_thread_metadata_window"));
+        assert!(migrations[51]
+            .sql
+            .as_str()
+            .contains("community_deletion_owner_provenance"));
+        assert!(migrations[53].sql.as_str().contains("approval_origin"));
+        assert!(migrations[53]
+            .sql
+            .as_str()
+            .contains("community_deletion_requests_owner_preparable"));
+        assert!(migrations[54]
+            .sql
+            .as_str()
+            .contains("community_deletion_requests_owner_quota_reservations"));
+        assert!(migrations[55]
+            .sql
+            .as_str()
+            .contains("idx_relay_admin_actions_direct_request"));
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -765,6 +789,11 @@ mod postgres_tests {
             .as_str()
             .contains("CREATE INDEX idx_events_tags_gin"));
         assert!(!migrations[0].sql.as_str().contains("idx_events_tags_gin"));
+        // schema.sql (CI / isolated relay bootstrap) must carry the same index,
+        // or e-tag reads there run on plans prod never sees.
+        assert!(include_str!("../../../../schema/schema.sql").contains(
+            "CREATE INDEX idx_events_tags_gin ON events USING GIN (tags jsonb_path_ops)"
+        ));
 
         // NIP-AM (kind 44200) FTS exclusion: additive migration, never folded
         // into 0001 — folding would change 0001's checksum and break brownfield
@@ -1366,6 +1395,11 @@ mod postgres_tests {
         assert!(thread_window_index.contains("event_created_at DESC"));
         assert!(thread_window_index.contains("event_id ASC"));
         assert!(desired_schema.contains("idx_thread_metadata_root_window"));
+        assert_eq!(migrations[52].version, 53);
+        assert!(migrations[52]
+            .sql
+            .as_str()
+            .contains("CREATE TABLE artifact_heads"));
     }
 
     #[test]
@@ -1720,6 +1754,60 @@ mod postgres_tests {
         );
     }
 
+    #[test]
+    fn owner_deletion_auto_approval_migration_matches_desired_schema() {
+        let migration = MIGRATOR
+            .iter()
+            .find(|migration| migration.version == 54)
+            .expect("embedded migration 0054")
+            .sql
+            .as_ref()
+            .to_ascii_lowercase();
+        let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("workspace root");
+        let schema = std::fs::read_to_string(workspace_root.join("schema/schema.sql"))
+            .expect("read schema/schema.sql")
+            .to_ascii_lowercase();
+
+        for sql in [&migration, &schema] {
+            assert!(sql.contains("approval_origin text not null default 'operator'"));
+            assert!(sql.contains("approval_origin in ('operator', 'owner_automatic')"));
+            assert!(sql.contains("'submitted', 'approved', 'fenced'"));
+            assert!(sql.contains("community_deletion_requests_owner_preparable"));
+            assert!(sql.contains("request_origin = 'owner'"));
+            assert!(sql.contains("stage = 'submitted'"));
+        }
+        assert!(migration.contains("set local lock_timeout = '5s'"));
+    }
+
+    #[test]
+    fn owner_deletion_quota_reservation_index_matches_desired_schema() {
+        let migration = MIGRATOR
+            .iter()
+            .find(|migration| migration.version == 55)
+            .expect("embedded migration 0055")
+            .sql
+            .as_ref()
+            .to_ascii_lowercase();
+        let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("workspace root");
+        let schema = std::fs::read_to_string(workspace_root.join("schema/schema.sql"))
+            .expect("read schema/schema.sql")
+            .to_ascii_lowercase();
+
+        for sql in [&migration, &schema] {
+            assert!(sql.contains("community_deletion_requests_owner_quota_reservations"));
+            assert!(sql.contains("request_origin = 'owner'"));
+            assert!(sql.contains("stage <> 'aborted'"));
+            assert!(sql.contains("include (community_id, completed_at)"));
+        }
+        assert!(migration.contains("set local lock_timeout = '5s'"));
+    }
+
     /// Structural parity between migration 0029's deletion surface and the
     /// desired-state bootstrap schema (`schema/schema.sql`).
     ///
@@ -1833,6 +1921,12 @@ mod postgres_tests {
             .expect("embedded migration 0029")
             .sql
             .as_ref();
+        let migration_0052: &str = MIGRATOR
+            .iter()
+            .find(|migration| migration.version == 52)
+            .expect("embedded migration 0052")
+            .sql
+            .as_ref();
         let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .and_then(std::path::Path::parent)
@@ -1841,6 +1935,7 @@ mod postgres_tests {
             .expect("read schema/schema.sql");
 
         let migration = surface(migration_0029);
+        let owner_admission_migration = surface(migration_0052);
         let schema = surface(&schema_sql);
 
         assert_eq!(
@@ -1857,24 +1952,90 @@ mod postgres_tests {
                 .tables
                 .get(table)
                 .unwrap_or_else(|| panic!("schema.sql is missing deletion table {table}"));
-            if table != "community_deletion_requests" {
+            if table != "community_deletion_requests" && table != "community_deletion_approvals" {
                 assert_eq!(
                     in_schema, definition,
                     "schema.sql definition of {table} drifted from migration 0029"
                 );
             }
         }
+        let migration_approval_table = migration
+            .tables
+            .get("community_deletion_approvals")
+            .expect("0029 approval table");
+        let schema_approval_table = schema
+            .tables
+            .get("community_deletion_approvals")
+            .expect("schema.sql approval table");
+        for invariant in [
+            "inventory_digest bytea not null check (length(inventory_digest) = 32)",
+            "foreign key (request_id, community_id, inventory_digest) references community_deletion_requests(id, community_id, inventory_digest) on delete restrict",
+        ] {
+            assert!(
+                migration_approval_table.contains(invariant),
+                "0029 deletion approvals are missing {invariant}"
+            );
+            assert!(
+                schema_approval_table.contains(invariant),
+                "schema.sql deletion approvals are missing {invariant}"
+            );
+        }
+        let migration_request_table = migration
+            .tables
+            .get("community_deletion_requests")
+            .expect("0029 deletion request table");
+        for request_table in [
+            migration_request_table,
+            schema
+                .tables
+                .get("community_deletion_requests")
+                .expect("schema.sql deletion request table"),
+        ] {
+            assert!(
+                request_table.contains("unique (id, community_id, inventory_digest)"),
+                "deletion requests must expose the exact composite approval target"
+            );
+        }
         for (function, definition) in &migration.functions {
             let in_schema = schema
                 .functions
                 .get(function)
                 .unwrap_or_else(|| panic!("schema.sql is missing deletion function {function}"));
-            if function != "community_write_fence_excluded_table" {
+            if function != "community_write_fence_excluded_table"
+                && function != "prevent_community_deletion_request_retargeting"
+            {
                 assert_eq!(
                     in_schema, definition,
                     "schema.sql definition of {function}() drifted from migration 0029"
                 );
             }
+        }
+        assert_eq!(
+            schema
+                .functions
+                .get("prevent_community_deletion_request_retargeting")
+                .expect("schema.sql deletion retargeting guard"),
+            owner_admission_migration
+                .functions
+                .get("prevent_community_deletion_request_retargeting")
+                .expect("0052 deletion retargeting guard"),
+            "schema.sql must carry the latest immutable owner-provenance guard"
+        );
+        let request_table = schema
+            .tables
+            .get("community_deletion_requests")
+            .expect("schema.sql deletion request table");
+        for owner_provenance_fragment in [
+            "request_origin text not null default 'operator'",
+            "owner_pubkey text",
+            "mediating_operator_pubkey text",
+            "acknowledgement_version integer",
+            "constraint community_deletion_owner_provenance check",
+        ] {
+            assert!(
+                request_table.contains(owner_provenance_fragment),
+                "schema.sql deletion requests are missing {owner_provenance_fragment}"
+            );
         }
         for (trigger, definition) in &migration.triggers {
             let in_schema = schema
@@ -1901,6 +2062,7 @@ mod postgres_tests {
         let mut expected_fences = migration.fence_attachments.clone();
         expected_fences.remove("product_feedback");
         expected_fences.remove("rate_limit_violations");
+        expected_fences.extend(["artifact_heads", "artifact_revisions"].map(str::to_owned));
         assert_eq!(
             expected_fences, schema.fence_attachments,
             "write-fence attachment targets differ after recovery policy"
@@ -2332,9 +2494,9 @@ mod postgres_tests {
             .await
             .expect("connect migrated probe database");
         MIGRATOR
-            .run_to(47, &migrated)
+            .run_to(56, &migrated)
             .await
-            .expect("apply migrations 1-47");
+            .expect("apply migrations 1-56");
 
         for table in [
             "relay_admin_actions",
@@ -2523,6 +2685,22 @@ mod postgres_tests {
         .await
         .expect("read post-upgrade search behavior");
         assert_eq!(after, vec![(1, Some(true)), (30_179, None), (30_350, None)]);
+    }
+
+    /// Migration-upgrade half of the owner-provenance contract.
+    ///
+    /// The desired-state bootstrap half lives in
+    /// `store::deletion::postgres_tests` and asserts the same shared case
+    /// table, so `schema/schema.sql` cannot admit owner rows the migration
+    /// path refuses (or the reverse).
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn migrated_schema_enforces_owner_provenance_contract() {
+        let pool = connect_test_pool().await;
+        reset_public_schema(&pool).await;
+        run_migrations(&pool).await.expect("run migrations");
+
+        crate::store::deletion::owner_provenance_contract::assert_contract(&pool).await;
     }
 
     #[tokio::test]
@@ -2831,10 +3009,47 @@ mod postgres_tests {
             "all NIP-FI tables must be absent after migration 0044: {present:?}"
         );
 
+        // Complete later additive migrations before comparing to the current
+        // binary's complete tenant-table inventory.
+        run_migrations(&pool)
+            .await
+            .expect("complete current migrations");
         // The deletion catalog must validate with ledger relations gone.
         crate::deletion::DeletionStore::new(pool.clone())
             .validate_catalog()
             .await
             .expect("deletion catalog validates after migration 0044");
+    }
+
+    /// Migration 0056's `relay_admin_actions_direct_shape` rejects a direct
+    /// timeout carrying only one of duration and expiry on the migrated
+    /// schema. The desired-state (pgschema + reconcile) path is covered by
+    /// `direct_timeout_shape_check_holds_on_desired_state_schema` in buzz-relay.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn migration_0056_rejects_half_filled_direct_timeout() {
+        let pool = connect_test_pool().await;
+        reset_public_schema(&pool).await;
+        MIGRATOR
+            .run_to(56, &pool)
+            .await
+            .expect("apply migrations 1-56");
+        for (secs, until) in [(Some(60i64), None), (None, Some(chrono::Utc::now()))] {
+            let err = sqlx::query(
+                "INSERT INTO relay_admin_actions (report_community_id, request_id, actor_pubkey, \
+                 actor_role, action, timeout_secs, timeout_until, enforcement_target_pubkey) \
+                 VALUES (gen_random_uuid(), gen_random_uuid(), $1, 'operator', 'timeout', $2, $3, $1)",
+            )
+            .bind([9u8; 32].as_slice())
+            .bind(secs)
+            .bind(until)
+            .execute(&pool)
+            .await
+            .expect_err("half-filled timeout must violate the CHECK");
+            assert!(
+                err.to_string().contains("relay_admin_actions_direct_shape"),
+                "{err}"
+            );
+        }
     }
 }

@@ -8,13 +8,21 @@ class WidgetHelpers {
     required Widget child,
     List<Override> overrides = const [],
     List<NavigatorObserver> navigatorObservers = const [],
+    bool disableAnimations = false,
   }) {
     return ProviderScope(
       overrides: overrides,
       child: MaterialApp(
         theme: AppTheme.light(),
         navigatorObservers: navigatorObservers,
-        home: Scaffold(body: child),
+        home: Builder(
+          builder: (context) => MediaQuery(
+            data: MediaQuery.of(
+              context,
+            ).copyWith(disableAnimations: disableAnimations),
+            child: Scaffold(body: child),
+          ),
+        ),
       ),
     );
   }

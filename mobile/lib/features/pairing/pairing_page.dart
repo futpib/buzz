@@ -1,4 +1,6 @@
 import 'dart:async';
+import 'dart:math' show sqrt2;
+import 'dart:ui' show ImageFilter;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -11,19 +13,14 @@ import '../../shared/security/sensitive_action_authorizer.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/buzz_loading_indicator.dart';
 import '../../shared/widgets/ios_glass_navigation_button.dart';
-import '../../shared/widgets/tappable_flapping_bee.dart';
+import 'pairing_page/onboarding_wordmark.dart';
 import 'pairing_provider.dart';
 import 'pairing_qr_scanner.dart';
 
 part 'pairing_page/onboarding_background.dart';
+part 'pairing_page/onboarding_colors.dart';
+part 'pairing_page/onboarding_glass_button.dart';
 part 'pairing_page/pairing_welcome_view.dart';
-
-const _onboardingChartreuse = Color(0xFFD7D72E);
-const _onboardingShellBottom = Color(0xFFD7E7F6);
-const _onboardingCtaLabel = Color(0xFFD7E6F0);
-const _onboardingInk = Color(0xFF111111);
-const _onboardingMutedInk = Color(0xB3111111);
-const _onboardingErrorInk = Color(0xFF7A1025);
 
 class PairingPage extends HookConsumerWidget {
   /// When true, the pairing page is being used to add a new community
@@ -101,12 +98,14 @@ class PairingPage extends HookConsumerWidget {
     }, [initialCode]);
 
     final isVerifyingSas = pairingState.status == PairingStatus.confirmingSas;
-    final onboardingSystemOverlayStyle = SystemUiOverlayStyle.dark.copyWith(
-      statusBarColor: Colors.transparent,
-    );
+    final onboardingSystemOverlayStyle =
+        (context._onboardingIsDark
+                ? SystemUiOverlayStyle.light
+                : SystemUiOverlayStyle.dark)
+            .copyWith(statusBarColor: Colors.transparent);
     final pairingAppBar = addingCommunity
         ? AppBar(
-            foregroundColor: _onboardingInk,
+            foregroundColor: context._onboardingInk,
             systemOverlayStyle: onboardingSystemOverlayStyle,
             leadingWidth: Theme.of(context).platform == TargetPlatform.iOS
                 ? Grid.quarter + iosGlassChannelHeaderLeadingWidth
@@ -121,7 +120,7 @@ class PairingPage extends HookConsumerWidget {
                       onPressed: () => Navigator.of(context).maybePop(),
                       width: iosGlassChannelHeaderLeadingWidth,
                       buttonCenterX: iosGlassChannelHeaderButtonCenterX,
-                      foregroundColor: _onboardingInk,
+                      foregroundColor: context._onboardingInk,
                     ),
                   )
                 : IconButton(
@@ -132,7 +131,7 @@ class PairingPage extends HookConsumerWidget {
             title: Text(
               identityRecoveryOnly ? 'Send to Desktop' : 'Add Community',
               style: context.textTheme.titleMedium?.copyWith(
-                color: _onboardingInk,
+                color: context._onboardingInk,
               ),
             ),
           )
@@ -175,9 +174,7 @@ class PairingPage extends HookConsumerWidget {
           )
         : AnnotatedRegion<SystemUiOverlayStyle>(
             key: const Key('pairing-onboarding-system-overlay'),
-            value: SystemUiOverlayStyle.dark.copyWith(
-              statusBarColor: Colors.transparent,
-            ),
+            value: onboardingSystemOverlayStyle,
             child: _OnboardingBackground(
               child: Scaffold(
                 backgroundColor: Colors.transparent,
@@ -267,7 +264,7 @@ class _SasVerificationView extends StatelessWidget {
           'Confirm desktop code',
           textAlign: TextAlign.center,
           style: context.textTheme.headlineSmall?.copyWith(
-            color: _onboardingInk,
+            color: context._onboardingInk,
             fontWeight: FontWeight.w600,
             letterSpacing: -0.4,
           ),
@@ -279,7 +276,7 @@ class _SasVerificationView extends StatelessWidget {
               : 'Make sure the six-digit code matches on both devices. Your Buzz identity will transfer to this device. Only continue if you started this pairing from your desktop.',
           textAlign: TextAlign.center,
           style: context.textTheme.bodyMedium?.copyWith(
-            color: _onboardingMutedInk,
+            color: context._onboardingMutedInk,
           ),
         ),
         const SizedBox(height: Grid.md),
@@ -301,7 +298,7 @@ class _SasVerificationView extends StatelessWidget {
                       padding: const EdgeInsets.symmetric(vertical: Grid.xs),
                       alignment: Alignment.center,
                       decoration: BoxDecoration(
-                        color: Colors.white.withValues(alpha: 0.7),
+                        color: context._onboardingInputSurface,
                         borderRadius: BorderRadius.circular(12),
                         border: Border.all(
                           color: context.colors.primary.withValues(alpha: 0.15),
@@ -311,7 +308,7 @@ class _SasVerificationView extends StatelessWidget {
                         sasCode[index],
                         style: context.textTheme.displaySmall?.copyWith(
                           fontWeight: FontWeight.w600,
-                          color: _onboardingInk,
+                          color: context._onboardingInk,
                         ),
                       ),
                     ),
@@ -329,22 +326,22 @@ class _SasVerificationView extends StatelessWidget {
             onChanged: confirmed
                 ? null
                 : (value) => onProtectionChanged(value ?? false),
-            activeColor: _onboardingInk,
-            checkColor: _onboardingCtaLabel,
-            side: const BorderSide(color: _onboardingInk),
+            activeColor: context._onboardingInk,
+            checkColor: context._onboardingCtaLabel,
+            side: BorderSide(color: context._onboardingInk),
             controlAffinity: ListTileControlAffinity.leading,
             contentPadding: EdgeInsets.zero,
             title: Text(
               biometricLabel,
               style: context.textTheme.bodyMedium?.copyWith(
-                color: _onboardingInk,
+                color: context._onboardingInk,
                 fontWeight: FontWeight.w600,
               ),
             ),
             subtitle: Text(
               'For secure actions',
               style: context.textTheme.bodySmall?.copyWith(
-                color: _onboardingMutedInk,
+                color: context._onboardingMutedInk,
               ),
             ),
           ),
@@ -354,7 +351,7 @@ class _SasVerificationView extends StatelessWidget {
             errorMessage!,
             textAlign: TextAlign.center,
             style: context.textTheme.bodySmall?.copyWith(
-              color: _onboardingErrorInk,
+              color: context._onboardingErrorInk,
             ),
           ),
         ],
@@ -367,14 +364,14 @@ class _SasVerificationView extends StatelessWidget {
             children: [
               BuzzLoadingIndicator(
                 size: 24,
-                color: _onboardingInk,
+                color: context._onboardingInk,
                 semanticLabel: 'Connecting',
               ),
               const SizedBox(width: Grid.twelve),
               Text(
                 'Confirmed — waiting for desktop',
                 style: context.textTheme.bodySmall?.copyWith(
-                  color: _onboardingMutedInk,
+                  color: context._onboardingMutedInk,
                 ),
               ),
             ],
@@ -385,14 +382,14 @@ class _SasVerificationView extends StatelessWidget {
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
                 FilledButton.icon(
-                  style: _onboardingButtonStyle,
+                  style: context._onboardingButtonStyle,
                   onPressed: onConfirm,
                   icon: const Icon(LucideIcons.check),
                   label: const Text('Codes match'),
                 ),
                 const SizedBox(height: Grid.xxs),
                 TextButton(
-                  style: _onboardingSecondaryButtonStyle.copyWith(
+                  style: context._onboardingSecondaryButtonStyle.copyWith(
                     minimumSize: const WidgetStatePropertyAll(
                       Size.fromHeight(48),
                     ),
