@@ -4,6 +4,8 @@ base=/opt/buzz-playground
 ns() { nsenter --net="$base/netns" -- "$@"; }
 case "${1:-}" in
   up)
+    modprobe kvm_intel
+    modprobe tun
     if ! mountpoint -q "$base/netns"; then
       touch "$base/netns"
       unshare --net -- mount --bind /proc/self/ns/net "$base/netns"
