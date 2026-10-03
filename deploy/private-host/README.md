@@ -151,6 +151,39 @@ resized on a common canvas. The Buzz coordinator uses
 original artwork. Their published kind-0 profiles point at authenticated
 Blossom copies on this Buzz relay.
 
+### Named Codex presets
+
+The existing machine owner can provision four independent identities:
+`slopd-codex-sol-medium`, `slopd-codex-sol-xhigh`,
+`slopd-codex-astra-medium`, and `slopd-codex-astra-xhigh`.
+Sol pins `gpt-6-sol`; Astra pins `gpt-6-astra`. Each pins its named reasoning
+effort in the launch arguments, independently of the shared Codex config.
+
+```bash
+./deploy/private-host/install-codex-presets.sh --channel CHANNEL_UUID --start
+```
+
+Repeat `--channel` for additional channels. This requires the existing bridge,
+machine owner, auth signer, and `accounts.codex` slopd configuration. The machine
+owner must have permission to add bots to the selected channels, and the
+coordinator's `BUZZ_OWNER_PUBKEYS` must include the machine pubkey (as for Z.AI).
+The bridges allow the human listed in `buzz-machine/public.env` and the
+coordinator to prompt them.
+
+The installer preserves the original slopd config in
+`config.toml.before-codex-presets`, retains existing identities on repeat runs,
+and manages only its marked four-account block. Accounts share the existing
+Codex login/config directory while maintaining separate sessions and Buzz
+identities. The systemd instances are `buzz-slopd-codex@sol-medium.service`, etc.
+It reloads slopd with SIGHUP and enables/starts the new bridges; it does not
+restart the original bridge, shared daemon, or already-running presets.
+Check `slopctl --socket "$XDG_RUNTIME_DIR/slopd-buzz-agent/slopd.sock" status`
+and the slopd journal after installation for successful config reload.
+
+Mention a preset by its full name to select it. Mentioning a different preset
+in an existing thread gives it the Buzz conversation in a separate session;
+it does not transfer private session state or stop another agent's active turn.
+
 ## Buzz conversation coordinator
 
 The tracked Buzz coordinator handles deterministic routing: in a thread

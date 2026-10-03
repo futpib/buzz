@@ -10,7 +10,8 @@ for unit in \
   buzz-slopd-opencode-agent.service \
   buzz-slopd-claude-agent.service \
   buzz-slopd-grok-agent.service \
-  buzz-zai-agent.service
+  buzz-zai-agent.service \
+  buzz-slopd-codex@.service
 do
   unit_path="${deployment_dir}/systemd/${unit}"
   if rg -q -- '--no-(base-prompt|memory)' "${unit_path}"; then
@@ -51,9 +52,10 @@ declare -A expected_auth_files=(
   [buzz-slopd-claude-agent.service]=auth-claude.env
   [buzz-slopd-grok-agent.service]=auth-grok.env
   [buzz-zai-agent.service]=auth-zai.env
+  [buzz-slopd-codex@.service]=auth-codex-%i.env
 )
 for unit in "${!expected_auth_files[@]}"; do
-  if ! rg -q -F "EnvironmentFile=-%h/.config/buzz-slopd-agent/${expected_auth_files[${unit}]}" \
+  if ! rg -q "EnvironmentFile=-?%h/.config/buzz-slopd-agent/${expected_auth_files[${unit}]}" \
     "${deployment_dir}/systemd/${unit}"; then
     echo "${unit} does not load its per-agent NIP-OA auth tag" >&2
     exit 1
@@ -203,7 +205,7 @@ fi
 pushd "${repo_root}" >/dev/null
 cargo build --quiet -p buzz-sdk --example compute_auth_tag
 popd >/dev/null
-signer="${repo_root}/target/debug/examples/compute_auth_tag"
+signer="${CARGO_TARGET_DIR:-${repo_root}/target}/debug/examples/compute_auth_tag"
 installed_libexec="${tmp_dir}/installed-libexec"
 install -Dm700 "${deployment_dir}/sign-slopd-agents.sh" \
   "${installed_libexec}/sign-slopd-agents"
@@ -287,5 +289,25 @@ if [[ -d "${wrong_auth_config_dir}" ]] &&
   echo "signing wrote auth files before rejecting the wrong nsec" >&2
   exit 1
 fi
+
+# Exercise each preset through the real installed signer and PEM identity path.
+install -Dm700 "${launcher}" "${installed_libexec}/buzz-slopd-agent"
+openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:secp256k1 \
+  -out "${tmp_dir}/preset-identity.pem" 2>/dev/null
+for model in sol astra; do
+  for effort in medium xhigh; do
+    account="codex-${model}-${effort}"
+    preset_home="${tmp_dir}/preset-home"
+    install -Dm600 "${tmp_dir}/preset-identity.pem" "${preset_home}/.config/buzz-slopd-${account}-agent/identity.pem"
+    env HOME="${preset_home}" \
+      BUZZ_AGENT_BRIDGE_CONFIG="${bridge_config}" \
+      BUZZ_AGENT_EXPECTED_OWNER="${pem_public_key}" \
+      BUZZ_AGENT_AUTH_CONFIG_DIR="${tmp_dir}/preset-auth" \
+      "${installed_libexec}/sign-slopd-agents" --agent "${account}" --owner-pem "${pem_file}"
+    test -s "${tmp_dir}/preset-auth/auth-${account}.env"
+  done
+done
+
+python3 "${repo_root}/scripts/test-codex-presets.py"
 
 echo "slopd agent deployment checks passed"

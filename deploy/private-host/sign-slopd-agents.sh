@@ -29,7 +29,8 @@ Prompts without echo for the Buzz owner's nsec, verifies that it matches
 BUZZ_AGENT_OWNER, and writes one NIP-OA auth-tag environment file per agent.
 The nsec is never written to disk or passed as a command-line argument.
 
-  --agent NAME    Sign only this agent (codex, opencode, claude, grok, or zai).
+  --agent NAME    Sign only this agent (codex, opencode, claude, grok, zai, or
+                  codex-{sol,astra}-{medium,xhigh}).
                   May be repeated. The default is the four slopd agents.
   --channel UUID  Add the selected agent to this channel with role bot.
                   May be repeated and requires exactly one --agent.
@@ -123,7 +124,8 @@ if ((${#requested_accounts[@]} == 0)); then
 fi
 for account in "${requested_accounts[@]}"; do
   case "${account}" in
-    codex | opencode | claude | grok | zai) ;;
+    codex | opencode | claude | grok | zai | \
+      codex-sol-medium | codex-sol-xhigh | codex-astra-medium | codex-astra-xhigh) ;;
     *)
       echo "Unsupported agent: ${account}" >&2
       exit 2
@@ -182,7 +184,8 @@ fi
 launcher="${script_dir}/buzz-slopd-agent"
 agent_public_key() {
   local account="$1"
-  local override_name="BUZZ_AGENT_${account^^}_PUBKEY"
+  local variable_account="${account//-/_}"
+  local override_name="BUZZ_AGENT_${variable_account^^}_PUBKEY"
   local override="${!override_name:-}"
   if [[ -n "${override}" ]]; then
     printf '%s\n' "${override}"
@@ -195,8 +198,8 @@ agent_public_key() {
         BUZZ_SLOPD_AGENT_IDENTITY_FILE="${BUZZ_AGENT_CODEX_IDENTITY:-${HOME}/.config/buzz-slopd-agent/identity.txt}" \
         "${launcher}" --public-key
       ;;
-    opencode | claude | grok)
-      local identity_override="BUZZ_AGENT_${account^^}_IDENTITY"
+    opencode | claude | grok | codex-*)
+      local identity_override="BUZZ_AGENT_${variable_account^^}_IDENTITY"
       BUZZ_SLOPD_AGENT_IDENTITY_FORMAT=pem \
         BUZZ_SLOPD_AGENT_IDENTITY_FILE="${!identity_override:-${HOME}/.config/buzz-slopd-${account}-agent/identity.pem}" \
         "${launcher}" --public-key
@@ -269,7 +272,7 @@ if ((${#channels[@]} > 0)); then
   account="${requested_accounts[0]}"
   for channel in "${channels[@]}"; do
     BUZZ_PRIVATE_KEY="${owner_secret}" BUZZ_RELAY_URL="${relay_url}" \
-      "${buzz_cli}" channels add-member \
+      env -u BUZZ_AUTH_TAG "${buzz_cli}" channels add-member \
       --channel "${channel}" \
       --pubkey "${agent_pubkeys[${account}]}" \
       --role bot >/dev/null
@@ -292,7 +295,8 @@ if [[ -n "${profile_name}" ]]; then
   account="${requested_accounts[0]}"
   relay_url="${relay_url:-$(sed -n 's/^BUZZ_RELAY_URL=//p' "${bridge_config}" | tail -n 1)}"
   buzz_cli="${buzz_cli:-$(sed -n 's/^BUZZ_CLI_BIN=//p' "${bridge_config}" | tail -n 1)}"
-  identity_override="BUZZ_AGENT_${account^^}_IDENTITY"
+  variable_account="${account//-/_}"
+  identity_override="BUZZ_AGENT_${variable_account^^}_IDENTITY"
   if [[ "${account}" == codex ]]; then
     identity_format=text
     identity_file="${!identity_override:-${HOME}/.config/buzz-slopd-agent/identity.txt}"
@@ -328,6 +332,7 @@ if [[ "${restart}" == true ]]; then
   for account in "${requested_accounts[@]}"; do
     case "${account}" in
       codex) services+=(buzz-slopd-agent.service) ;;
+      codex-*) services+=("buzz-slopd-codex@${account#codex-}.service") ;;
       opencode) services+=(buzz-slopd-opencode-agent.service) ;;
       claude) services+=(buzz-slopd-claude-agent.service) ;;
       grok) services+=(buzz-slopd-grok-agent.service) ;;
