@@ -15,6 +15,56 @@ const MAX_RETRY_TURNS: usize = 3;
 const MAX_CONTEXT_CHARS: usize = 200_000;
 const RULE: &str = "unresolved_requests";
 
+pub(super) fn passed_receipt(
+    channel: Uuid,
+    source: EventId,
+    target: EventId,
+    reaction: EventId,
+) -> Result<EventBuilder> {
+    Ok(build_judge_deletion(channel, reaction, source, target)?
+        .tag(Tag::parse(["judge-turn-passed", "true"])?)
+        .tag(Tag::parse(["s", &target.to_hex()])?))
+}
+
+pub(super) fn record_passed_receipt(
+    deliveries: &mut HashMap<EventId, JudgeDelivery>,
+    event: &Event,
+    bot: &PublicKey,
+) -> bool {
+    if event.pubkey != *bot
+        || !matches!(
+            event.kind,
+            Kind::EventDeletion | Kind::Custom(5) | Kind::Custom(9005)
+        )
+    {
+        return false;
+    }
+    let Some(source) =
+        unique_event_tag_value(event, JUDGED_SOURCE_TAG).and_then(|s| EventId::from_hex(s).ok())
+    else {
+        return false;
+    };
+    let Some(target) =
+        unique_event_tag_value(event, JUDGED_TARGET_TAG).and_then(|s| EventId::from_hex(s).ok())
+    else {
+        return false;
+    };
+    if unique_event_tag_value(event, "judge-turn-passed") != Some("true")
+        || unique_event_tag_value(event, "s") != Some(target.to_hex().as_str())
+    {
+        return false;
+    }
+    let delivery = deliveries.entry(source).or_default();
+    delivery.target_id = Some(target);
+    delivery.verdict = Some(JudgeVerdict {
+        pass: true,
+        failures: vec![],
+    });
+    delivery.turn_receipt = true;
+    delivery.terminal_receipt = true;
+    true
+}
+
 pub(super) struct RetryBudget {
     user: EventId,
     used: usize,
@@ -345,6 +395,7 @@ async fn process_check(
         delivery.target_id = Some(root.id);
         delivery.verdict = Some(verdict.clone());
         delivery.reaction_event_id = Some(id);
+        delivery.turn_receipt = true;
         delivery.retry_exhausted = budget.exhausted();
     }
     if !verdict.pass && !budget.exhausted() && existing.critique_event_id.is_none() {

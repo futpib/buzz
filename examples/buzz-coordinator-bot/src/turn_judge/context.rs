@@ -92,47 +92,77 @@ pub(super) async fn receipts(config: &Config, key: ThreadKey) -> Result<Vec<Even
         config.owner_auth_tag.as_ref(),
     )
     .await?;
-    connection
-        .send_raw(&json!([
-            "REQ",
-            "turn-judge-receipts",
-            Filter::new()
-                .kind(Kind::Reaction)
-                .author(config.bot_keys.public_key())
-                .custom_tags(
-                    SingleLetterTag::lowercase(Alphabet::H),
-                    [key.channel_id.to_string()]
-                )
-                .custom_tags(
-                    SingleLetterTag::lowercase(Alphabet::E),
-                    [key.root_event_id.to_hex()]
-                )
-                .limit(THREAD_PAGE_SIZE)
-        ]))
-        .await?;
     let mut events = Vec::new();
-    loop {
-        match connection.next_event(THREAD_QUERY_TIMEOUT).await? {
-            RelayMessage::Event {
-                subscription_id,
-                event,
-            } if subscription_id == "turn-judge-receipts" => {
-                event.verify()?;
-                events.push(*event);
-                if events.len() >= THREAD_PAGE_SIZE {
-                    bail!("turn receipts exceed query limit; refusing an incomplete recovery");
+    for (kinds, target_tag) in [
+        (vec![Kind::Reaction], Alphabet::E),
+        (vec![Kind::EventDeletion, Kind::Custom(9005)], Alphabet::S),
+    ] {
+        let mut cursor: Option<ThreadPageCursor> = None;
+        loop {
+            let mut filter = serde_json::to_value(
+                Filter::new()
+                    .kinds(kinds.clone())
+                    .author(config.bot_keys.public_key())
+                    .custom_tags(
+                        SingleLetterTag::lowercase(Alphabet::H),
+                        [key.channel_id.to_string()],
+                    )
+                    .custom_tags(
+                        SingleLetterTag::lowercase(target_tag),
+                        [key.root_event_id.to_hex()],
+                    )
+                    .limit(THREAD_PAGE_SIZE),
+            )?;
+            if let Some(cursor) = &cursor {
+                filter["until"] = json!(cursor.created_at);
+                filter["before_id"] = json!(cursor.event_id);
+            }
+            connection
+                .send_raw(&json!(["REQ", "turn-judge-receipts", filter]))
+                .await?;
+            let mut count = 0;
+            let mut next = None;
+            loop {
+                match connection.next_event(THREAD_QUERY_TIMEOUT).await? {
+                    RelayMessage::Event {
+                        subscription_id,
+                        event,
+                    } if subscription_id == "turn-judge-receipts" => {
+                        event.verify()?;
+                        count += 1;
+                        update_thread_page_cursor(
+                            &mut next,
+                            event.created_at.as_secs(),
+                            event.id.to_hex(),
+                        );
+                        events.push(*event);
+                        if events.len() >= MAX_THREAD_EVENTS {
+                            bail!(
+                                "turn receipts exceed query limit; refusing an incomplete recovery"
+                            );
+                        }
+                    }
+                    RelayMessage::Eose { subscription_id }
+                        if subscription_id == "turn-judge-receipts" =>
+                    {
+                        break
+                    }
+                    RelayMessage::Closed {
+                        subscription_id,
+                        message,
+                    } if subscription_id == "turn-judge-receipts" => {
+                        bail!("turn receipt query closed: {message}")
+                    }
+                    _ => {}
                 }
             }
-            RelayMessage::Eose { subscription_id } if subscription_id == "turn-judge-receipts" => {
-                break
+            if count < THREAD_PAGE_SIZE {
+                break;
             }
-            RelayMessage::Closed {
-                subscription_id,
-                message,
-            } if subscription_id == "turn-judge-receipts" => {
-                bail!("turn receipt query closed: {message}")
+            if next.is_none() || next == cursor {
+                bail!("turn receipt cursor did not advance");
             }
-            _ => {}
+            cursor = next;
         }
     }
     let _ = connection.disconnect().await;

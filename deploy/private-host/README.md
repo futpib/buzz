@@ -187,6 +187,13 @@ it does not transfer private session state or stop another agent's active turn.
 
 ## Buzz conversation coordinator
 
+Successful turn judgments are deduplicated by their exact lifecycle event ID.
+When a newer judgment replaces the visible reaction on a thread root, its
+signed deletion retains the old turn's pass receipt (`judge-turn-passed`, with
+the root in `s`). Recovery reads these receipts after restart, so multiple
+agents sharing a thread cannot repeatedly erase and rejudge each other's passes.
+New lifecycle event IDs are still checked normally.
+
 The tracked Buzz coordinator handles deterministic routing: in a thread
 authored only by the human owner and one owner-attested agent, an untagged owner
 reply gets a sibling bot reply carrying the agent's real `p` tag and friendly

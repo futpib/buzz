@@ -14,6 +14,156 @@ fn cli(args: &[&str]) -> serde_json::Value {
 }
 
 struct Channel(String);
+
+#[tokio::test]
+#[ignore = "requires live coordinator env and buzz-machine; creates/deletes a private channel, no model calls"]
+async fn live_passed_turn_receipts_survive_other_agents_and_restart() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let mut f = Fixture::new();
+    let mut config = Config::from_env().unwrap();
+    let output = Command::new("openssl")
+        .args([
+            "pkey",
+            "-in",
+            &std::env::var("BUZZ_TEST_MACHINE_IDENTITY").unwrap(),
+            "-text",
+            "-noout",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let text = String::from_utf8(output.stdout).unwrap();
+    let private = text
+        .split("priv:")
+        .nth(1)
+        .unwrap()
+        .split("pub:")
+        .next()
+        .unwrap()
+        .chars()
+        .filter(|c| !c.is_whitespace() && *c != ':')
+        .collect::<String>();
+    f.owner = Keys::parse(&private).unwrap();
+    config.owner_pubkeys = vec![f.owner.public_key()];
+    config.bot_keys = Keys::generate();
+    config.owner_auth_tag = Some(
+        buzz_sdk::nip_oa::parse_auth_tag(
+            &buzz_sdk::nip_oa::compute_auth_tag(&f.owner, &config.bot_keys.public_key(), "")
+                .unwrap(),
+        )
+        .unwrap(),
+    );
+    let created = cli(&[
+        "channels",
+        "create",
+        "--name",
+        &format!("judge-pass-test-{}", Uuid::new_v4()),
+        "--type",
+        "stream",
+        "--visibility",
+        "private",
+    ]);
+    let channel = Channel(created["channel_id"].as_str().unwrap().to_string());
+    f.channel = Uuid::parse_str(&channel.0).unwrap();
+    config.channel_ids = vec![f.channel];
+    cli(&[
+        "channels",
+        "add-member",
+        "--channel",
+        &channel.0,
+        "--pubkey",
+        &config.bot_keys.public_key().to_hex(),
+        "--role",
+        "bot",
+    ]);
+    let sent = cli(&[
+        "messages",
+        "send",
+        "--channel",
+        &channel.0,
+        "--content",
+        "Receipt regression test only.",
+    ]);
+    f.root = load_judge_target(
+        &config,
+        f.channel,
+        EventId::from_hex(sent["event_id"].as_str().unwrap()).unwrap(),
+    )
+    .await
+    .unwrap();
+    f.config = config.clone();
+    let tracker = Arc::new(Mutex::new(JudgeTracker::default()));
+    let mut events = Vec::new();
+    let mut session = None;
+    for revision in 1..=5 {
+        f.agent = Keys::generate();
+        let event = f.lifecycle(AgentThreadState::Human, "completed", revision);
+        {
+            let mut state = tracker.lock().await;
+            state
+                .turns
+                .insert(coordinates(&event).unwrap(), event.clone());
+            state.deliveries.insert(
+                event.id,
+                JudgeDelivery {
+                    verdict: Some(JudgeVerdict {
+                        pass: true,
+                        failures: vec![],
+                    }),
+                    ..JudgeDelivery::default()
+                },
+            );
+        }
+        process(
+            &config,
+            config.judge.as_ref().unwrap(),
+            &tracker,
+            &mut session,
+            &event,
+        )
+        .await
+        .unwrap();
+        events.push(event);
+    }
+    assert!(
+        session.is_none(),
+        "precomputed verdicts must not call a model"
+    );
+    // Real relay reads into a completely fresh tracker: no in-memory escape hatch.
+    let key = coordinates(&events[0]).unwrap().0;
+    let receipts = context::receipts(&config, key).await.unwrap();
+    let restarted = Arc::new(Mutex::new(JudgeTracker::default()));
+    recover_judge_deliveries(
+        &mut restarted.lock().await.deliveries,
+        &receipts,
+        &config.bot_keys.public_key(),
+    );
+    for event in &events {
+        assert!(restarted
+            .lock()
+            .await
+            .deliveries
+            .get(&event.id)
+            .is_some_and(JudgeDelivery::complete));
+        restarted
+            .lock()
+            .await
+            .turns
+            .insert(coordinates(event).unwrap(), event.clone());
+        process(
+            &config,
+            config.judge.as_ref().unwrap(),
+            &restarted,
+            &mut session,
+            event,
+        )
+        .await
+        .unwrap();
+    }
+    assert!(session.is_none(), "restart must not rejudge passed turns");
+    assert_eq!(context::receipts(&config, key).await.unwrap().len(), 5);
+}
+
 impl Drop for Channel {
     fn drop(&mut self) {
         let result = Command::new("buzz-machine")

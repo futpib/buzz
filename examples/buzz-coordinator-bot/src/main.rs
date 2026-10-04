@@ -324,12 +324,18 @@ struct JudgeDelivery {
     reaction_event_id: Option<EventId>,
     critique_event_id: Option<EventId>,
     retry_exhausted: bool,
+    turn_receipt: bool,
+    terminal_receipt: bool,
 }
 
 impl JudgeDelivery {
+    fn superseded_by(&self, source_id: EventId, source: EventId, target: EventId) -> bool {
+        source_id != source && self.target_id(source_id) == target
+    }
+
     fn complete(&self) -> bool {
         self.verdict.as_ref().is_some_and(|verdict| {
-            self.reaction_event_id.is_some()
+            (self.reaction_event_id.is_some() || self.terminal_receipt)
                 && (verdict.pass || self.critique_event_id.is_some() || self.retry_exhausted)
         })
     }
@@ -2077,32 +2083,52 @@ async fn remove_superseded_judgments_for(
         .await
         .deliveries
         .iter()
-        .filter(|(source_id, delivery)| {
-            **source_id != source && delivery.target_id(**source_id) == target
-        })
+        .filter(|(source_id, delivery)| delivery.superseded_by(**source_id, source, target))
         .flat_map(|(source_id, delivery)| {
             // Keep corrective messages as durable retry-budget receipts even
             // when an edit supersedes their original judgment.
             [delivery.reaction_event_id]
                 .into_iter()
                 .flatten()
-                .map(|event_id| (*source_id, event_id))
+                .map(|event_id| (*source_id, event_id, delivery.clone()))
         })
         .collect::<Vec<_>>();
-    for (_, event_id) in &obsolete {
-        let deletion = config.sign(build_judge_deletion(channel_id, *event_id, source, target)?)?;
+    for (source_id, event_id, delivery) in &obsolete {
+        // Reactions are unique per author/target/emoji. Archive successful turn
+        // completion before deleting its UI reaction, including legacy receipts.
+        let passed = delivery.turn_receipt && delivery.verdict.as_ref().is_some_and(|v| v.pass);
+        let deletion = config.sign(if passed {
+            turn_judge::passed_receipt(channel_id, *source_id, target, *event_id)?
+        } else {
+            build_judge_deletion(channel_id, *event_id, source, target)?
+        })?;
         publish_required(connection, deletion, "superseded judge output deletion").await?;
+        if passed {
+            tracker
+                .lock()
+                .await
+                .deliveries
+                .entry(*source_id)
+                .or_default()
+                .terminal_receipt = true;
+        }
     }
     if !obsolete.is_empty() {
         let obsolete_sources = obsolete
             .into_iter()
-            .map(|(source_id, _)| source_id)
+            .map(|(source_id, _, _)| source_id)
             .collect::<HashSet<_>>();
         tracker
             .lock()
             .await
             .deliveries
-            .retain(|source_id, _| !obsolete_sources.contains(source_id));
+            .retain(|source_id, delivery| {
+                if !obsolete_sources.contains(source_id) {
+                    return true;
+                }
+                delivery.reaction_event_id = None;
+                delivery.terminal_receipt
+            });
     }
     Ok(())
 }
@@ -2465,6 +2491,9 @@ fn record_judge_event(
     event: &Event,
     bot: &PublicKey,
 ) {
+    if turn_judge::record_passed_receipt(deliveries, event, bot) {
+        return;
+    }
     if event.pubkey != *bot || (event.kind != Kind::Reaction && event.kind != Kind::Custom(9)) {
         return;
     }
@@ -2508,6 +2537,10 @@ fn record_judge_event(
         && reaction_target(event) == Some(target)
     {
         delivery.reaction_event_id = Some(event.id);
+        delivery.turn_receipt = event
+            .tags
+            .iter()
+            .any(|tag| tag.as_slice() == ["t", "buzz-turn-judge"]);
         delivery.retry_exhausted =
             unique_event_tag_value(event, turn_judge::EXHAUSTED_TAG) == Some("true");
     } else if event.kind == Kind::Custom(9)
