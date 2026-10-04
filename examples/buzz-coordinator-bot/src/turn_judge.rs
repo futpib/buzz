@@ -303,6 +303,9 @@ async fn process_check(
     }
     let recovery::Check { key, agent, source } = *check;
     let events = context::load(config, key).await?;
+    if !selection::allows(config, &events, agent) {
+        return Ok(());
+    }
     let receipts = context::receipts(config, key).await?;
     {
         let mut tracker = tracker.lock().await;
@@ -341,7 +344,10 @@ async fn process_check(
     };
     // A new request, reply, or lifecycle transition invalidates this assessment.
     let fresh = context::load(config, key).await?;
-    if !check_current(tracker, check, live).await? || conversation(config, &fresh)? != context {
+    if !selection::allows(config, &fresh, agent)
+        || !check_current(tracker, check, live).await?
+        || conversation(config, &fresh)? != context
+    {
         return Ok(());
     }
     let root = fresh
@@ -412,6 +418,10 @@ async fn process_check(
             &label,
         )?)?)?;
         let id = critique.id;
+        if !selection::current(config, key, agent).await? {
+            let _ = connection.disconnect().await;
+            return Ok(());
+        }
         publish_required(&mut connection, critique, "turn judge correction").await?;
         tracker
             .lock()

@@ -16,6 +16,57 @@ fn cli(args: &[&str]) -> serde_json::Value {
 struct Channel(String);
 
 #[tokio::test]
+#[ignore = "read-only inspection of BUZZ_TEST_CHANNEL/ROOT/SELECTED/OLD with coordinator env"]
+async fn live_existing_thread_routes_to_explicit_selection() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let config = Config::from_env().unwrap();
+    let key = ThreadKey {
+        channel_id: Uuid::parse_str(&std::env::var("BUZZ_TEST_CHANNEL").unwrap()).unwrap(),
+        root_event_id: EventId::from_hex(&std::env::var("BUZZ_TEST_ROOT").unwrap()).unwrap(),
+    };
+    let selected = PublicKey::parse(&std::env::var("BUZZ_TEST_SELECTED").unwrap()).unwrap();
+    let old = PublicKey::parse(&std::env::var("BUZZ_TEST_OLD").unwrap()).unwrap();
+    let events = load_thread(&config, key.channel_id, key.root_event_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        selection::latest(
+            &events,
+            &config.owner_pubkeys,
+            &config.bot_keys.public_key()
+        ),
+        Some(selected)
+    );
+    assert!(selection::current(&config, key, selected).await.unwrap());
+    assert!(!selection::current(&config, key, old).await.unwrap());
+    let members = load_channel_members(&config, key.channel_id).await.unwrap();
+    assert!(members.contains(&selected));
+    // Synthetic untagged follow-up, never signed or sent. Existing routed
+    // messages must not make the route guard suppress this fresh probe.
+    let mut followup = events
+        .iter()
+        .find(|e| {
+            config.owner_pubkeys.contains(&e.pubkey)
+                && parse_thread_relation(e).is_some()
+                && !event_has_mention(e)
+        })
+        .unwrap()
+        .clone();
+    followup.id = EventId::from_byte_array([123; 32]);
+    assert_eq!(
+        route_target_with_assignment(
+            &events,
+            &followup,
+            &config.owner_pubkeys,
+            &config.bot_keys.public_key(),
+            Some(old)
+        ),
+        Some(selected)
+    );
+    eprintln!("existing thread selects {selected}; stale agent {old} cannot route or retry");
+}
+
+#[tokio::test]
 #[ignore = "requires live coordinator env and buzz-machine; creates/deletes a private channel, no model calls"]
 async fn live_passed_turn_receipts_survive_other_agents_and_restart() {
     let _ = rustls::crypto::ring::default_provider().install_default();
@@ -162,6 +213,106 @@ async fn live_passed_turn_receipts_survive_other_agents_and_restart() {
     }
     assert!(session.is_none(), "restart must not rejudge passed turns");
     assert_eq!(context::receipts(&config, key).await.unwrap().len(), 5);
+
+    // A switch arriving while an old-agent judgment is pending must fence both
+    // message corrections and completion recovery, even with a fresh tracker.
+    let selected = Keys::generate().public_key();
+    cli(&[
+        "channels",
+        "add-member",
+        "--channel",
+        &channel.0,
+        "--pubkey",
+        &selected.to_hex(),
+        "--role",
+        "bot",
+    ]);
+    cli(&[
+        "messages",
+        "send",
+        "--channel",
+        &channel.0,
+        "--reply-to",
+        &f.root.id.to_hex(),
+        "--mention",
+        &selected.to_hex(),
+        "--content",
+        "Selected agent, please take over.",
+    ]);
+    let old_reply = f.message(&f.agent, "timed out; please resend", unix_seconds());
+    let job = JudgeJob {
+        event: old_reply.clone(),
+        target: old_reply,
+        channel_id: f.channel,
+    };
+    let fresh = Arc::new(Mutex::new(JudgeTracker::default()));
+    assert!(process_judge_job(
+        &config,
+        config.judge.as_ref().unwrap(),
+        &fresh,
+        &mut session,
+        &job
+    )
+    .await
+    .unwrap()
+    .is_none());
+    apply_judge_verdict(
+        &config,
+        &fresh,
+        &job,
+        &JudgeVerdict {
+            pass: false,
+            failures: vec![JudgeFailure {
+                rule: "avoidable_handoff".into(),
+                issue: "retry".into(),
+            }],
+        },
+    )
+    .await
+    .unwrap();
+    let late = f.lifecycle(AgentThreadState::Human, "completed", 99);
+    fresh
+        .lock()
+        .await
+        .turns
+        .insert(coordinates(&late).unwrap(), late.clone());
+    process(
+        &config,
+        config.judge.as_ref().unwrap(),
+        &fresh,
+        &mut session,
+        &late,
+    )
+    .await
+    .unwrap();
+    assert!(
+        session.is_none(),
+        "old worker must not call a model after selection changed"
+    );
+    assert!(
+        fresh.lock().await.deliveries.is_empty(),
+        "old worker must not publish a judgment"
+    );
+    let thread = load_thread(&config, f.channel, f.root.id).await.unwrap();
+    let followup = f.message(&f.owner, "coverage?", unix_seconds());
+    assert_eq!(
+        route_target_with_assignment(
+            &thread,
+            &followup,
+            &config.owner_pubkeys,
+            &config.bot_keys.public_key(),
+            Some(f.agent.public_key())
+        ),
+        Some(selected)
+    );
+    assert_eq!(
+        thread.len(),
+        2,
+        "no corrective mentions should have been published"
+    );
+    eprintln!(
+        "explicit handoff survives fresh tracker; stale message and completion checks suppressed"
+    );
 }
 
 impl Drop for Channel {

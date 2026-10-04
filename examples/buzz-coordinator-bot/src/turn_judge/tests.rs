@@ -3,6 +3,81 @@ use buzz_core::agent_thread_lifecycle::{build_agent_thread_lifecycle, AgentThrea
 
 mod live;
 
+fn selection_message(f: &Fixture, author: &Keys, recipients: &[PublicKey], time: u64) -> Event {
+    let names = recipients.iter().map(PublicKey::to_hex).collect::<Vec<_>>();
+    buzz_sdk::build_message(
+        f.channel,
+        "switch",
+        Some(&ThreadRef {
+            root_event_id: f.root.id,
+            parent_event_id: f.root.id,
+        }),
+        &names.iter().map(String::as_str).collect::<Vec<_>>(),
+        false,
+        &[],
+        &[],
+    )
+    .unwrap()
+    .custom_created_at(Timestamp::from_secs(time))
+    .sign_with_keys(author)
+    .unwrap()
+}
+
+#[test]
+fn explicit_selection_beats_stale_assignment_and_survives_history_replay() {
+    let f = Fixture::new();
+    let old = f.agent.public_key();
+    let new = Keys::generate().public_key();
+    let first = selection_message(&f, &f.owner, &[old], 20);
+    let switch = selection_message(&f, &f.owner, &[new], 30);
+    let stale = f.message(&f.agent, "timed out; please resend", 40);
+    let followup = f.message(&f.owner, "coverage?", 50);
+    for thread in [
+        vec![f.root.clone(), first.clone(), switch.clone(), stale.clone()],
+        vec![stale, switch, first, f.root.clone()],
+    ] {
+        assert_eq!(
+            route_target_with_assignment(
+                &thread,
+                &followup,
+                &[f.owner.public_key()],
+                &f.config.bot_keys.public_key(),
+                Some(old)
+            ),
+            Some(new)
+        );
+        assert!(!selection::allows(&f.config, &thread, old));
+        assert!(selection::allows(&f.config, &thread, new));
+        let switch_back = selection_message(&f, &f.owner, &[old], 60);
+        let mut thread = thread;
+        thread.push(switch_back);
+        assert!(selection::allows(&f.config, &thread, old));
+        assert!(!selection::allows(&f.config, &thread, new));
+    }
+}
+
+#[test]
+fn bot_mentions_and_ambiguous_mentions_do_not_replace_explicit_selection() {
+    let f = Fixture::new();
+    let old = f.agent.public_key();
+    let new = Keys::generate().public_key();
+    let events = vec![
+        selection_message(&f, &f.owner, &[new], 10),
+        selection_message(&f, &f.config.bot_keys, &[old], 20),
+        selection_message(&f, &f.agent, &[old], 30),
+        selection_message(&f, &f.owner, &[old, new], 40),
+    ];
+    assert_eq!(
+        selection::latest(
+            &events,
+            &[f.owner.public_key()],
+            &f.config.bot_keys.public_key()
+        ),
+        Some(new)
+    );
+    assert!(selection::allows(&f.config, &[], old));
+}
+
 #[tokio::test]
 async fn lifecycle_ingestion_fences_recovery_before_status_publication() {
     let f = Fixture::new();

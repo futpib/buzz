@@ -1,6 +1,7 @@
 //! Route owner messages, judge agent delivery, and react to new Buzz threads.
 
 mod recovery;
+mod selection;
 mod turn_judge;
 
 use std::collections::{HashMap, HashSet};
@@ -1504,7 +1505,11 @@ async fn run_judge_worker(
         let result = process_judge_job(&config, &judge_config, &tracker, &mut session, &job).await;
         tracker.lock().await.queued.remove(&job.event.id);
         match result {
-            Ok(verdict) => eprintln!(
+            Ok(None) => eprintln!(
+                "skipped judgment {}: owner selected another agent",
+                job.event.id
+            ),
+            Ok(Some(verdict)) => eprintln!(
                 "judged {}: {}",
                 job.event.id.to_hex(),
                 if verdict.pass { "pass" } else { "fail" }
@@ -1877,7 +1882,10 @@ async fn process_judge_job(
     tracker: &Arc<Mutex<JudgeTracker>>,
     session: &mut Option<PersistentAcpSession>,
     job: &JudgeJob,
-) -> Result<JudgeVerdict> {
+) -> Result<Option<JudgeVerdict>> {
+    if !selection::current(config, selection::job_key(job), job.target.pubkey).await? {
+        return Ok(None);
+    }
     let delivery = tracker
         .lock()
         .await
@@ -1905,7 +1913,7 @@ async fn process_judge_job(
         },
     };
     apply_judge_verdict(config, tracker, job, &verdict).await?;
-    Ok(verdict)
+    Ok(Some(verdict))
 }
 
 async fn request_judge_verdict(
@@ -1985,6 +1993,9 @@ async fn apply_judge_verdict(
         let root = parse_thread_relation(&job.target)
             .map_or(job.target.id, |relation| relation.root_event_id);
         let events = load_thread(config, job.channel_id, root).await?;
+        if !selection::allows(config, &events, job.target.pubkey) {
+            return Ok(());
+        }
         Some(turn_judge::retry_budget(config, &events)?)
     };
     let mut connection = NostrWsConnection::connect_authenticated(
@@ -2041,6 +2052,10 @@ async fn apply_judge_verdict(
             }
             let critique = config.sign(critique)?;
             let critique_event_id = critique.id;
+            if !selection::current(config, selection::job_key(job), job.target.pubkey).await? {
+                let _ = connection.disconnect().await;
+                return Ok(());
+            }
             publish_required(&mut connection, critique, "judge critique").await?;
             let mut tracker = tracker.lock().await;
             let delivery = tracker.deliveries.entry(job.event.id).or_default();
@@ -3920,7 +3935,8 @@ fn route_target_with_assignment(
         return None;
     }
 
-    let assigned = assigned.filter(|agent| !owners.contains(agent) && *agent != *bot);
+    let assigned = selection::latest(thread, owners, bot)
+        .or(assigned.filter(|agent| !owners.contains(agent) && *agent != *bot));
     let mut agents = HashSet::new();
     let mut has_untrusted_participant = false;
     for event in thread {

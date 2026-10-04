@@ -194,6 +194,13 @@ the root in `s`). Recovery reads these receipts after restart, so multiple
 agents sharing a thread cannot repeatedly erase and rejudge each other's passes.
 New lifecycle event IDs are still checked normally.
 
+Within a thread, the latest single-recipient owner mention overrides inferred
+agent activity. Untagged follow-ups reconstruct that selection from thread
+history, including after restart. Message and completion judges suppress old
+workers' corrective retries after a switch and recheck before publishing a
+correction. Mentioning another worker does not cancel the old bridge's queued
+work; late replies and timeout notices cannot reclaim automatic routing.
+
 The tracked Buzz coordinator handles deterministic routing: in a thread
 authored only by the human owner and one owner-attested agent, an untagged owner
 reply gets a sibling bot reply carrying the agent's real `p` tag and friendly
