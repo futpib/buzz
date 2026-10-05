@@ -218,6 +218,9 @@ class ClientStateProjection {
     Future<T> Function(_ClientStatePair active) work, {
     bool invalidateOnBackpressure = false,
   }) async {
+    // Unsupported platforms never have a projection to wait for. In particular,
+    // do not await a singleton future owned by an earlier test's async zone.
+    if (!_supportsPlatform()) return null;
     await configuration;
     if (generation != _generation) return null;
     final active = _active;
