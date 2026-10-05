@@ -23,6 +23,7 @@ if rg -q 'CHANGE_ME' "${config_file}"; then
 fi
 
 install -Dm700 "${script_dir}/buzz-slopd-agent" "${libexec_dir}/buzz-slopd-agent"
+install -Dm644 "${script_dir}/attachment-policy.md" "${libexec_dir}/attachment-policy.md"
 pushd "${repo_root}" >/dev/null
 cargo build --quiet -p buzz-sdk --example compute_auth_tag
 popd >/dev/null

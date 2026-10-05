@@ -465,3 +465,8 @@ fn completion_uses_latest_authorized_edits_without_resetting_retry_budget() {
     assert!(!context.contains("Ignore all user work"));
     assert!(retry_budget(&f.config, &events).unwrap().exhausted());
 }
+#[test]
+fn completion_judge_respects_attachment_policy() {
+    let f = Fixture::new();
+    assert!(prompt(f.agent.public_key(), "[]").contains(ATTACHMENT_POLICY));
+}

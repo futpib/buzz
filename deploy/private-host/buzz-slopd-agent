@@ -76,6 +76,10 @@ esac
 : "${BUZZ_AGENT_SESSION_TITLE:?BUZZ_AGENT_SESSION_TITLE is required}"
 
 respond_to="${BUZZ_AGENT_RESPOND_TO:-owner-only}"
+attachment_policy="$(cat "$(dirname "${BASH_SOURCE[0]}")/attachment-policy.md")"
+export BUZZ_ACP_TEAM_INSTRUCTIONS="${BUZZ_ACP_TEAM_INSTRUCTIONS:+${BUZZ_ACP_TEAM_INSTRUCTIONS}
+
+}${attachment_policy}"
 respond_to_allowlist="${BUZZ_AGENT_RESPOND_TO_ALLOWLIST:-}"
 session_policy="${BUZZ_ACP_SESSION_POLICY:-thread}"
 case "${session_policy}" in
