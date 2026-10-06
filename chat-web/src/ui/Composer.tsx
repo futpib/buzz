@@ -10,6 +10,9 @@ import {
 } from "lucide-react";
 import { useEffect, useRef, useState, useTransition } from "react";
 
+import { useMentions } from "@/client/use-mentions";
+import { MentionSuggestions } from "@/ui/MentionSuggestions";
+
 import { AttachmentUploadError, uploadAttachment } from "@/client/attachments";
 import {
   loadSigningCredential,
@@ -78,6 +81,13 @@ export function Composer({
   const [attachments, setAttachments] = useState<QueuedAttachment[]>([]);
   const [pending, startTransition] = useTransition();
   const textarea = useRef<HTMLTextAreaElement>(null);
+  const mentions = useMentions({
+    channelId,
+    identity: expectedPubkey,
+    content,
+    onChange: setContent,
+    textarea,
+  });
   const fileInput = useRef<HTMLInputElement>(null);
   const lastTypingSentAt = useRef(0);
   const attachmentSequence = useRef(0);
@@ -248,7 +258,9 @@ export function Composer({
           await returnToLogin();
           return;
         }
+        const mentionPubkeys = await mentions.resolve();
         const event = makeMessageEvent(credential, {
+          mentionPubkeys,
           channelId,
           content: message,
           rootId,
@@ -273,6 +285,7 @@ export function Composer({
           } | null;
           throw new Error(body?.error || "Message was not sent");
         }
+        mentions.clear();
         setContent("");
         setAttachments([]);
         lastTypingSentAt.current = 0;
@@ -362,6 +375,7 @@ export function Composer({
           ))}
         </ul>
       ) : null}
+      <MentionSuggestions mentions={mentions} />
       <div className="composer-box">
         <input
           hidden
@@ -383,13 +397,15 @@ export function Composer({
           <Paperclip aria-hidden="true" size={17} />
         </button>
         <textarea
+          {...mentions.inputProps}
           aria-label={rootId ? "Reply to thread" : `Message ${channelName}`}
           disabled={pending}
           onChange={(event) => {
-            setContent(event.target.value);
+            mentions.onChange(event.target.value, event.target.selectionStart);
             sendTyping(event.target.value);
           }}
           onKeyDown={(event) => {
+            if (mentions.onKeyDown(event)) return;
             if (
               event.key === "Enter" &&
               (event.ctrlKey || event.metaKey) &&

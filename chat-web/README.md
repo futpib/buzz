@@ -120,3 +120,19 @@ pins intact. Pins are shared channel state, not personal bookmarks. The server
 loads targets and their edit/deletion closure and resolves nested-thread links.
 Live catch-up always emits a fresh snapshot, even on a quiet channel; a linked
 thread row centers when it first arrives, without recentering subsequent updates.
+
+Channel, thread, and forum composers and the message editor support member
+mentions. Type `@` to search the current channel roster; choose with touch,
+click, Enter, or Tab, move with the arrow keys, and dismiss with Escape.
+Multi-word names remain intact. Same-name members have separate public-key
+hints and selecting one inserts a qualified literal label. Ambiguous manually
+typed names block sending and preserve the draft. Markdown code and email
+addresses do not become mention recipients.
+
+Roster suggestions use a bounded, identity-scoped stale-while-revalidate cache,
+with visible refresh and retry states. Sending refreshes typed-name resolution
+and verifies notification recipients against the live channel membership before
+publishing the browser-signed `p` tags. Selected identities remain bound across
+profile renames. Edit snapshots preserve reference identities, notify only
+newly added recipients, and remove deleted references. Unbound historical text
+cannot acquire a different recipient merely because a profile name changed.

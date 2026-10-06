@@ -238,3 +238,59 @@ test("browser identity survives through the production local fallback", async ()
   Reflect.deleteProperty(globalThis, "sessionStorage");
   Reflect.deleteProperty(globalThis, "localStorage");
 });
+
+test("channel and forum mentions are signed, deduplicated, and exclude self", () => {
+  for (const forum of [false, true])
+    for (const rootId of [undefined, "d".repeat(64)]) {
+      const own = makeMessageEvent(credential, {
+        channelId: "test",
+        content: "probe",
+      }).pubkey;
+      const event = makeMessageEvent(credential, {
+        channelId: "test",
+        content: "@Alice Smith",
+        forum,
+        rootId,
+        mentionPubkeys: ["a".repeat(64), "a".repeat(64), own],
+      });
+      assert.ok(verifyEvent(event));
+      assert.deepEqual(
+        event.tags.filter((tag) => tag[0] === "p"),
+        [["p", "a".repeat(64)]],
+      );
+      assert.equal(event.kind, forum ? (rootId ? 45003 : 45001) : 9);
+    }
+  assert.throws(
+    () =>
+      makeMessageEvent(credential, {
+        channelId: "test",
+        content: "bad",
+        mentionPubkeys: ["bad"],
+      }),
+    /invalid/,
+  );
+});
+
+test("edit snapshots preserve body identities but notify only newly added recipients", () => {
+  const a = "a".repeat(64),
+    b = "b".repeat(64);
+  for (const current of [[a], [a, b], []]) {
+    const event = makeMessageEditEvent(credential, {
+      channelId: "test",
+      targetId: "e".repeat(64),
+      content: "updated",
+      originalMentionPubkeys: [a],
+      mentionPubkeys: current,
+    });
+    assert.ok(verifyEvent(event));
+    assert.deepEqual(
+      event.tags.filter((tag) => tag[0] === "p"),
+      current.includes(b) ? [["p", b]] : [],
+    );
+    assert.deepEqual(
+      event.tags.filter((tag) => tag[0] === "mention"),
+      current.map((key) => ["mention", key]),
+    );
+    assert.ok(event.tags.some((tag) => tag[0] === "buzz:mention-snapshot"));
+  }
+});

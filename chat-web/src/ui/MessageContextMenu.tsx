@@ -30,6 +30,9 @@ import type { MessageView, NostrEvent, ReactionView } from "@/server/types";
 import { ChannelPinsContext } from "@/ui/PinnedMessages";
 import { EmojiReactionPicker } from "@/ui/EmojiReactionPicker";
 
+import { useMentions } from "@/client/use-mentions";
+import { MentionSuggestions } from "@/ui/MentionSuggestions";
+
 const QUICK_REACTIONS = ["👍", "❤️", "😂", "🎉", "🔥"] as const;
 
 type MenuPoint = { x: number; y: number };
@@ -159,6 +162,16 @@ export function MessageContextMenu({
   const [mode, setMode] = useState<MenuMode>("actions");
   const [expandedEmoji, setExpandedEmoji] = useState(false);
   const [editContent, setEditContent] = useState(message.content);
+  const editTextarea = useRef<HTMLTextAreaElement>(null);
+  const mentions = useMentions({
+    channelId,
+    identity: expectedPubkey,
+    content: editContent,
+    onChange: setEditContent,
+    textarea: editTextarea,
+    originalContent: message.content,
+    originalPubkeys: message.mentionPubkeys,
+  });
   const [pending, setPending] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const dialog = useRef<HTMLDivElement>(null);
@@ -487,7 +500,10 @@ export function MessageContextMenu({
               event.preventDefault();
               void run("edit", async () => {
                 const signingCredential = await credential();
+                const mentionPubkeys = await mentions.resolve();
                 const action = makeMessageEditEvent(signingCredential, {
+                  mentionPubkeys,
+                  originalMentionPubkeys: message.mentionPubkeys,
                   channelId,
                   targetId: message.id,
                   content: editContent,
@@ -496,6 +512,7 @@ export function MessageContextMenu({
                 onChange({
                   ...message,
                   content: action.content,
+                  mentionPubkeys,
                   editedAt: action.created_at,
                 });
                 close();
@@ -513,11 +530,22 @@ export function MessageContextMenu({
                 <X aria-hidden="true" size={18} />
               </button>
             </header>
+            <MentionSuggestions mentions={mentions} />
             <textarea
+              {...mentions.inputProps}
+              ref={editTextarea}
+              onKeyDown={(event) => {
+                mentions.onKeyDown(event);
+              }}
               aria-label="Message text"
               disabled={Boolean(pending)}
               maxLength={65_536}
-              onChange={(event) => setEditContent(event.target.value)}
+              onChange={(event) =>
+                mentions.onChange(
+                  event.target.value,
+                  event.target.selectionStart,
+                )
+              }
               rows={6}
               value={editContent}
             />

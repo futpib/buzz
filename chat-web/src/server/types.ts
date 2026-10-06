@@ -55,6 +55,7 @@ export type ReactionView = {
 };
 
 export type MessageView = {
+  mentionPubkeys?: string[];
   id: string;
   threadRootId: string | null;
   parentId: string | null;

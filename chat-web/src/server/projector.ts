@@ -341,6 +341,20 @@ function messageView(
     parentId: thread?.parentId ?? null,
     author: profiles.get(event.pubkey) ?? fallbackProfile(event.pubkey),
     content: usableEdit?.content ?? event.content,
+    mentionPubkeys: [
+      ...new Set(
+        (usableEdit?.tags.some((tag) => tag[0] === "buzz:mention-snapshot")
+          ? usableEdit.tags.filter(
+              (tag) => tag[0] === "mention" && tag.length === 2,
+            )
+          : [...event.tags, ...(usableEdit?.tags ?? [])].filter(
+              (tag) => tag[0] === "p" || tag[0] === "mention",
+            )
+        )
+          .map((tag) => tag[1])
+          .filter((key) => /^[0-9a-f]{64}$/.test(key)),
+      ),
+    ],
     createdAt: event.created_at,
     editedAt: usableEdit?.created_at ?? null,
     isOwn: event.pubkey === viewerPubkey,

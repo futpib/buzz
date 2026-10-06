@@ -1,3 +1,4 @@
+import { validateMentionMembers } from "@/server/members";
 import "server-only";
 
 import type { AuthSession } from "@/server/auth";
@@ -9,6 +10,7 @@ export async function publishMessage(
   event: NostrEvent,
 ): Promise<string> {
   validateMessageEvent(session.pubkey, event);
+  await validateMentionMembers(session, event);
   await session.relay.publish(event);
   return event.id;
 }

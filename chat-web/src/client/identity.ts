@@ -1,5 +1,7 @@
 "use client";
 
+import { mentionTags } from "@/shared/mentions";
+
 import { finalizeEvent, getPublicKey, nip19, nip44 } from "nostr-tools";
 
 import type { NostrEvent } from "@/server/types";
@@ -84,6 +86,7 @@ export function makeMessageEvent(
     parentId?: string | null;
     forum?: boolean;
     imetaTags?: string[][];
+    mentionPubkeys?: string[];
   },
 ): NostrEvent {
   const tags = [["h", input.channelId]];
@@ -100,6 +103,12 @@ export function makeMessageEvent(
     tags.push([...tag]);
   }
   if (credential.authTag) tags.push([...credential.authTag]);
+  tags.push(
+    ...mentionTags(
+      input.mentionPubkeys ?? [],
+      getPublicKey(secretKey(credential.nsec)),
+    ),
+  );
   const kind = input.rootId
     ? input.forum
       ? 45003
@@ -155,7 +164,13 @@ export function makeReactionEvent(
 /** Kind 40003 — replace a message's visible text. */
 export function makeMessageEditEvent(
   credential: BrowserCredential,
-  input: { channelId: string; targetId: string; content: string },
+  input: {
+    channelId: string;
+    targetId: string;
+    content: string;
+    mentionPubkeys?: string[];
+    originalMentionPubkeys?: string[];
+  },
   createdAt = Math.floor(Date.now() / 1_000),
 ): NostrEvent {
   const content = input.content.trim();
@@ -167,6 +182,14 @@ export function makeMessageEditEvent(
       tags: actionTags(credential, [
         ["h", input.channelId],
         ["e", input.targetId],
+        ...(input.mentionPubkeys ? [["buzz:mention-snapshot"]] : []),
+        ...mentionTags(input.mentionPubkeys ?? [], "", "mention"),
+        ...mentionTags(
+          (input.mentionPubkeys ?? []).filter(
+            (key) => !(input.originalMentionPubkeys ?? []).includes(key),
+          ),
+          getPublicKey(secretKey(credential.nsec)),
+        ),
       ]),
       content,
     },

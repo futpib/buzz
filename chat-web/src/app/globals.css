@@ -3286,3 +3286,54 @@ a {
     display: inline-flex;
   }
 }
+
+/* Suggestions occupy their own row so they remain usable above phone keyboards. */
+.mention-suggestions {
+  flex: 0 0 100%;
+  width: 100%;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 6px;
+  background: var(--panel);
+  font-size: 0.875rem;
+}
+.mention-suggestions-heading {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 6px;
+}
+.mention-suggestions [role="listbox"] {
+  max-height: 180px;
+  overflow-y: auto;
+}
+.mention-suggestions [role="option"] {
+  display: flex;
+  width: 100%;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 8px;
+  border: 0;
+  text-align: left;
+  background: transparent;
+  color: inherit;
+  border-radius: 4px;
+}
+.mention-suggestions [role="option"][aria-selected="true"] {
+  background: var(--hover);
+  outline: 1px solid currentColor;
+  outline-offset: -1px;
+}
+.mention-suggestions [role="option"] span {
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+.mention-suggestions small {
+  flex-shrink: 0;
+  opacity: 0.65;
+}
+.mention-suggestions p {
+  margin: 6px;
+}

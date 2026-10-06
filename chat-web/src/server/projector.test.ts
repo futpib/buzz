@@ -328,3 +328,40 @@ test("projects an http profile picture for avatar rendering", () => {
     "https://relay.example/media/avatar.png",
   );
 });
+
+test("mention edit snapshots replace original notification identities including empty removal", () => {
+  const viewer = "a".repeat(64),
+    first = "b".repeat(64),
+    added = "c".repeat(64);
+  const root = event("mention-root", 9, "@First", [
+    ["h", "channel-a"],
+    ["p", first],
+  ]);
+  const project = (events: NostrEvent[]) =>
+    projectTimeline(events, "channel-a", new Map(), viewer)[0];
+  assert.deepEqual(project([root]).mentionPubkeys, [first]);
+  const edit = event(
+    "mention-edit",
+    40003,
+    "@Added",
+    [
+      ["h", "channel-a"],
+      ["e", root.id],
+      ["buzz:mention-snapshot"],
+      ["mention", added],
+      ["p", added],
+    ],
+    viewer,
+    20,
+  );
+  assert.deepEqual(project([root, edit]).mentionPubkeys, [added]);
+  const removed = event(
+    "mention-removed",
+    40003,
+    "none",
+    [["h", "channel-a"], ["e", root.id], ["buzz:mention-snapshot"]],
+    viewer,
+    21,
+  );
+  assert.deepEqual(project([root, edit, removed]).mentionPubkeys, []);
+});

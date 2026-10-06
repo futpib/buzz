@@ -1,3 +1,4 @@
+import { validateMentionMembers } from "@/server/members";
 import "server-only";
 
 import type { AuthSession } from "@/server/auth";
@@ -9,6 +10,7 @@ export async function publishMessageAction(
   event: NostrEvent,
 ): Promise<string> {
   validateMessageActionEvent(session.pubkey, event);
+  await validateMentionMembers(session, event);
   if (event.kind === 40004) {
     const channelId = event.tags.find((tag) => tag[0] === "h")?.[1] ?? "";
     const targetId = event.tags.find((tag) => tag[0] === "e")?.[1] ?? "";
