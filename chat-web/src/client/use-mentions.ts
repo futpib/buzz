@@ -21,6 +21,19 @@ type MembersView = {
 };
 const cached = new Map<string, MembersView>();
 const pending = new Map<string, Promise<MembersView>>();
+const rosterVersions = new Map<string, number>();
+let rosterVersion = 0;
+export function invalidateMentionSuggestions(
+  identity: string,
+  channel: string,
+): void {
+  rosterVersions.set(`${identity}:${channel}`, ++rosterVersion);
+  if (rosterVersions.size > 128)
+    rosterVersions.delete(rosterVersions.keys().next().value as string);
+  cached.delete(`${identity}:${channel}`);
+  pending.delete(`${identity}:${channel}:false`);
+  pending.delete(`${identity}:${channel}:true`);
+}
 
 async function getMembers(
   channel: string,
@@ -28,6 +41,7 @@ async function getMembers(
   fresh: boolean,
 ): Promise<MembersView> {
   const key = `${identity}:${channel}`;
+  const version = rosterVersions.get(key);
   const stored = cached.get(key);
   if (!fresh && stored && Date.now() - stored.generatedAt < 30_000)
     return stored;
@@ -40,6 +54,8 @@ async function getMembers(
       AbortSignal.timeout(30_000),
     )
       .then((view) => {
+        if (rosterVersions.get(key) !== version)
+          return getMembers(channel, identity, true);
         if (
           !cached.has(key) ||
           view.generatedAt >= (cached.get(key)?.generatedAt ?? 0)
@@ -51,7 +67,9 @@ async function getMembers(
         }
         return view;
       })
-      .finally(() => pending.delete(requestKey));
+      .finally(() => {
+        if (pending.get(requestKey) === request) pending.delete(requestKey);
+      });
     pending.set(requestKey, request);
   }
   return request;

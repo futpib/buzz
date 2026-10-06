@@ -27,6 +27,15 @@ class FakeSocket extends EventTarget {
     const frame = JSON.parse(data);
     if (frame[0] === "AUTH")
       queueMicrotask(() => this.frame(["OK", frame[1].id, true, ""]));
+    if (frame[0] === "EVENT")
+      queueMicrotask(() =>
+        this.frame([
+          "OK",
+          frame[1].id,
+          true,
+          'response:{"channel_id":"test-channel"}',
+        ]),
+      );
     if (frame[0] === "REQ") {
       this.requests.push(frame[1]);
       queueMicrotask(() => {
@@ -53,6 +62,14 @@ test("the production relay query finishes immediately when its socket closes", a
     const relay = await RelayConnection.open();
     await relay.authenticate({ id: "proof" } as NostrEvent);
     assert.deepEqual(await relay.query([{ kinds: [9] }]), []);
+    assert.equal(
+      await relay.publishCommand({ id: "dm-command" } as NostrEvent),
+      'response:{"channel_id":"test-channel"}',
+    );
+    assert.equal(
+      await relay.publish({ id: "message" } as NostrEvent),
+      undefined,
+    );
     FakeSocket.latest.requests = [];
     FakeSocket.latest.mode = "hold";
     const concurrent = Array.from({ length: 3 }, () =>

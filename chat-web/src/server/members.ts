@@ -58,6 +58,13 @@ const cache = sharedViewCache<Awaited<ReturnType<typeof loadFresh>>>(
   { maxEntries: 256, staleAfterMs: 30_000 },
 );
 
+export function invalidateMemberViews(
+  session: AuthSession,
+  channelId: string,
+): void {
+  cache.deleteWhere((key) => key === `${session.cacheScope}:${channelId}`);
+}
+
 /** Session-isolated roster projection with stale-while-revalidate reads. */
 export async function loadMembers(
   session: AuthSession,

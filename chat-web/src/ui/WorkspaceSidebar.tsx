@@ -38,6 +38,7 @@ import {
   useWorkspaceNavigation,
 } from "@/client/workspace-navigation";
 import type { ChannelView, ProfileView } from "@/server/types";
+import { ConversationDialog } from "@/ui/ConversationDialog";
 import { Avatar } from "@/ui/Avatar";
 import { SearchDialog } from "@/ui/SearchDialog";
 import { ViewLink } from "@/ui/ViewLink";
@@ -59,6 +60,7 @@ export function WorkspaceSidebar({
 }) {
   const [loggingOut, setLoggingOut] = useState(false);
   const [logoutError, setLogoutError] = useState<string | null>(null);
+  const [conversationOpen, setConversationOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [organizeOpen, setOrganizeOpen] = useState(false);
   const [channelMenu, setChannelMenu] = useState<ChannelMenu | null>(null);
@@ -174,6 +176,9 @@ export function WorkspaceSidebar({
         </button>
       </div>
       <nav className="primary-nav" aria-label="Workspace">
+        <button type="button" onClick={() => setConversationOpen(true)}>
+          <Plus aria-hidden="true" size={18} /> New conversation
+        </button>
         <button
           aria-controls="workspace-search"
           aria-expanded={searchOpen}
@@ -315,6 +320,13 @@ export function WorkspaceSidebar({
           controller={controller}
           notifications={snapshot.notifications}
           sections={snapshot.sections}
+        />
+      ) : null}
+      {conversationOpen ? (
+        <ConversationDialog
+          identity={identity.pubkey}
+          close={() => setConversationOpen(false)}
+          onNavigate={close}
         />
       ) : null}
       {searchOpen ? (

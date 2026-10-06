@@ -136,3 +136,25 @@ publishing the browser-signed `p` tags. Selected identities remain bound across
 profile renames. Edit snapshots preserve reference identities, notify only
 newly added recipients, and remove deleted references. Unbound historical text
 cannot acquire a different recipient merely because a profile name changed.
+
+The sidebar's **New conversation** dialog starts one-to-one or group DMs (up to
+8 other participants), browses and joins open channels, and creates chat or forum
+channels with open/private visibility. The empty workspace exposes the same
+entry point. People can be selected by profile name, exact public key, or npub;
+duplicate names retain separate identity hints. DM open uses the relay's
+canonical participant-set operation, so reopening a conversation reuses it.
+
+**Channel members** opens the roster and settings. Members can invite people,
+edit topic/purpose, and leave. Owners/admins can remove members, change roles,
+rename, edit description/visibility/expiry, and archive/restore. The last owner
+must grant another member ownership before leaving. DM participants are shown
+read-only here. The relay remains authoritative for all permissions and agent
+addition policies; rejected writes retain the form and show the relay error.
+
+Management commands are signed in the browser and schema-checked against the
+requested operation at `/api/conversations`; raw relay snapshots never reach the
+browser. The directory retains stale results during visible revalidation, with
+refresh/retry and focus recovery. Accepted changes invalidate the workspace and
+member projections before navigation. Creation retains its UUID across retry,
+and a lost successful response can recover the existing owned channel. If an
+accepted change outpaces discovery, the UI reports it as saved but still syncing.

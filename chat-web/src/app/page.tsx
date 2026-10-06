@@ -13,5 +13,5 @@ export default async function HomePage() {
   const session = await requireSession();
   const { defaultChannel } = await loadWorkspaceIndex(session);
   if (defaultChannel) redirect(`/channels/${defaultChannel.id}`);
-  return <EmptyWorkspace />;
+  return <EmptyWorkspace identity={session.pubkey} />;
 }

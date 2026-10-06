@@ -242,6 +242,7 @@ export class ViewCache<T> {
 }
 
 type SharedViewName =
+  | "conversation-directory"
   | "mention-members"
   | "workspace-index"
   | "workspace"

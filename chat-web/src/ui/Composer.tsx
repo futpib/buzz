@@ -60,6 +60,7 @@ export function Composer({
   cancelReply,
   onSent,
   forum = false,
+  archived = false,
   expectedPubkey,
   typingParticipants = [],
   typingThreadHeadId = null,
@@ -72,6 +73,7 @@ export function Composer({
   cancelReply?: () => void;
   onSent?: () => void;
   forum?: boolean;
+  archived?: boolean;
   expectedPubkey: string;
   typingParticipants?: TypingParticipant[];
   typingThreadHeadId?: string | null;
@@ -168,7 +170,7 @@ export function Composer({
   };
 
   const selectFiles = (files: FileList | null) => {
-    if (!files?.length) return;
+    if (archived || !files?.length) return;
     const available = Math.max(
       0,
       MAX_ATTACHMENTS_PER_MESSAGE - attachments.length,
@@ -217,6 +219,7 @@ export function Composer({
   const sendTyping = (value: string) => {
     const now = Date.now();
     if (
+      archived ||
       forum ||
       !value.trim() ||
       now - lastTypingSentAt.current < TYPING_SEND_INTERVAL_MS
@@ -249,7 +252,7 @@ export function Composer({
     );
     const attachmentsSettled = readyAttachments.length === attachments.length;
     const message = messageContentWithAttachments(content, readyAttachments);
-    if (!message || !attachmentsSettled || pending) return;
+    if (archived || !message || !attachmentsSettled || pending) return;
     setError(null);
     startTransition(async () => {
       try {
@@ -303,12 +306,16 @@ export function Composer({
     (attachment) => attachment.status !== "ready",
   );
   const canSend =
+    !archived &&
     !pending &&
     !hasUnreadyAttachment &&
     (Boolean(content.trim()) || attachments.length > 0);
 
   return (
     <div className={rootId ? "composer composer-thread" : "composer"}>
+      {rootId && archived ? (
+        <p className="composer-hint">This channel is archived.</p>
+      ) : null}
       <TypingIndicator participants={typingParticipants} />
       {rootId && replyingTo ? (
         <div className="composer-reply-target">
@@ -375,7 +382,7 @@ export function Composer({
           ))}
         </ul>
       ) : null}
-      <MentionSuggestions mentions={mentions} />
+      {!archived ? <MentionSuggestions mentions={mentions} /> : null}
       <div className="composer-box">
         <input
           hidden
@@ -388,7 +395,9 @@ export function Composer({
           aria-label="Attach files"
           className="attach-button"
           disabled={
-            pending || attachments.length >= MAX_ATTACHMENTS_PER_MESSAGE
+            archived ||
+            pending ||
+            attachments.length >= MAX_ATTACHMENTS_PER_MESSAGE
           }
           onClick={() => fileInput.current?.click()}
           title="Attach files"
@@ -398,6 +407,7 @@ export function Composer({
         </button>
         <textarea
           {...mentions.inputProps}
+          readOnly={archived}
           aria-label={rootId ? "Reply to thread" : `Message ${channelName}`}
           disabled={pending}
           onChange={(event) => {
@@ -405,6 +415,7 @@ export function Composer({
             sendTyping(event.target.value);
           }}
           onKeyDown={(event) => {
+            if (archived) return;
             if (mentions.onKeyDown(event)) return;
             if (
               event.key === "Enter" &&
@@ -443,7 +454,9 @@ export function Composer({
       {error ? <p className="composer-error">{error}</p> : null}
       {!rootId ? (
         <p className="composer-hint">
-          Signed in this browser · Enter for a new line · Ctrl/Cmd+Enter to send
+          {archived
+            ? "This channel is archived. Restore it in Channel settings to send messages."
+            : "Signed in this browser · Enter for a new line · Ctrl/Cmd+Enter to send"}
         </p>
       ) : null}
     </div>

@@ -48,6 +48,7 @@ import type {
   TypingIndicatorView,
   WorkspaceView,
 } from "@/server/types";
+import { ConversationDialog } from "@/ui/ConversationDialog";
 import { Composer } from "@/ui/Composer";
 import { ChannelPinsContext, PinnedMessages } from "@/ui/PinnedMessages";
 import { MessageRow } from "@/ui/MessageRow";
@@ -73,6 +74,7 @@ export function WorkspaceShell({
   const [timeline, setTimeline] = useState(initial.timeline);
   const [thread, setThread] = useState(initial.thread);
   const [liveState, setLiveState] = useState<LiveState>("connecting");
+  const [membersOpen, setMembersOpen] = useState(false);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [replyTarget, setReplyTarget] = useState<ReplyTarget | null>(null);
   const [preferredThreadPanelWidth, setPreferredThreadPanelWidth] = useState<
@@ -750,14 +752,22 @@ export function WorkspaceShell({
               </span>
               <button
                 aria-label="Channel members"
-                disabled
-                title="Channel members are not available yet"
+                onClick={() => setMembersOpen(true)}
+                title="Channel members and settings"
                 type="button"
               >
                 <Users aria-hidden="true" size={18} />
               </button>
             </div>
           </header>
+          {membersOpen ? (
+            <ConversationDialog
+              key={initial.selectedChannel.id}
+              identity={initial.identity.pubkey}
+              channelId={initial.selectedChannel.id}
+              close={() => setMembersOpen(false)}
+            />
+          ) : null}
 
           <div
             className="timeline"
@@ -842,6 +852,7 @@ export function WorkspaceShell({
             channelName={initial.selectedChannel.name}
             expectedPubkey={initial.identity.pubkey}
             forum={forum}
+            archived={initial.selectedChannel.archived}
             typingParticipants={typingParticipants.channel}
           />
         </section>
@@ -1028,6 +1039,7 @@ export function WorkspaceShell({
               channelName={initial.selectedChannel.name}
               expectedPubkey={initial.identity.pubkey}
               forum={forum}
+              archived={initial.selectedChannel.archived}
               parentId={replyTarget?.id ?? thread.rootId}
               replyingTo={replyTarget?.name ?? null}
               cancelReply={() => setReplyTarget(null)}

@@ -452,6 +452,15 @@ export async function loadWorkspace(
   return { ...result.value, cacheState: result.state };
 }
 
+/** Membership writes must not serve pre-write channel lists or retained private views. */
+export function invalidateConversationViews(session: AuthSession): void {
+  const prefix = `${session.cacheScope}:`;
+  workspaceIndexCache.deleteWhere((key) => key === session.cacheScope);
+  workspaceCache.deleteWhere((key) => key.startsWith(prefix));
+  threadsCache.deleteWhere((key) => key === session.cacheScope);
+  historyCache.deleteWhere((key) => key.startsWith(prefix));
+}
+
 export function markWorkspaceViewsStale(
   session: AuthSession,
   channelId?: string,

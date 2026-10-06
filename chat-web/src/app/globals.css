@@ -3353,3 +3353,177 @@ a {
     transform: none;
   }
 }
+
+.conversation-backdrop {
+  z-index: 140;
+  padding: 16px;
+}
+.conversation-dialog {
+  width: min(620px, 100%);
+  max-height: calc(100dvh - 32px);
+  overflow-y: auto;
+  background: var(--panel);
+  color: var(--ink);
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  padding: 20px;
+  box-shadow: 0 20px 80px #0005;
+}
+.conversation-dialog > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.conversation-dialog h2 {
+  font-size: 20px;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.conversation-dialog button {
+  cursor: pointer;
+}
+.conversation-dialog button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.conversation-dialog button,
+.conversation-dialog input,
+.conversation-dialog select,
+.conversation-dialog textarea {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 9px 11px;
+  background: var(--panel);
+  color: inherit;
+  font: inherit;
+}
+.conversation-dialog label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 12px 0;
+  font-size: 14px;
+}
+.conversation-dialog textarea {
+  min-height: 64px;
+  resize: vertical;
+}
+.conversation-dialog input,
+.conversation-dialog textarea,
+.conversation-dialog select {
+  min-width: 0;
+  width: 100%;
+}
+.conversation-tabs {
+  display: flex;
+  gap: 6px;
+  margin-top: 16px;
+}
+.conversation-tabs button {
+  flex: 1;
+  font-size: 13px;
+}
+.conversation-tabs [aria-pressed="true"],
+.conversation-list [aria-pressed="true"] {
+  background: var(--accent);
+  color: white;
+}
+.conversation-status {
+  font-size: 13px;
+}
+.conversation-status > span {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+  margin: 12px 8px 0 0;
+}
+.conversation-dialog .conversation-refresh {
+  margin-top: 10px;
+  font-size: 12px;
+}
+.conversation-list {
+  list-style: none;
+  padding: 0;
+  margin: 12px 0;
+}
+.conversation-list li {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--line);
+}
+.conversation-list li > div {
+  flex: 1;
+  min-width: 0;
+}
+.conversation-list strong {
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+.conversation-list small {
+  display: block;
+  font-size: 12px;
+  opacity: 0.7;
+  overflow-wrap: anywhere;
+}
+.conversation-list button {
+  flex-shrink: 0;
+  font-size: 12px;
+}
+.conversation-list select {
+  width: auto;
+  max-width: 90px;
+  font-size: 12px;
+}
+.conversation-person {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.conversation-person .avatar {
+  flex-shrink: 0;
+  width: 30px;
+  height: 30px;
+}
+.conversation-selected {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.conversation-dialog .primary-button {
+  margin-top: 12px;
+  background: var(--accent);
+  color: white;
+}
+.conversation-danger {
+  border-top: 1px solid var(--line);
+  margin-top: 20px;
+  padding-top: 16px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.conversation-danger small {
+  width: 100%;
+}
+@media (max-width: 600px) {
+  .conversation-backdrop {
+    padding: 8px;
+  }
+  .conversation-dialog {
+    padding: 14px;
+    max-height: calc(100dvh - 16px);
+  }
+  .conversation-list li {
+    flex-wrap: wrap;
+  }
+  .conversation-list li > .conversation-person {
+    min-width: 170px;
+  }
+}
+
+.conversation-dialog form > small {
+  display: block;
+}

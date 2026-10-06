@@ -135,3 +135,21 @@ be observed in both the live timeline and search before the pass is reported.
   pinned-message dialog, and follow its exact branch/target link. Repeat at
   390x844, checking dialog bounds and 44px Open controls. Remove the test pin,
   reload, and verify removal persists. Other members' pins must remain intact.
+
+## Conversation management
+
+- On desktop and phone, start a DM and reopen the same participant set; require
+  the same canonical channel ID. Select two same-name people for a group DM and
+  verify their distinct `p` tags and participant roster.
+- From an identity with no channels, use New conversation. Browse available open
+  channels without exposing non-member private channels or other people's DMs.
+- Create both chat and forum channels. Join an open channel, leave it, and verify
+  immediate sidebar membership and a fresh roster. Test private-channel creation.
+- Edit settings, add/remove a member, change roles, archive/restore, and check
+  last-owner leave protection. Non-admins may edit topic/purpose but not the
+  privileged settings. Relay rejection must preserve the form and show its error.
+- Drop the HTTP response after a successful create, then retry; require exactly
+  one channel creation and the original channel UUID. Expired sessions must
+  recover before writes. Failed directory refreshes keep existing rows and retry.
+- Check modal focus containment, Escape/focus restoration, mobile overflow, and
+  that newly added members immediately appear in mention suggestions.

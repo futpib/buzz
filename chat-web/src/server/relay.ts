@@ -233,6 +233,10 @@ export class RelayConnection {
   }
 
   async publish(event: NostrEvent): Promise<void> {
+    await this.publishCommand(event);
+  }
+
+  async publishCommand(event: NostrEvent): Promise<string> {
     this.assertReady();
     const response = this.waitForFrame(
       (frame) => frame[0] === "OK" && frame[1] === event.id,
@@ -243,6 +247,7 @@ export class RelayConnection {
     if (frame[2] !== true) {
       throw new Error(String(frame[3] ?? "Buzz relay rejected the message"));
     }
+    return String(frame[3] ?? "");
   }
 
   subscribe(

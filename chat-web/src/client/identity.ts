@@ -127,6 +127,21 @@ export function makeMessageEvent(
   ) as NostrEvent;
 }
 
+export function makeConversationEvent(
+  credential: BrowserCredential,
+  command: { kind: number; tags: string[][] },
+): NostrEvent {
+  return finalizeEvent(
+    {
+      ...command,
+      tags: actionTags(credential, command.tags),
+      content: "",
+      created_at: Math.floor(Date.now() / 1000),
+    },
+    secretKey(credential.nsec),
+  ) as NostrEvent;
+}
+
 function actionTags(
   credential: BrowserCredential,
   tags: string[][],
