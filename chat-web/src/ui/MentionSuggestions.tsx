@@ -1,6 +1,7 @@
 "use client";
 
 import type { useMentions } from "@/client/use-mentions";
+import { Avatar } from "@/ui/Avatar";
 
 /** Accessible keyboard and pointer suggestions, shared by composers and edits. */
 export function MentionSuggestions({
@@ -40,7 +41,8 @@ export function MentionSuggestions({
             onClick={() => mentions.pick(member)}
             title={member.pubkey}
           >
-            <span>{member.name}</span>
+            <Avatar profile={member} small />
+            <span className="mention-option-name">{member.name}</span>
             <small>
               {member.pubkey.slice(0, 8)}…{member.pubkey.slice(-4)}
             </small>

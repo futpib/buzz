@@ -3,6 +3,7 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import type { FocusEvent, KeyboardEvent, RefObject } from "react";
 import { fetchView } from "@/client/fetch-view";
+import type { ProfileView } from "@/server/types";
 import {
   historicalMentions,
   mentionLabel,
@@ -14,7 +15,7 @@ import {
 } from "@/shared/mentions";
 
 type MembersView = {
-  members: MentionMember[];
+  members: ProfileView[];
   generatedAt: number;
   cacheState: string;
 };

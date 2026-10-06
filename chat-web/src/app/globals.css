@@ -3326,7 +3326,13 @@ a {
   outline: 1px solid currentColor;
   outline-offset: -1px;
 }
-.mention-suggestions [role="option"] span {
+.mention-suggestions .avatar {
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+}
+.mention-suggestions .mention-option-name {
+  flex: 1;
   overflow-wrap: anywhere;
   min-width: 0;
 }
