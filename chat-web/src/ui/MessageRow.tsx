@@ -15,9 +15,6 @@ import { MessageBody } from "@/ui/MessageBody";
 import { MessageContextMenu } from "@/ui/MessageContextMenu";
 import { ViewLink } from "@/ui/ViewLink";
 
-const LONG_PRESS_MS = 500;
-const LONG_PRESS_MOVE_PX = 12;
-
 type MenuState = { x: number; y: number };
 
 function MessageTime({ timestamp }: { timestamp: number }) {
@@ -59,13 +56,15 @@ export function MessageRow({
   const [menu, setMenu] = useState<MenuState | null>(null);
   const [isUnread, setIsUnread] = useState(false);
   const [isFollowing, setIsFollowing] = useState(false);
+  const lastPointerType = useRef("");
   const longPress = useRef<{
-    pointerId: number;
+    timer: ReturnType<typeof setTimeout>;
     x: number;
     y: number;
-    timer: number;
   } | null>(null);
-  const suppressClick = useRef(false);
+  const consumedPress = useRef<{ x: number; y: number; until: number } | null>(
+    null,
+  );
   const threadFollowId = message.threadRootId ?? message.id;
 
   useEffect(() => {
@@ -74,13 +73,32 @@ export function MessageRow({
   }, [expectedPubkey, message.id, threadFollowId]);
 
   const cancelLongPress = () => {
-    if (longPress.current) window.clearTimeout(longPress.current.timer);
+    if (longPress.current) clearTimeout(longPress.current.timer);
     longPress.current = null;
   };
+  useEffect(
+    () => () => {
+      if (longPress.current) clearTimeout(longPress.current.timer);
+    },
+    [],
+  );
+  const isBackground = (target: EventTarget, row: HTMLElement) =>
+    target === row ||
+    (target instanceof Element &&
+      target.classList.contains("message-content") &&
+      target.parentElement === row);
   const openMenu = (x: number, y: number) => {
     cancelLongPress();
     setMenu({ x, y });
   };
+  const shouldKeepNativeContextMenu = (target: EventTarget) =>
+    (target instanceof Element &&
+      Boolean(
+        target.closest(
+          "a, button, input, textarea, select, [contenteditable=true]",
+        ),
+      )) ||
+    window.getSelection()?.isCollapsed === false;
   const closeMenu = () => {
     setMenu(null);
   };
@@ -90,13 +108,71 @@ export function MessageRow({
       aria-label={`Message from ${message.author.name}`}
       className={`${compact ? "message-row message-row-compact" : "message-row"}${highlighted ? " message-row-highlighted" : ""}${isUnread ? " message-row-unread" : ""}`}
       data-message-id={message.id}
+      onPointerDownCapture={(event) => {
+        lastPointerType.current = event.pointerType;
+        cancelLongPress();
+        consumedPress.current = null;
+        if (
+          (event.pointerType !== "touch" && event.pointerType !== "pen") ||
+          !event.isPrimary ||
+          !isBackground(event.target, event.currentTarget) ||
+          shouldKeepNativeContextMenu(event.target)
+        )
+          return;
+        const { clientX: x, clientY: y } = event;
+        longPress.current = {
+          x,
+          y,
+          timer: setTimeout(() => {
+            if (window.getSelection()?.isCollapsed === false) return;
+            consumedPress.current = { x, y, until: Number.POSITIVE_INFINITY };
+            openMenu(x, y);
+          }, 500),
+        };
+      }}
+      onPointerMoveCapture={(event) => {
+        const press = longPress.current;
+        if (
+          press &&
+          Math.hypot(event.clientX - press.x, event.clientY - press.y) > 12
+        )
+          cancelLongPress();
+      }}
+      onPointerUpCapture={() => {
+        cancelLongPress();
+        if (consumedPress.current)
+          consumedPress.current.until = Date.now() + 1000;
+      }}
+      onPointerCancel={cancelLongPress}
       onClickCapture={(event) => {
-        if (!suppressClick.current) return;
-        suppressClick.current = false;
-        event.preventDefault();
-        event.stopPropagation();
+        const press = consumedPress.current;
+        consumedPress.current = null;
+        if (
+          press &&
+          Date.now() < press.until &&
+          (isBackground(event.target, event.currentTarget) ||
+            (event.target instanceof Element &&
+              event.target.closest(
+                ".message-menu-backdrop, .message-menu-dialog",
+              ))) &&
+          Math.hypot(event.clientX - press.x, event.clientY - press.y) <= 12
+        ) {
+          event.preventDefault();
+          event.stopPropagation();
+        }
       }}
       onContextMenu={(event) => {
+        const pointerType =
+          (event.nativeEvent as PointerEvent).pointerType ||
+          lastPointerType.current;
+        if (
+          shouldKeepNativeContextMenu(event.target) ||
+          ((pointerType === "touch" ||
+            pointerType === "pen" ||
+            window.matchMedia("(hover: none), (pointer: coarse)").matches) &&
+            !isBackground(event.target, event.currentTarget))
+        )
+          return;
         event.preventDefault();
         openMenu(event.clientX, event.clientY);
       }}
@@ -107,41 +183,11 @@ export function MessageRow({
         ) {
           return;
         }
+        if (shouldKeepNativeContextMenu(event.target)) return;
         event.preventDefault();
         const rect = event.currentTarget.getBoundingClientRect();
         openMenu(rect.right, rect.top + Math.min(rect.height / 2, 36));
       }}
-      onPointerCancel={cancelLongPress}
-      onPointerDownCapture={(event) => {
-        if (
-          (event.pointerType !== "touch" && event.pointerType !== "pen") ||
-          !event.isPrimary
-        ) {
-          return;
-        }
-        cancelLongPress();
-        const pointerId = event.pointerId;
-        const x = event.clientX;
-        const y = event.clientY;
-        const timer = window.setTimeout(() => {
-          if (longPress.current?.pointerId !== pointerId) return;
-          suppressClick.current = true;
-          navigator.vibrate?.(12);
-          openMenu(x, y);
-        }, LONG_PRESS_MS);
-        longPress.current = { pointerId, x, y, timer };
-      }}
-      onPointerMoveCapture={(event) => {
-        const press = longPress.current;
-        if (!press || press.pointerId !== event.pointerId) return;
-        if (
-          Math.hypot(event.clientX - press.x, event.clientY - press.y) >
-          LONG_PRESS_MOVE_PX
-        ) {
-          cancelLongPress();
-        }
-      }}
-      onPointerUpCapture={cancelLongPress}
     >
       <Avatar profile={message.author} small={compact} />
       <div className="message-content">

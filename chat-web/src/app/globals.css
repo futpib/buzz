@@ -3343,3 +3343,13 @@ a {
 .mention-suggestions p {
   margin: 6px;
 }
+
+/* Keep explicit message actions available on touch screens, including tablets. */
+@media (hover: none), (pointer: coarse) {
+  .message-menu-trigger {
+    opacity: 0.68;
+    pointer-events: auto;
+    box-shadow: none;
+    transform: none;
+  }
+}
