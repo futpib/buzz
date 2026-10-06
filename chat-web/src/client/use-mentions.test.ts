@@ -29,7 +29,7 @@ test("picker insertion settles the caret synchronously and preserves intentional
     attachEvent: { value: () => undefined },
     detachEvent: { value: () => undefined },
   });
-  let controller: ReturnType<typeof useMentions>;
+  let controller!: ReturnType<typeof useMentions>;
   function Harness() {
     const [content, setContent] = useState("@Al trailing");
     const textarea = useRef<HTMLTextAreaElement>(null);
