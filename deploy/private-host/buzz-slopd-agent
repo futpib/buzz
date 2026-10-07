@@ -111,7 +111,7 @@ else
 
   slopd_socket="${SLOPD_SOCKET:-${XDG_RUNTIME_DIR:?XDG_RUNTIME_DIR is required}/slopd-buzz-agent/slopd.sock}"
   agent_command="${SLOPD_ACP_BIN}"
-  agent_args="--socket,${slopd_socket},--account,${BUZZ_AGENT_ACCOUNT},--backend,${BUZZ_AGENT_BACKEND},--forward-buzz-env"
+  agent_args="--socket,${slopd_socket},--account,${BUZZ_AGENT_ACCOUNT},--backend,${BUZZ_AGENT_BACKEND},--inherit-env,BUZZ_PRIVATE_KEY,--inherit-env,BUZZ_RELAY_URL,--inherit-env,BUZZ_AUTH_TAG,--inherit-env,BUZZ_API_TOKEN"
 fi
 
 buzz_args=(
