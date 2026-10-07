@@ -705,10 +705,14 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 56);
+        assert_eq!(migrations.len(), 57);
         assert!(migrations
             .windows(2)
             .all(|pair| pair[0].version < pair[1].version));
+        assert!(migrations[55]
+            .sql
+            .as_str()
+            .contains("CREATE TABLE personal_read_accounts"));
         assert_eq!(migrations[48].version, 49);
         assert_eq!(migrations[49].version, 50);
         assert_eq!(migrations[50].version, 51);
@@ -717,6 +721,7 @@ mod postgres_tests {
         assert_eq!(migrations[53].version, 54);
         assert_eq!(migrations[54].version, 55);
         assert_eq!(migrations[55].version, 56);
+        assert_eq!(migrations[56].version, 57);
         assert!(migrations[48]
             .sql
             .as_str()
@@ -734,7 +739,7 @@ mod postgres_tests {
             .sql
             .as_str()
             .contains("community_deletion_requests_owner_quota_reservations"));
-        assert!(migrations[55]
+        assert!(migrations[56]
             .sql
             .as_str()
             .contains("idx_relay_admin_actions_direct_request"));
@@ -2062,6 +2067,22 @@ mod postgres_tests {
         let mut expected_fences = migration.fence_attachments.clone();
         expected_fences.remove("product_feedback");
         expected_fences.remove("rate_limit_violations");
+        let personal = surface(
+            MIGRATOR
+                .iter()
+                .find(|m| m.version == 56)
+                .expect("personal read migration")
+                .sql
+                .as_ref(),
+        );
+        for (table, definition) in personal.tables {
+            assert_eq!(
+                schema.tables.get(&table),
+                Some(&definition),
+                "personal read table {table} differs"
+            );
+        }
+        expected_fences.extend(personal.fence_attachments);
         expected_fences.extend(["artifact_heads", "artifact_revisions"].map(str::to_owned));
         assert_eq!(
             expected_fences, schema.fence_attachments,
@@ -3021,19 +3042,19 @@ mod postgres_tests {
             .expect("deletion catalog validates after migration 0044");
     }
 
-    /// Migration 0056's `relay_admin_actions_direct_shape` rejects a direct
+    /// Migration 0057's `relay_admin_actions_direct_shape` rejects a direct
     /// timeout carrying only one of duration and expiry on the migrated
     /// schema. The desired-state (pgschema + reconcile) path is covered by
     /// `direct_timeout_shape_check_holds_on_desired_state_schema` in buzz-relay.
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn migration_0056_rejects_half_filled_direct_timeout() {
+    async fn migration_0057_rejects_half_filled_direct_timeout() {
         let pool = connect_test_pool().await;
         reset_public_schema(&pool).await;
         MIGRATOR
-            .run_to(56, &pool)
+            .run_to(57, &pool)
             .await
-            .expect("apply migrations 1-56");
+            .expect("apply migrations 1-57");
         for (secs, until) in [(Some(60i64), None), (None, Some(chrono::Utc::now()))] {
             let err = sqlx::query(
                 "INSERT INTO relay_admin_actions (report_community_id, request_id, actor_pubkey, \

@@ -2,7 +2,6 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../channels_provider.dart';
 import '../../../shared/read_state/read_state_provider.dart';
-import '../../../shared/read_state/read_state_format.dart';
 import 'observed_unread_event.dart';
 
 class UnreadBadgeState {
@@ -54,11 +53,8 @@ final unreadBadgeProvider = Provider<UnreadBadgeState>((ref) {
         int? readAtForObservedEvent(ObservedUnreadEvent event) =>
             observedUnreadEventReadAt(
               event,
-              channelReadAt,
-              (rootId) =>
-                  readState.effectiveTimestamp(threadContextKey(rootId)),
-              (messageId) =>
-                  readState.effectiveTimestamp(msgContextKey(messageId)),
+              channel.id,
+              readState.effectiveTimestamp,
             );
 
         final unreadCount = countUnreadObservedEvents(
