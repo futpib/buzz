@@ -110,8 +110,28 @@ else
   : "${BUZZ_AGENT_BACKEND:?BUZZ_AGENT_BACKEND is required}"
 
   slopd_socket="${SLOPD_SOCKET:-${XDG_RUNTIME_DIR:?XDG_RUNTIME_DIR is required}/slopd-buzz-agent/slopd.sock}"
+  session_scope="${BUZZ_AGENT_SESSION_SCOPE:-${public_key}}"
+  idle_timeout="${BUZZ_AGENT_IDLE_TIMEOUT_SECS:-3600}"
+  session_retention="${BUZZ_AGENT_SESSION_RETENTION_SECS:-7776000}"
+  lease_ttl="${BUZZ_AGENT_LEASE_TTL_SECS:-60}"
+  handoff_grace="${BUZZ_AGENT_HANDOFF_GRACE_SECS:-300}"
+  if [[ -z "${session_scope}" || "${session_scope}" == *,* ]]; then
+    echo "buzz-slopd-agent: BUZZ_AGENT_SESSION_SCOPE must be non-empty and contain no commas" >&2
+    exit 1
+  fi
+  for value_name in idle_timeout session_retention lease_ttl handoff_grace; do
+    value="${!value_name}"
+    if [[ ! "${value}" =~ ^[0-9]+$ ]]; then
+      echo "buzz-slopd-agent: ${value_name} must be a non-negative integer" >&2
+      exit 1
+    fi
+  done
+  if [[ "${lease_ttl}" == 0 ]]; then
+    echo "buzz-slopd-agent: lease_ttl must be greater than zero" >&2
+    exit 1
+  fi
   agent_command="${SLOPD_ACP_BIN}"
-  agent_args="--socket,${slopd_socket},--account,${BUZZ_AGENT_ACCOUNT},--backend,${BUZZ_AGENT_BACKEND},--inherit-env,BUZZ_PRIVATE_KEY,--inherit-env,BUZZ_RELAY_URL,--inherit-env,BUZZ_AUTH_TAG,--inherit-env,BUZZ_API_TOKEN"
+  agent_args="--socket,${slopd_socket},--account,${BUZZ_AGENT_ACCOUNT},--backend,${BUZZ_AGENT_BACKEND},--session-scope,${session_scope},--idle-timeout,${idle_timeout},--session-retention,${session_retention},--lease-ttl,${lease_ttl},--handoff-grace,${handoff_grace},--orphan-policy,kill,--inherit-env,BUZZ_PRIVATE_KEY,--inherit-env,BUZZ_RELAY_URL,--inherit-env,BUZZ_AUTH_TAG,--inherit-env,BUZZ_API_TOKEN"
 fi
 
 buzz_args=(

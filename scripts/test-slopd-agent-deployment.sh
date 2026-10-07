@@ -177,7 +177,7 @@ for expected in \
   '--relay-url wss://relay.example.test' \
   '--relay-observer' \
   '--agent-command /opt/slopd-acp' \
-  "--agent-args=--socket,${tmp_dir}/slopd-buzz-agent/slopd.sock,--account,codex,--backend,codex,--inherit-env,BUZZ_PRIVATE_KEY,--inherit-env,BUZZ_RELAY_URL,--inherit-env,BUZZ_AUTH_TAG,--inherit-env,BUZZ_API_TOKEN" \
+  "--agent-args=--socket,${tmp_dir}/slopd-buzz-agent/slopd.sock,--account,codex,--backend,codex,--session-scope,aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,--idle-timeout,3600,--session-retention,7776000,--lease-ttl,60,--handoff-grace,300,--orphan-policy,kill,--inherit-env,BUZZ_PRIVATE_KEY,--inherit-env,BUZZ_RELAY_URL,--inherit-env,BUZZ_AUTH_TAG,--inherit-env,BUZZ_API_TOKEN" \
   '--respond-to owner-only' \
   '--session-title slopd codex'
 do

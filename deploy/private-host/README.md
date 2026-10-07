@@ -129,6 +129,20 @@ diagnostics, not the permanent agents. The tracked launcher defaults channel
 messages to isolated per-thread ACP sessions; set `BUZZ_ACP_SESSION_POLICY` to
 `channel` only when channel-wide session reuse is intentional.
 
+The launcher uses each bridge identity's public key as slopd-acp's stable
+session scope, so changing the configured slopd account or backend does not
+strand its sessions. Ready panes idle for an hour are evicted to resumable
+sessions by default, and closed sessions remain discoverable for 90 days.
+`BUZZ_AGENT_IDLE_TIMEOUT_SECS`, `BUZZ_AGENT_SESSION_RETENTION_SECS`,
+`BUZZ_AGENT_LEASE_TTL_SECS`, and `BUZZ_AGENT_HANDOFF_GRACE_SECS` override those
+policies. To retire a bridge and close its resident panes instead of handing
+them to a replacement, send `SIGUSR1` to the whole service control group before
+disabling it:
+
+```bash
+systemctl --user kill --kill-whom=all --signal=SIGUSR1 UNIT.service
+```
+
 To authorize the four remote agents with the human Buzz owner key, run:
 
 ```bash
