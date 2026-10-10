@@ -70,7 +70,7 @@ void threadReplyRefreshTests() {
       open(navigator);
       await tester.pumpAndSettle();
       expect(find.text('1 reply'), findsOneWidget);
-      container.invalidate(threadPageRepliesProvider(args));
+      container.invalidate(threadWindowProvider(args));
       await tester.pump();
       expect(find.text('1 reply'), findsOneWidget);
       refresh.completeError(Exception('Transient refresh failure'));
@@ -123,7 +123,7 @@ void threadReplyRefreshTests() {
     );
     open(navigator);
     await tester.pumpAndSettle();
-    container.invalidate(threadPageRepliesProvider(args));
+    container.invalidate(threadWindowProvider(args));
     await tester.pump();
     refresh.completeError(Exception('Refresh failed'));
     await tester.pumpAndSettle();
